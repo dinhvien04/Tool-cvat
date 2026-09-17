@@ -87,6 +87,67 @@ def handler(context, event):
             status_code=400,
         )
 
+    # -------------------------------------------------------------------------
+    # Dual-Dispatch: Check if incoming request is a CVAT Webhook event
+    # -------------------------------------------------------------------------
+    headers = getattr(event, "headers", {}) or {}
+    event_type = data.get("event") or headers.get("X-CVAT-Event") or headers.get("x-cvat-event")
+    if event_type:
+        context.logger.info(f"Received CVAT Webhook event: {event_type}")
+        # Webhook signature verification if secret is configured
+        webhook_secret = os.getenv("CVAT_WEBHOOK_SECRET")
+        sig_header = headers.get("X-CVAT-Signature") or headers.get("x-cvat-signature") or headers.get("X-Signature-256")
+        if webhook_secret:
+            from app.cvat_sync import verify_cvat_webhook_signature
+            raw_bytes = raw_body if isinstance(raw_body, bytes) else str(raw_body).encode("utf-8")
+            if not verify_cvat_webhook_signature(raw_bytes, sig_header, webhook_secret):
+                context.logger.warning("CVAT Webhook signature verification failed.")
+                return context.Response(
+                    body=json.dumps({"error": "Invalid webhook signature"}),
+                    headers={},
+                    content_type="application/json",
+                    status_code=401,
+                )
+
+        # Process job/task completion events
+        if "job" in event_type or "task" in event_type:
+            job_info = data.get("job", {})
+            job_id = job_info.get("id") or data.get("job_id")
+            state = job_info.get("state") or data.get("state")
+            stage = job_info.get("stage") or data.get("stage")
+
+            # Trigger sync when job is completed or under validation/acceptance
+            if job_id and (state == "completed" or stage in ("acceptance", "validation")):
+                try:
+                    from app.cvat_sync import sync_job_feedback
+                    cvat_url = os.getenv("CVAT_URL", "http://cvat_server:8080")
+                    token = os.getenv("CVAT_TOKEN")
+                    report = sync_job_feedback(job_id=int(job_id), cvat_url=cvat_url, token=token)
+                    return context.Response(
+                        body=json.dumps({"status": "synced", "report": report.to_dict()}),
+                        headers={},
+                        content_type="application/json",
+                        status_code=200,
+                    )
+                except Exception as e:
+                    context.logger.error(f"Error during CVAT feedback sync: {e}")
+                    return context.Response(
+                        body=json.dumps({"error": f"Feedback sync failed: {str(e)}"}),
+                        headers={},
+                        content_type="application/json",
+                        status_code=500,
+                    )
+
+        return context.Response(
+            body=json.dumps({"status": "ignored", "event": event_type}),
+            headers={},
+            content_type="application/json",
+            status_code=200,
+        )
+
+    # -------------------------------------------------------------------------
+    # Detector Inference Flow
+    # -------------------------------------------------------------------------
     # Extract base64 image
     image_b64 = data.get("image")
     if not image_b64:

@@ -303,7 +303,115 @@ Sau khi hoàn tất triển khai, người dùng có thể thực hiện gán nh
 
 ---
 
-## 8. Quản Trị Hệ Thống & Khắc Phục Sự Cố (Troubleshooting)
+## 8. Cơ Chế Tự Thích Ứng Từ Sửa Đổi Của Con Người (Correction-Aware Memory & Adaptive Prompting)
+
+Bộ dò 31 nhãn chuẩn (`ninerouter-vision-31`) được tích hợp cơ chế tự thích ứng trực tiếp từ các chỉnh sửa thực tế của chuyên viên gán nhãn trên giao diện CVAT, giúp chất lượng phát hiện ngày càng chuẩn xác theo từng dự án mà **không cần huấn luyện lại mô hình (retraining)** và **không đòi hỏi GPU/thư viện ML nặng nề**.
+
+```
+                +-----------------------------------------------------+
+                |                    CVAT WEB UI                      |
+                |  (Chuyên viên gán nhãn review & sửa đổi hình học)   |
+                +-----------------------------------------------------+
+                                           |
+                                           | [Webhook: update:job]
+                                           | Hoặc CLI: main.py feedback-sync
+                                           v
++-----------------------+       +-------------------------------------+
+| ninerouter-vision-31  |       |        app/cvat_sync.py             |
+| Dual-Dispatch Handler | ----> |  - HMAC-SHA256 Webhook Verification |
++-----------------------+       |  - Tải ảnh frame & Annotation JSON  |
+                                +-------------------------------------+
+                                           |
+                                           v
+                                +-------------------------------------+
+                                |         app/feedback.py             |
+                                |  - SHA-256 Image Hash reconciliation|
+                                |  - CorrectionDiffEngine (Bipartite) |
+                                |  - Phân loại 9 dạng sửa đổi         |
+                                |  - Lưu .tool-cvat/feedback.sqlite3  |
+                                |  - Tự động sinh quy tắc (SQL count) |
+                                +-------------------------------------+
+                                           |
+                                           v
+                                +-------------------------------------+
+                                |        app/retrieval.py             |
+                                |  - Trích xuất 2-4 mẫu ít lỗi nhất   |
+                                |  - Bơm quy tắc vào Vision Prompt    |
+                                +-------------------------------------+
+                                           |
+                                           v
+                                +-------------------------------------+
+                                |        app/service.py               |
+                                |  (Suy luận lần sau thông minh hơn)  |
+                                +-------------------------------------+
+```
+
+### 8.1 Vân tay định danh ảnh SHA-256 (`image_hash`)
+Do CVAT Serverless Lambda Manager chỉ gửi payload ẩn danh dạng `{"image": "<base64>", "threshold": 0.5}` mà không kèm `task_id` hay `job_id`, hệ thống sử dụng thuật toán băm SHA-256 trên chuỗi byte ảnh thô (`compute_image_hash`).
+- Khi chạy suy luận ban đầu, kết quả AI được lưu vào bảng `predictions` với khóa chính là `image_hash`.
+- Khi người dùng đồng bộ công việc (Sync Job), ảnh từng frame được tải về và băm lại, cho phép hệ thống đối chiếu chính xác 100% giữa dự đoán ban đầu của AI và kết quả chỉnh sửa cuối cùng của con người.
+
+### 8.2 Động cơ so khớp song ánh IoU (CorrectionDiffEngine) & 9 dạng chỉnh sửa
+Để tránh lỗi phân loại nhầm (ví dụ: AI đoán `car`, người dùng sửa nhãn thành `truck` tại cùng vị trí nếu so khớp theo tên nhãn sẽ bị tính thành 1 lần xóa xe + 1 lần thêm xe tải), `CorrectionDiffEngine` tính ma trận chỉ số giao trên hợp (IoU) hình học trước:
+1. **`RELABEL`**: Hai hình có IoU >= 0.60 nhưng mang nhãn khác nhau.
+2. **`BOX_MOVE`**: Cùng nhãn, hộp chữ nhật bounding box có tâm dịch chuyển > 5px.
+3. **`BOX_RESIZE`**: Cùng nhãn, kích thước chiều rộng hoặc chiều cao thay đổi > 15%.
+4. **`MASK_EDIT`**: Cùng nhãn, đường bao đa giác mặt nạ thực thể (`mask`) được chỉnh sửa.
+5. **`REGION_EDIT`**: Đường bao mặt nạ vùng ngữ nghĩa (như `road`, `sky`, `sidewalk`) được chỉnh sửa.
+6. **`LANE_EDIT`**: Đường tim hoặc đa giác của vạch kẻ đường được nắn lại.
+7. **`DELETE_FALSE_POSITIVE`**: Đối tượng AI sinh ra nhưng người dùng xóa bỏ hoàn toàn (báo động giả).
+8. **`ADD_MISSING`**: Đối tượng người dùng vẽ thêm mới mà AI bỏ sót.
+9. **`NO_CHANGE`**: Đối tượng AI sinh ra được người dùng giữ nguyên vẹn (IoU >= 0.92, không dịch chuyển tâm/kích thước).
+
+### 8.3 Tự động suy diễn quy tắc (Rule Derivation) & Lưu trữ SQLite
+- Dữ liệu được lưu trữ trong cơ sở dữ liệu SQLite cục bộ tại `.tool-cvat/feedback.sqlite3` (được đưa vào `.gitignore`, độc lập với các chu kỳ rebuild của container Docker).
+- **Hạn mức lưu trữ an toàn (Storage Quotas)**:
+  - Tối đa 50MB dung lượng bộ nhớ đệm hình ảnh crop.
+  - Tối đa 150 ảnh crop tổng cộng, mỗi nhãn không vượt quá 10 crop.
+  - Kích thước ảnh crop tối đa 512px để bảo vệ bộ nhớ và dung lượng ổ đĩa.
+  - Tuyệt đối không lưu trữ khóa API hay chuỗi Base64 nguyên ảnh vào CSDL.
+- **Suy diễn quy tắc thống kê**:
+  - Hệ thống sử dụng truy vấn SQL tổng hợp: `HAVING COUNT(*) >= min_rule_samples` (mặc định ngưỡng >= 3 mẫu lặp lại).
+  - Khi một lỗi xảy ra từ 3 lần trở lên (ví dụ: mô hình liên tục nhầm `car` thành `truck`), quy tắc nhắc nhở sẽ được tự động kích hoạt:
+    * *"When detecting high-profile heavy cargo vehicles, prefer truck over car."*
+    * *"Ensure bounding boxes around pedestrian tightly bound the extremities without including surrounding ground."*
+
+### 8.4 Truy xuất ít mẫu (Few-Shot Retrieval) & Bơm nhắc nhở thích ứng
+Mỗi khi gửi yêu cầu nhận diện hình ảnh mới tới 9Router:
+1. `CorrectionRetrievalEngine` kiểm tra cơ sở dữ liệu để lấy các quy tắc đang có hiệu lực.
+2. Chọn lọc 2-4 mẫu chỉnh sửa tiêu biểu nhất.
+3. Ghép nối thành phần mở rộng nhắc nhở (`prompt_extension`) và chèn trực tiếp vào Vision Prompt của 9Router.
+4. Mô hình VLM tiếp nhận các chỉ dẫn điều chỉnh này trong ngữ cảnh (in-context), giúp các dự đoán tiếp theo khắc phục triệt để các lỗi thường gặp trong dự án.
+
+### 8.5 Bộ công cụ dòng lệnh quản trị (CLI Feedback Commands)
+Người dùng có thể giám sát và điều khiển toàn bộ bộ nhớ sửa đổi thông qua `main.py`:
+
+```bash
+# 1. Đồng bộ kết quả chỉnh sửa từ CVAT Job (kèm token nếu CVAT yêu cầu đăng nhập)
+python main.py feedback-sync --job 14 --url http://localhost:18080
+
+# 2. Xem bảng thống kê hiệu chỉnh chi tiết của toàn bộ 31 nhãn và các quy tắc đang hoạt động
+python main.py feedback-stats
+
+# 3. Liệt kê danh sách các bản ghi hiệu chỉnh gần nhất
+python main.py feedback-list --limit 20 --label car
+
+# 4. Tắt/bật tính năng ghi nhớ và gợi ý thích ứng
+python main.py feedback-disable
+python main.py feedback-enable
+
+# 5. Dọn dẹp bộ nhớ đệm
+python main.py feedback-clear --crops   # Xóa các file ảnh crop
+python main.py feedback-clear --rules   # Xóa các quy tắc đã suy diễn
+python main.py feedback-clear --all     # Xóa toàn bộ dữ liệu phản hồi
+
+# 6. So sánh trực tiếp hiệu quả trước và sau khi áp dụng gợi ý thích ứng
+python main.py feedback-eval --image test.jpg
+```
+
+---
+
+## 9. Quản Trị Hệ Thống & Khắc Phục Sự Cố (Troubleshooting)
 
 ### 8.1 Lỗi Timeout VLM khi xử lý ảnh phức tạp (Request timed out after 60s)
 - **Nguyên nhân**: Khi phát hiện toàn diện 31 nhãn trên ảnh độ phân giải cao, mô hình lý luận (Reasoning Model) của 9Router có thể mất 45-65 giây.

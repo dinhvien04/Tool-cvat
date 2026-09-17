@@ -108,6 +108,8 @@ class AnnotationResult:
     model_used: str
     mode: str = MODE_BOX
     warnings: List[str] = field(default_factory=list)
+    image_hash: Optional[str] = None
+    rules_injected: List[str] = field(default_factory=list)
 
     def to_cvat_rectangles(self) -> List[Dict[str, Any]]:
         """Return pure CVAT detector response shapes."""
@@ -132,6 +134,11 @@ def annotate_image(
     mode: Optional[str] = None,
     output_mode: Optional[str] = None,
     roi: Optional[Sequence[Union[int, float]]] = None,
+    feedback_db: Optional[Any] = None,
+    enable_feedback: bool = True,
+    task_id: Optional[int] = None,
+    job_id: Optional[int] = None,
+    frame_index: Optional[int] = None,
 ) -> AnnotationResult:
     """Run end-to-end in-memory detection on an image.
 
@@ -198,6 +205,27 @@ def annotate_image(
     # 5. Prepare Base64 Data URL and vision prompt with requested mode
     data_url = image_to_data_url(send_image, format="JPEG", quality=90)
     prompt = build_user_prompt(allowed_labels=labels, mode=active_mode)
+
+    # 5b. Compute image fingerprint and inject correction memory rules
+    from app.feedback import FeedbackDatabase, compute_image_hash
+    from app.retrieval import CorrectionRetrievalEngine
+
+    try:
+        image_hash = compute_image_hash(pil_image)
+    except Exception:
+        image_hash = None
+
+    rules_injected: List[str] = []
+    f_db = feedback_db if feedback_db is not None else FeedbackDatabase()
+    if enable_feedback and f_db.is_enabled():
+        try:
+            retrieval_engine = CorrectionRetrievalEngine(db=f_db)
+            retrieval_res = retrieval_engine.retrieve(candidate_labels=labels)
+            if retrieval_res.prompt_extension:
+                prompt += "\n\n" + retrieval_res.prompt_extension
+            rules_injected = retrieval_res.rules
+        except Exception as e:
+            warnings.append(f"feedback_retrieval_warning: {e}")
 
     # 6. Send multimodal request to 9Router
     vision_resp = client.send_vision_request(
@@ -468,6 +496,21 @@ def annotate_image(
                         mask_shape["confidence"] = conf_str
                     cvat_shapes.append(mask_shape)
 
+    # 9. Store AI prediction baseline for future human correction reconciliation
+    if enable_feedback and f_db.is_enabled() and image_hash:
+        try:
+            f_db.save_prediction_baseline(
+                image_hash=image_hash,
+                shapes=cvat_shapes,
+                model=active_model,
+                mode=active_mode,
+                task_id=task_id,
+                job_id=job_id,
+                frame_index=frame_index,
+            )
+        except Exception as e:
+            warnings.append(f"feedback_baseline_warning: {e}")
+
     total_duration = time.perf_counter() - total_start
 
     return AnnotationResult(
@@ -482,4 +525,6 @@ def annotate_image(
         model_used=active_model,
         mode=active_mode,
         warnings=warnings,
+        image_hash=image_hash,
+        rules_injected=rules_injected,
     )

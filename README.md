@@ -30,9 +30,12 @@ Tool-cvat/
 ├── app/                              # Core application logic
 │   ├── client.py                     # 9Router OpenAI-compatible client (streaming disabled, auth)
 │   ├── config.py                     # Environment and label configuration loaders
+│   ├── cvat_sync.py                  # CVAT REST API client, webhook HMAC verification & feedback sync
+│   ├── feedback.py                   # Image hashing, SQLite correction storage & CorrectionDiffEngine
 │   ├── image_ops.py                  # Pillow loading, resizing, bbox and mask alpha overlays
 │   ├── parser.py                     # Schema validation, coordinate denormalization, CVAT mask encoding
 │   ├── pipeline.py                   # Local orchestration pipeline
+│   ├── retrieval.py                  # Dynamic few-shot selection & prompt extension builder
 │   └── service.py                    # Unified annotation service (modes: box, mask, box_and_mask, full_31)
 ├── core/
 │   ├── geometry.py                   # Pure Pillow vector-to-raster & CVAT 1D flat list mask engine
@@ -43,11 +46,12 @@ Tool-cvat/
 │   ├── labels.yaml                   # 31 master CVAT labels
 │   ├── label_geometry.yaml           # Shape routing rules (instances, regions, lanes)
 │   ├── label_semantics.yaml          # Ambiguity policies & semantic descriptions
+│   ├── learning.yaml                 # Correction memory thresholds & storage quotas
 │   └── cvat_labels.json              # 13 rectangular bounding box candidate labels
 ├── docs/
 │   ├── PHASE2_CVAT_AI_TOOLS.md       # Phase 2 CVAT AI Tools documentation
 │   ├── PHASE3_BOX_MASK.md            # Phase 3 Box + Instance Mask comprehensive guide
-│   └── PHASE3B_FULL_31_LABELS.md     # Phase 3B Full 31-Label Multi-Shape complete guide
+│   └── PHASE3B_FULL_31_LABELS.md     # Phase 3B Full 31-Label Multi-Shape & Correction Memory guide
 ├── scripts/                          # Automated deployment & diagnostic scripts
 │   ├── check_cvat_task.py            # Direct CVAT task label inspection via Django ORM
 │   ├── phase2_preflight.ps1          # Phase 2 pre-flight checks
@@ -64,9 +68,9 @@ Tool-cvat/
 │   ├── ninerouter-vision/            # Box detector (type: rectangle)
 │   ├── ninerouter-vision-mask/       # Mask detector (type: mask)
 │   ├── ninerouter-vision-box-mask/   # Unified Box + Mask detector (type: any)
-│   └── ninerouter-vision-31/         # Full 31-Label Multi-Shape detector (type: any)
-├── tests/                            # 393 automated unit, integration, and security tests
-├── main.py                           # CLI entry point
+│   └── ninerouter-vision-31/         # Full 31-Label Multi-Shape detector & Webhook sync (type: any)
+├── tests/                            # 418 automated unit, integration, and security tests
+├── main.py                           # CLI entry point (inference + feedback-*)
 └── requirements.txt                  # Minimal lightweight dependencies (requests, Pillow, pyyaml)
 ```
 
@@ -171,6 +175,79 @@ Send a test inference request to verify running containers:
 
 ---
 
+## 🧠 Human-in-the-Loop Correction Memory & Adaptive Prompting
+
+The full 31-label detector (`ninerouter-vision-31`) is intrinsically **correction-aware**. When human annotators edit, correct, or delete AI-generated annotations in CVAT, the system reconciles the changes, records them into local memory, derives actionable rules, and injects dynamic few-shot guidance into future inference requests — **without local retraining or heavy ML dependencies**.
+
+### How the Feedback Loop Works
+
+```
+  1. AI Baseline Inference
+     [Image] ──> [ninerouter-vision-31] ──> [Shapes Generated]
+                         │
+                         └──> Saved to SQLite (.tool-cvat/feedback.sqlite3)
+                              Indexed by SHA-256 (image_hash)
+
+  2. Human Review & Editing in CVAT
+     Annotator corrects mislabeled classes (car -> truck), adjusts contours,
+     adds missed objects, or removes false positives.
+
+  3. Synchronization (Automated or CLI)
+     CVAT Webhook (`update:job`) ──> [Dual-Dispatch Nuclio Handler]
+     OR manual CLI: python main.py feedback-sync --job <id>
+
+  4. Geometric Bipartite Matching (CorrectionDiffEngine)
+     Pairwise IoU matching classifies events into 9 precise categories:
+     - RELABEL (cross-label IoU >= 0.60, e.g. car -> truck)
+     - BOX_MOVE / BOX_RESIZE
+     - MASK_EDIT / REGION_EDIT / LANE_EDIT
+     - DELETE_FALSE_POSITIVE / ADD_MISSING / NO_CHANGE (IoU >= 0.92)
+
+  5. Rule Derivation (SQL Aggregation)
+     Patterns with count >= min_samples (default 3) are synthesized into rules:
+     "When detecting high-profile heavy cargo vehicles, prefer truck over car."
+
+  6. Adaptive Prompt Injection (CorrectionRetrievalEngine)
+     Future inferences retrieve active rules + 2-4 representative crops/examples,
+     dynamically prepending them into the vision prompt.
+```
+
+### CLI Feedback Management
+
+Manage and inspect correction memory directly from the terminal:
+
+```bash
+# 1. Synchronize annotations from a CVAT job
+python main.py feedback-sync --job 14 [--url http://localhost:18080] [--token <token>]
+
+# 2. View per-label statistics and active rules across all 31 labels
+python main.py feedback-stats
+
+# 3. Inspect recent individual correction records
+python main.py feedback-list --limit 20 [--label car] [--type RELABEL]
+
+# 4. Toggle correction memory globally
+python main.py feedback-enable
+python main.py feedback-disable
+
+# 5. Clear stored records, crops, or derived rules
+python main.py feedback-clear --crops   # Clears only image crops
+python main.py feedback-clear --rules   # Clears only derived rules
+python main.py feedback-clear --all     # Full reset of feedback database
+
+# 6. Comparative evaluation (side-by-side baseline vs. adaptive prompting)
+python main.py feedback-eval --image test.jpg
+```
+
+### Dual-Dispatch Nuclio Handler & Webhooks
+
+The serverless function (`ninerouter-vision-31`) handles both CVAT inference requests and CVAT webhooks within a single container:
+- **Inference**: Receives `{"image": "<base64>", "threshold": 0.5}`, checks active rules, saves baseline prediction, and returns shapes.
+- **Webhook**: Receives CVAT `update:job` or `update:task` events, verifies HMAC-SHA256 signatures via `X-CVAT-Signature`, and automatically reconciles job annotations when a job is marked `completed`.
+- Configurable environment variables: `CVAT_WEBHOOK_SECRET`, `CVAT_URL`, `CVAT_TOKEN`.
+
+---
+
 ## 🔒 Security, Safety & Privacy Hygiene
 
 1. **Zero Database Destructive Actions**: Scripts never delete CVAT databases, tasks, jobs, or volumes (no `docker compose down -v`).
@@ -188,13 +265,14 @@ Send a test inference request to verify running containers:
 
 ## 🧪 Testing
 
-The repository maintains 100% test pass rate across 393 automated tests:
+The repository maintains 100% test pass rate across 418 automated tests:
 
 ```bash
 python -m pytest
 ```
 
 Test breakdown:
+- `tests/test_feedback_learning.py`: 25 tests (SHA-256 hashing, bipartite IoU diff engine, 9-tier taxonomy, SQLite CRUD, storage bounds, rule derivation, few-shot retrieval, webhook verification, CVAT sync, CLI commands).
 - `tests/test_phase3b_taxonomy.py`: 43 tests (31-label master schema, exact grouping, ambiguity policies, Django ORM task evaluator).
 - `tests/test_line_geometry.py`: 22 tests (2D spatial covariance PCA aspect ratio, medial pair resampling, Douglas-Peucker simplification).
 - `tests/test_phase3b_service.py`: 10 tests (3-tier shape routing, ROI coordinate translation, instance pairing, lane centerlines).
@@ -208,7 +286,3 @@ Test breakdown:
 - `tests/test_phase3_nuclio_handlers.py`: 20 tests (Nuclio handlers, 32MB payload guards, error masking, YAML contracts).
 - `tests/test_phase3_security_reliability.py`: 21 tests (DoS mitigation, memory limits, vertex boundaries, key sanitization).
 - Baseline suites: 187 tests covering Phase 1 CLI, Phase 2 detectors, and vision contract invariants.
-- `tests/test_phase3_service.py`: 7 tests (modes: `box`, `mask`, `box_and_mask`, CVAT shape schemas, `group_id` instance pairing).
-- `tests/test_phase3_nuclio_handlers.py`: 20 tests (Nuclio handlers, 32MB payload guards, error masking, YAML contracts).
-- `tests/test_phase3_security_reliability.py`: 21 tests (DoS mitigation, memory limits, vertex boundaries, key sanitization).
-- Baseline suites: 158 tests covering Phase 1 CLI and Phase 2 detectors.

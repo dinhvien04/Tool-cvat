@@ -48,7 +48,8 @@ if (-not (Test-Path $ImagePath)) {
     } else {
         Write-Host "Generating temporary test image at $RepoRoot\test_temp.jpg..." -ForegroundColor Gray
         $ImagePath = Join-Path $RepoRoot "test_temp.jpg"
-        & python -c "from PIL import Image; Image.new('RGB', (1024, 768), color='lightblue').save('$ImagePath')"
+        $pyPath = $ImagePath.Replace("\", "/")
+        & python -c "from PIL import Image; Image.new('RGB', (1024, 768), color='lightblue').save('$pyPath')"
     }
 }
 

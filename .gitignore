@@ -21,3 +21,9 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Correction learning and local feedback storage (Never commit user crops or databases)
+.tool-cvat/
+*.sqlite3
+*.db
+output/crops/
