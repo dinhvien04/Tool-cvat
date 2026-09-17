@@ -224,6 +224,47 @@ def draw_bounding_boxes(
     f_size = font_size or max(12, int(min_dim / 70))
     font = _get_font(f_size)
 
+    # Phase 3: Check if any items have polygon masks to render as semi-transparent overlays
+    has_masks = False
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+
+    for item in detections:
+        poly_pts = None
+        if hasattr(item, "pixel_polygon") and getattr(item, "pixel_polygon"):
+            poly_pts = getattr(item, "pixel_polygon")
+        elif hasattr(item, "mask") and getattr(item, "mask"):
+            try:
+                from core.geometry import denormalize_contour
+                poly_pts = denormalize_contour(getattr(item, "mask"), width=width, height=height)
+            except Exception:
+                poly_pts = None
+        elif isinstance(item, dict):
+            if "pixel_polygon" in item and item["pixel_polygon"]:
+                poly_pts = item["pixel_polygon"]
+            elif "mask" in item and isinstance(item["mask"], list) and len(item["mask"]) >= 3:
+                first_pt = item["mask"][0]
+                if isinstance(first_pt, (list, tuple)) and len(first_pt) == 2:
+                    try:
+                        from core.geometry import denormalize_contour
+                        poly_pts = denormalize_contour(item["mask"], width=width, height=height)
+                    except Exception:
+                        poly_pts = None
+
+        if poly_pts and len(poly_pts) >= 3:
+            has_masks = True
+            lbl = getattr(item, "label", None) if hasattr(item, "label") else item.get("label", "")
+            c = get_label_color(lbl)
+            fill_rgba = (c[0], c[1], c[2], 85)  # semi-transparent tint
+            outline_rgba = (c[0], c[1], c[2], 220)
+            pts_tuples = [(float(p[0]), float(p[1])) for p in poly_pts]
+            overlay_draw.polygon(pts_tuples, fill=fill_rgba, outline=outline_rgba)
+
+    if has_masks:
+        img_rgba = img.convert("RGBA")
+        img = Image.alpha_composite(img_rgba, overlay).convert("RGB")
+        draw = ImageDraw.Draw(img)
+
     for item in detections:
         # Extract label and coordinates
         label = ""

@@ -11,6 +11,7 @@ This module defines:
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import asdict, dataclass
@@ -83,6 +84,12 @@ INTENTIONAL_DISTINCTIONS = {
     ("traffic sign", "traffic_sign"): "Intentional distinction between spaced and underscored traffic sign labels.",
 }
 
+# Detection and Segmentation Modes
+MODE_BOX = "box"
+MODE_MASK = "mask"
+MODE_BOX_AND_MASK = "box_and_mask"
+SUPPORTED_MODES = (MODE_BOX, MODE_MASK, MODE_BOX_AND_MASK)
+
 
 @dataclass
 class DetectedObject:
@@ -90,6 +97,7 @@ class DetectedObject:
     label: str
     box_2d: List[int]  # [ymin, xmin, ymax, xmax] in [0, 1000]
     confidence: Optional[float] = None
+    mask: Optional[List[List[Union[int, float]]]] = None  # [[x1, y1], [x2, y2], ...] normalized in [0, 1000]
 
     def validate(self, allowed_labels: Optional[List[str]] = None) -> None:
         if not isinstance(self.label, str) or not self.label.strip():
@@ -123,6 +131,23 @@ class DetectedObject:
             if not (0.0 <= float(self.confidence) <= 1.0):
                 raise ValueError(f"Confidence out of bounds [0.0, 1.0]: {self.confidence!r}")
 
+        if self.mask is not None:
+            if not isinstance(self.mask, (list, tuple)):
+                raise ValueError(f"Mask must be a list or tuple of points, got {type(self.mask).__name__}")
+            if len(self.mask) < 3:
+                raise ValueError(f"Mask contour must contain at least 3 vertices, got {len(self.mask)}")
+            if len(self.mask) > 10_000:
+                raise ValueError(f"Mask contour vertex count ({len(self.mask)}) exceeds maximum limit of 10000")
+            for pt_idx, pt in enumerate(self.mask):
+                if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                    raise ValueError(f"Mask vertex at index {pt_idx} must be a 2-element sequence [x, y], got {pt!r}")
+                px, py = pt
+                if isinstance(px, bool) or isinstance(py, bool) or not isinstance(px, (int, float)) or not isinstance(py, (int, float)):
+                    raise ValueError(f"Mask vertex at index {pt_idx} coordinates must be numeric, got {[px, py]}")
+                px_f, py_f = float(px), float(py)
+                if math.isnan(px_f) or math.isnan(py_f) or math.isinf(px_f) or math.isinf(py_f):
+                    raise ValueError(f"Mask vertex at index {pt_idx} coordinates cannot be NaN or Inf: {[px, py]}")
+
     def to_cvat_rect(self, width: int, height: int) -> Dict[str, Any]:
         """Convert to CVAT rectangle format [xtl, ytl, xbr, ybr] in image pixel space."""
         xtl, ytl, xbr, ybr = box_2d_to_cvat_rect(self.box_2d, width=width, height=height)
@@ -134,6 +159,23 @@ class DetectedObject:
         }
         if self.confidence is not None:
             res["confidence"] = round(float(self.confidence), 3)
+        return res
+
+    def to_cvat_mask(self, width: int, height: int) -> Optional[Dict[str, Any]]:
+        """Convert to CVAT native mask format with 1D flattened crop and [xmin, ymin, xmax, ymax]."""
+        if not self.mask:
+            return None
+        from core.geometry import polygon_to_cvat_mask
+        geo = polygon_to_cvat_mask(self.mask, width=width, height=height)
+        if not geo:
+            return None
+        res: Dict[str, Any] = {
+            "type": "mask",
+            "label": self.label,
+            "mask": geo["mask"],
+        }
+        if self.confidence is not None:
+            res["confidence"] = str(round(float(self.confidence), 2))
         return res
 
 
@@ -281,12 +323,44 @@ Rules:
 def build_user_prompt(
     allowed_labels: Optional[List[str]] = None,
     include_confidence: bool = True,
+    mode: str = MODE_BOX,
 ) -> str:
-    """Build the user text prompt with the active candidate labels."""
+    """Build the user text prompt with the active candidate labels and requested mode.
+
+    Args:
+        allowed_labels: List of candidate labels.
+        include_confidence: Whether to request confidence score.
+        mode: Detection mode ('box', 'mask', or 'box_and_mask').
+    """
     labels = allowed_labels if allowed_labels is not None else list(DEFAULT_BBOX_LABELS)
     labels_formatted = "\n".join(f"- {label}" for label in labels)
 
     conf_field = ',\n      "confidence": 0.95' if include_confidence else ""
+
+    if mode in (MODE_MASK, MODE_BOX_AND_MASK):
+        return f"""Perform 2D object detection and instance segmentation on this image.
+Detect all visible instances of the allowed object classes.
+
+Allowed labels (choose ONLY from this list):
+{labels_formatted}
+
+Output schema:
+{{
+  "objects": [
+    {{
+      "label": "<exact_allowed_label>",
+      "box_2d": [ymin, xmin, ymax, xmax],
+      "mask": [[x1, y1], [x2, y2], [x3, y3], ...]{conf_field}
+    }}
+  ]
+}}
+
+Rules:
+1. box_2d: Normalized integer coordinates [ymin, xmin, ymax, xmax] in [0, 1000].
+2. mask: A closed polygon contour boundary tracing the visible object perimeter.
+   - Points MUST be [x, y] coordinates (x horizontal, y vertical) normalized in [0, 1000].
+   - Provide at least 4 perimeter vertices per object. Do NOT omit mask.
+3. Strictly output raw JSON only (no markdown fences, no explanatory text)."""
 
     return f"""Detect all visible instances of the allowed object classes in this image.
 

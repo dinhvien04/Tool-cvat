@@ -1,7 +1,7 @@
-"""Nuclio Function Entry Point for 9Router Vision CVAT Detector.
+"""Nuclio Function Entry Point for 9Router Vision Mask CVAT Detector.
 
 Receives CVAT inference requests, forwards images to local 9Router vision models,
-and returns CVAT rectangle shape annotations.
+and returns CVAT native mask shape annotations (Instance Segmentation).
 """
 
 from __future__ import annotations
@@ -9,11 +9,19 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
+import sys
+from pathlib import Path
 from typing import Any, Dict
+
+# Ensure function directory is in sys.path
+_current_dir = str(Path(__file__).resolve().parent)
+if _current_dir not in sys.path:
+    sys.path.insert(0, _current_dir)
 
 from model_handler import ModelHandler
 
-logger = logging.getLogger("cvat.nuclio.ninerouter")
+logger = logging.getLogger("cvat.nuclio.ninerouter.mask")
 
 # 32MB maximum request body size limit (matches Nuclio function.yaml maxRequestBodySize)
 MAX_REQUEST_BODY_SIZE = 33554432  # 32 * 1024 * 1024 bytes
@@ -21,19 +29,19 @@ MAX_REQUEST_BODY_SIZE = 33554432  # 32 * 1024 * 1024 bytes
 
 def init_context(context):
     """Initialize function context when container starts."""
-    context.logger.info("Initializing 9Router Vision Nuclio function context...")
+    context.logger.info("Initializing 9Router Vision Mask Nuclio function context...")
     try:
         handler_instance = ModelHandler()
         context.user_data.model_handler = handler_instance
-        context.logger.info("9Router Vision context initialized successfully.")
+        context.logger.info("9Router Vision Mask context initialized successfully.")
     except Exception as e:
-        context.logger.error(f"Failed to initialize 9Router Vision context: {e}")
+        context.logger.error(f"Failed to initialize 9Router Vision Mask context: {e}")
         raise
 
 
 def handler(context, event):
-    """Handle incoming detector event from CVAT."""
-    context.logger.info("Handling CVAT detector request...")
+    """Handle incoming mask detector event from CVAT."""
+    context.logger.info("Handling CVAT mask detector request...")
 
     # Guard against excessively large request bodies (DoS / memory exhaustion prevention)
     raw_body = event.body
@@ -155,7 +163,7 @@ def handler(context, event):
         )
 
     except ValueError as e:
-        context.logger.error(f"Image or validation error during inference: {e}")
+        context.logger.error(f"Image or validation error during mask inference: {e}")
         return context.Response(
             body=json.dumps({"error": f"Validation error: {str(e)}"}),
             headers={},
@@ -168,7 +176,7 @@ def handler(context, event):
         key = getattr(handler_inst, "api_key", None)
         if isinstance(key, str) and key and key in err_msg:
             err_msg = err_msg.replace(key, "***")
-        context.logger.error(f"Error during 9Router vision inference: {err_msg}")
+        context.logger.error(f"Error during 9Router vision mask inference: {err_msg}")
         return context.Response(
             body=json.dumps({"error": f"Inference failed: {err_msg}"}),
             headers={},

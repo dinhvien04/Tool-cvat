@@ -1,0 +1,63 @@
+metadata:
+  name: ninerouter-vision-mask
+  namespace: cvat
+  annotations:
+    name: 9Router Vision Mask (Instance Segmentation)
+    type: detector
+    spec: |
+      [
+        { "id": 1, "name": "pedestrian", "type": "mask" },
+        { "id": 2, "name": "rider", "type": "mask" },
+        { "id": 3, "name": "car", "type": "mask" },
+        { "id": 4, "name": "truck", "type": "mask" },
+        { "id": 5, "name": "bus", "type": "mask" },
+        { "id": 6, "name": "train", "type": "mask" },
+        { "id": 7, "name": "motorcycle", "type": "mask" },
+        { "id": 8, "name": "bicycle", "type": "mask" },
+        { "id": 9, "name": "traffic light", "type": "mask" },
+        { "id": 10, "name": "traffic sign", "type": "mask" },
+        { "id": 11, "name": "person", "type": "mask" },
+        { "id": 12, "name": "traffic_light", "type": "mask" },
+        { "id": 13, "name": "traffic_sign", "type": "mask" }
+      ]
+
+spec:
+  description: 9Router Vision Mask AI Detector (Instance Segmentation via local 9Router)
+  runtime: 'python:3.11'
+  handler: main:handler
+  eventTimeout: 120s
+
+  env:
+    - name: NINEROUTER_URL
+      value: 'http://host.docker.internal:20128'
+    - name: VISION_MODEL
+      value: ''
+    - name: DETECTION_MODE
+      value: 'mask'
+    - name: NINEROUTER_TIMEOUT
+      value: '60.0'
+    - name: MAX_IMAGE_SIZE
+      value: '1600'
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 2
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432 # 32MB
+
+  build:
+    image: cvat.custom.ninerouter.vision.mask
+    baseImage: python:3.11-slim
+    directives:
+      preCopy:
+        - kind: RUN
+          value: pip install --no-cache-dir requests pillow pyyaml
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume

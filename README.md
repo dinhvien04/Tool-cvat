@@ -1,236 +1,172 @@
-# CVAT × 9Router AI Annotation — Phase 1 MVP
+# CVAT × 9Router AI Annotation & Serverless Detectors
 
-Phase 1 implementation of the automated 2D object detection pipeline connecting **9Router** vision models (Gemini 3.8 Flash, Claude Sonnet, etc.) with the **CVAT** annotation schema.
+Production-grade integration connecting local **9Router** vision models (Gemini 3.8/3.7 Flash, Claude Sonnet, etc.) with **CVAT Community** (under **AI Tools -> Detectors**).
 
-This phase is completely decoupled from CVAT core, Docker, and database services. It takes an input image, queries the local 9Router vision model using a strict JSON contract, validates labels and normalized coordinates, denormalizes coordinates to pixel space on the original image, draws annotated bounding boxes, and generates structured artifacts.
-
----
-
-## Multi-Agent Engineering Architecture
-
-Phase 1 was built and verified using a coordinated 5-subagent workflow:
-
-1. **9Router Integration Agent (`router-integration`)**:
-   - Probed `http://127.0.0.1:20128` health (`GET /api/health`).
-   - Discovered vision-capable models via `GET /v1/models/image-to-text` and `GET /v1/models` (`capabilities.vision == true`).
-   - Tested OpenAI-compatible multimodal endpoint (`POST /v1/chat/completions`) with `stream: False` and Base64 Data URLs.
-2. **Vision Contract / Prompt Agent (`vision-contract`)**:
-   - Encoded the exact 31 CVAT labels in `config/labels.yaml`.
-   - Preserved intentional label ambiguities without merging (`pedestrian` vs `person`, `traffic light` vs `traffic_light`, `traffic sign` vs `traffic_sign`).
-   - Defined the default 13 rectangular bounding box candidate labels.
-   - Designed the strict vision prompt enforcing raw JSON and `[ymin, xmin, ymax, xmax]` normalized coordinates in `[0, 1000]`.
-3. **Python Implementation Agent (`python-impl`)**:
-   - Implemented `app/client.py` (9Router HTTP client with streaming disabled, timing, auth support).
-   - Implemented `app/image_ops.py` (Pillow image processing, aspect-ratio preserving resizing for transmission, bounding box rendering on original image).
-   - Implemented `app/parser.py` (robust response parser handling markdown code blocks, JSON extraction, coordinate validation, clamping, and rejection of invalid boxes).
-   - Implemented `app/models.py` (`python -m app.models` model inspection tool).
-   - Implemented `app/pipeline.py` and `main.py` (end-to-end orchestration).
-4. **Test / QA Agent (`qa-tester`)**:
-   - Built 106 automated tests covering malformed LLM outputs, negative and out-of-bounds coordinates, inverted boxes, degenerate boxes, coordinate clamping, label validation, HTTP mock failures, and CLI options.
-5. **Security / Reliability Reviewer (`security-reviewer`)**:
-   - Audited credential masking (preventing API keys in logs, console, or reports).
-   - Ensured raw Base64 image payloads are excluded from logs.
-   - Verified strict timeout enforcement and exception resilience.
-   - Verified `.gitignore` and `.env.example` compliance.
+Supports:
+- **Phase 1**: Local 2D Bounding Box AI annotation pipeline and CLI orchestration.
+- **Phase 2**: Lightweight Nuclio detector integration (`ninerouter-vision`) for CVAT AI Tools.
+- **Phase 3**: Unified **Bounding Box + Instance Mask / Segmentation** with zero local heavy ML dependencies, dual-mode and tri-detector deployment (`ninerouter-vision`, `ninerouter-vision-mask`, `ninerouter-vision-box-mask`).
 
 ---
 
-## Pipeline Overview
+## ⚡ Zero Local Heavy ML Directive (Strictly Enforced)
+
+This project strictly adheres to a zero-heavy-ML architecture:
+- **NO local model weights**: No multi-GB PyTorch/Torchvision, CUDA, TensorFlow, Ultralytics, SAM, SAM2, or ONNX runtimes.
+- **Remote inference**: All perception runs through remote vision models orchestrated by local 9Router (`http://127.0.0.1:20128` or `http://host.docker.internal:20128`).
+- **Pure Pillow geometry**: Polygon contour parsing, denormalization, rasterization to binary masks, and CVAT 1D flat list encoding run entirely via Python standard library and `Pillow` (`PIL.Image`, `PIL.ImageDraw`).
+- **Featherweight containers**: Nuclio functions build in seconds from `python:3.11-slim` (< 200MB base), saving workstation RAM/VRAM.
+
+---
+
+## 🏗️ Architecture & Component Layout
 
 ```
-Input Image (test.jpg / test.png)
-       ↓
-Load & inspect original dimensions (W, H)
-       ↓
-Aspect-ratio preserving resize copy for transmission (max-size=1600px)
-       ↓
-Encode copy to Base64 Data URL (data:image/jpeg;base64,...)
-       ↓
-POST /v1/chat/completions (9Router, stream=False)
-       ↓
-Parse & clean raw LLM output (strip markdown ```json ... ```, extract JSON)
-       ↓
-Validate schema & check labels against CVAT schema (preserve distinctions)
-       ↓
-Validate & clamp coordinates [ymin, xmin, ymax, xmax] in [0, 1000]
-       ↓
-Denormalize coordinates to original image pixels:
-    x1 = (xmin / 1000.0) * W
-    y1 = (ymin / 1000.0) * H
-    x2 = (xmax / 1000.0) * W
-    y2 = (ymax / 1000.0) * H
-       ↓
-Reject invalid boxes (x2 <= x1 or y2 <= y1)
-       ↓
-Draw bounding boxes & label badges on ORIGINAL image
-       ↓
-Save Artifacts:
-    output/result_bbox.jpg
-    output/predictions.json
-    output/raw_response.txt
-    output/run_report.json
+Tool-cvat/
+├── app/                              # Core application logic
+│   ├── client.py                     # 9Router OpenAI-compatible client (streaming disabled, auth)
+│   ├── config.py                     # Environment and label configuration loaders
+│   ├── image_ops.py                  # Pillow loading, resizing, bbox and mask alpha overlays
+│   ├── parser.py                     # Schema validation, coordinate denormalization, CVAT mask encoding
+│   ├── pipeline.py                   # Local orchestration pipeline
+│   └── service.py                    # Unified in-memory annotation service (modes: box, mask, box_and_mask)
+├── core/
+│   ├── geometry.py                   # Pure Pillow vector-to-raster & CVAT 1D flat list mask engine
+│   └── vision_contract.py            # Prompt engineering, schemas, label definitions, coordinate rules
+├── config/
+│   ├── labels.yaml                   # 31 master CVAT labels
+│   └── cvat_labels.json              # 13 rectangular bounding box candidate labels
+├── docs/
+│   ├── PHASE2_CVAT_AI_TOOLS.md       # Phase 2 CVAT AI Tools documentation
+│   └── PHASE3_BOX_MASK.md            # Phase 3 Box + Instance Mask comprehensive guide
+├── scripts/                          # Automated deployment & diagnostic scripts
+│   ├── phase2_preflight.ps1          # Phase 2 pre-flight checks
+│   ├── phase2_deploy.ps1             # Phase 2 safe deployment
+│   ├── phase3_preflight.ps1          # Phase 3 comprehensive pre-flight validation
+│   ├── phase3_deploy.ps1             # Phase 3 safe deployment (-Target mask|box|box-mask|both|all)
+│   ├── phase3_smoke_test.ps1         # Phase 3 detector verification
+│   └── phase3_remove.ps1             # Phase 3 safe container removal
+├── serverless/                       # CVAT Nuclio detector functions
+│   ├── ninerouter-vision/            # Box detector (type: rectangle)
+│   ├── ninerouter-vision-mask/       # Mask detector (type: mask)
+│   └── ninerouter-vision-box-mask/   # Unified Box + Mask detector (type: any)
+├── tests/                            # 245 automated unit, integration, and security tests
+├── main.py                           # CLI entry point
+└── requirements.txt                  # Minimal lightweight dependencies (requests, Pillow, pyyaml)
 ```
 
 ---
 
-## Installation & Requirements
+## 🎯 Nuclio Detectors Overview
 
-### Prerequisites
-- Python 3.10+ (tested on Python 3.12)
-- Running local 9Router instance at `http://127.0.0.1:20128`
+| Detector Name | Label Spec Type | Shape Types Returned | CVAT Feature |
+|---|:---:|---|---|
+| `ninerouter-vision` | `rectangle` | Bounding Box (`rectangle`) | Standard 2D bounding box detection |
+| `ninerouter-vision-mask` | `mask` | Instance Mask (`mask`) | Native CVAT binary mask instance segmentation |
+| `ninerouter-vision-box-mask` | `any` | **Both** `rectangle` and `mask` | Paired bounding box + mask with shared `group_id` & "Convert masks to polygons" |
 
-### Install Dependencies
+---
+
+## 🚀 Quick Start (Local CLI)
+
+### 1. Installation
 ```bash
+git clone https://github.com/dinhvien04/Tool-cvat.git
+cd Tool-cvat
 pip install -r requirements.txt
 ```
 
----
-
-## Configuration
-
-Copy `.env.example` to `.env` if custom configuration is desired:
-
-```bash
-cp .env.example .env
-```
-
-| Variable | Default | Description |
-|---|---|---|
-| `NINEROUTER_URL` | `http://127.0.0.1:20128` | Local 9Router endpoint |
-| `NINEROUTER_KEY` | *(empty)* | Optional API key if 9Router requires auth |
-| `VISION_MODEL` | `ag/gemini-3.8-flash-high` | Preferred vision model |
-| `MAX_IMAGE_SIZE` | `1600` | Max dimension for API copy |
-| `OUTPUT_DIR` | `output` | Directory for output artifacts |
-
----
-
-## Usage
-
-### 1. Discover Vision Models
-
-Query 9Router and display all available vision models:
-
+### 2. Discover Vision Models
+Query your local 9Router instance to inspect available models:
 ```bash
 python -m app.models
 ```
 
-Output format:
-```text
-9Router Status: Connected to http://127.0.0.1:20128 (Health: {'ok': True})
---------------------------------------------------------------------------------
-#   | Model ID                       | Owner      | Context    | Vision  | Notes
---------------------------------------------------------------------------------
-1   | ag/gemini-3.8-flash-high       | ag         | 1048576    | Yes     | [Recommended]
-2   | ag/gemini-3.8-flash-medium     | ag         | 1048576    | Yes     | [Recommended]
-...
-Total vision models available: 19
-
-Default auto-selection for detection pipeline: 'ag/gemini-3.8-flash-high'
-```
-
-To output raw JSON:
+### 3. Run Inference Pipeline
 ```bash
-python -m app.models --json
+# Unified Box + Mask (Default)
+python main.py --image test.jpg --mode box_and_mask
+
+# Pure Bounding Box
+python main.py --image test.jpg --mode box
+
+# Pure Instance Mask
+python main.py --image test.jpg --mode mask
 ```
 
-### 2. Run Detection Pipeline
-
-Run annotation on an image:
-```bash
-python main.py --image test.jpg
-```
-
-With specific model or parameters:
-```bash
-python main.py --image test.jpg --model ag/gemini-3.8-flash-high --output-dir output --max-image-size 1600
-```
-
-Strict mode (fails if model generates any label not in candidate list):
-```bash
-python main.py --image test.jpg --strict
-```
+Output artifacts are generated in `output/`:
+- `result_bbox.jpg`: Original image with bounding boxes and semi-transparent mask tints.
+- `predictions.json`: Detailed detections with normalized/pixel coordinates and CVAT shapes.
+- `raw_response.txt`: Verbatim vision model JSON output.
+- `run_report.json`: Execution metadata, timing breakdown, and label distributions.
 
 ---
 
-## Output Artifacts
+## 🐳 CVAT Serverless Deployment (PowerShell)
 
-Running the pipeline on `test.jpg` creates the required artifacts in `output/`:
-
-1. **`output/result_bbox.jpg`**:
-   The original full-resolution image with bounding boxes drawn in distinct high-contrast colors and labeled badges.
-2. **`output/predictions.json`**:
-   Structured detection results containing original image metadata, model ID, normalized `box_2d`, denormalized `pixel_box`, and CVAT-compatible shape annotations.
-3. **`output/raw_response.txt`**:
-   The exact raw string returned by the vision model.
-4. **`output/run_report.json`**:
-   Execution metadata including timestamps, model used, latency breakdown (API duration vs total duration), original vs sent dimensions, detection counts, label distribution, token usage, and warning logs.
-
----
-
-## CVAT Label Schema
-
-`config/labels.yaml` contains all 31 exact CVAT labels:
-
-```yaml
-all_labels:
-  - "pedestrian"
-  - "rider"
-  - "car"
-  - "truck"
-  - "bus"
-  - "train"
-  - "motorcycle"
-  - "bicycle"
-  - "traffic light"
-  - "traffic sign"
-  - "area/alternative"
-  - "area/drivable"
-  - "lane/crosswalk"
-  - "lane/double white"
-  - "lane/double yellow"
-  - "lane/road curb"
-  - "lane/single other"
-  - "lane/single white"
-  - "lane/single yellow"
-  - "road"
-  - "sidewalk"
-  - "building"
-  - "wall"
-  - "fence"
-  - "pole"
-  - "vegetation"
-  - "terrain"
-  - "sky"
-  - "person"
-  - "traffic_light"
-  - "traffic_sign"
+### Step 1: Pre-Flight Diagnostics
+Ensure Docker, CVAT stack, and 9Router connectivity are healthy:
+```powershell
+.\scripts\phase3_preflight.ps1 -Target all
 ```
 
-### Ambiguities & Distinctions
-The pipeline explicitly maintains and never merges or aliases:
-- `pedestrian` vs `person`
-- `traffic light` vs `traffic_light`
-- `traffic sign` vs `traffic_sign`
+### Step 2: Deploy to CVAT
+Deploy desired detectors into CVAT's Nuclio engine:
+```powershell
+# Deploy Unified Box+Mask detector
+.\scripts\phase3_deploy.ps1 -Target box-mask
 
-### Default Bbox Candidates (13 labels)
-Used for the Phase 1 rectangle detection MVP:
-`pedestrian`, `rider`, `car`, `truck`, `bus`, `train`, `motorcycle`, `bicycle`, `traffic light`, `traffic sign`, `person`, `traffic_light`, `traffic_sign`.
+# Deploy Mask-only detector
+.\scripts\phase3_deploy.ps1 -Target mask
+
+# Deploy all 3 detectors
+.\scripts\phase3_deploy.ps1 -Target all
+```
+
+### Step 3: Smoke Test Deployment
+Send a test inference request to verify running containers:
+```powershell
+.\scripts\phase3_smoke_test.ps1 -Target box-mask
+```
+
+### Step 4: Use Inside CVAT
+1. Open CVAT in browser: `http://localhost:18080`.
+2. Open any Task or Job.
+3. In the left toolbar, click **AI Tools** -> **Detectors**.
+4. Select **9Router Vision Box+Mask** (or **9Router Vision Mask**).
+5. Map task labels to model labels.
+6. (Optional) Toggle **Convert masks to polygons** if vector contours are preferred.
+7. Click **Annotate**. Bounding boxes and instance masks appear instantly on canvas!
 
 ---
 
-## Test Suite
+## 🔒 Security, Safety & Privacy Hygiene
 
-Run the full pytest suite:
+1. **Zero Database Destructive Actions**: Scripts never delete CVAT databases, tasks, jobs, or volumes (no `docker compose down -v`).
+2. **Credential Hygiene**:
+   - Secrets are masked across all logging (`sk-...xyz`).
+   - WSL deployments transfer `$NineRouterKey` in-memory via `WSLENV` without writing plaintext secrets to disk.
+3. **DoS & Resource Exhaustion Defense**:
+   - 32MB maximum request body size guard in handlers and `function.yaml`.
+   - Polygon vertex count limit (10,000 vertices/polygon) prevents CPU rasterization starvation.
+   - Per-frame detection limit (500 objects/image) prevents memory exhaustion.
+   - Decompression bomb protection (`Image.MAX_IMAGE_PIXELS = 89_478_485`).
+4. **Honest Confidence Score Policy**: No false 1.0 confidence score fallbacks.
+
+---
+
+## 🧪 Testing
+
+The repository maintains 100% test pass rate across 245 automated tests:
 
 ```bash
-python -m pytest -v
+python -m pytest
 ```
 
-All 106 tests cover:
-- Client health checks, timeouts, 401/403/500 HTTP failures, model capabilities filtering.
-- Response parsing, markdown stripping, preamble/postamble removal, trailing commas, single-quote repairs.
-- Coordinate validation, negative values, values > 1000, inverted coordinates, degenerate boxes.
-- Coordinate clamping to original image dimensions.
-- Exact label matching, ambiguity preservation, and non-bbox label rejection.
-- Pipeline orchestration, error handling on missing/corrupted files, and model fallback.
-- Security audits: credential masking, base64 data exclusion from reports, and `.gitignore` coverage.
+Test breakdown:
+- `tests/test_geometry.py`: 31 tests (Pillow rasterization, CVAT 1D flat list, Shoelace area, round-trip fidelity, coordinate ordering invariants).
+- `tests/test_phase3_parser.py`: 8 tests (Box+mask parsing, strict schema validation, missing mask fallbacks).
+- `tests/test_phase3_service.py`: 7 tests (modes: `box`, `mask`, `box_and_mask`, CVAT shape schemas, `group_id` instance pairing).
+- `tests/test_phase3_nuclio_handlers.py`: 20 tests (Nuclio handlers, 32MB payload guards, error masking, YAML contracts).
+- `tests/test_phase3_security_reliability.py`: 21 tests (DoS mitigation, memory limits, vertex boundaries, key sanitization).
+- Baseline suites: 158 tests covering Phase 1 CLI and Phase 2 detectors.

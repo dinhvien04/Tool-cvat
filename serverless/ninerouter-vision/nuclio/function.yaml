@@ -32,6 +32,8 @@ spec:
       value: 'http://host.docker.internal:20128'
     - name: VISION_MODEL
       value: ''
+    - name: DETECTION_MODE
+      value: 'box'
     - name: NINEROUTER_TIMEOUT
       value: '60.0'
     - name: MAX_IMAGE_SIZE

@@ -17,6 +17,7 @@ import requests
 
 from core.vision_contract import (
     DEFAULT_BBOX_LABELS,
+    MODE_BOX,
     SYSTEM_PROMPT,
     build_openai_vision_payload,
     build_user_prompt,
@@ -254,6 +255,7 @@ class NineRouterClient:
         temperature: float = 0.0,
         max_tokens: int = 4096,
         timeout: Optional[float] = None,
+        mode: str = MODE_BOX,
     ) -> VisionResponse:
         """Send a multimodal chat completion request to 9Router.
 
@@ -288,7 +290,7 @@ class NineRouterClient:
             user_text = prompt
         else:
             labels = allowed_labels if allowed_labels is not None else list(DEFAULT_BBOX_LABELS)
-            user_text = build_user_prompt(allowed_labels=labels)
+            user_text = build_user_prompt(allowed_labels=labels, mode=mode)
 
         payload = {
             "model": model,

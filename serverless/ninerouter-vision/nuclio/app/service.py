@@ -21,7 +21,7 @@ from app.client import NineRouterClient, NineRouterError
 from app.config import DEFAULT_MAX_IMAGE_SIZE, DEFAULT_VISION_MODEL
 from app.image_ops import image_to_data_url, load_image, resize_image_if_needed
 from app.parser import ParsedObject, ParseResult, parse_and_validate
-from core.vision_contract import DEFAULT_BBOX_LABELS, build_user_prompt
+from core.vision_contract import DEFAULT_BBOX_LABELS, MODE_BOX, MODE_MASK, MODE_BOX_AND_MASK, build_user_prompt
 
 
 @dataclass
@@ -36,11 +36,16 @@ class AnnotationResult:
     api_duration_seconds: float
     total_duration_seconds: float
     model_used: str
+    mode: str = MODE_BOX
     warnings: List[str] = field(default_factory=list)
 
     def to_cvat_rectangles(self) -> List[Dict[str, Any]]:
         """Return pure CVAT detector response shapes."""
-        return self.shapes
+        return [s for s in self.shapes if s.get("type") == "rectangle"]
+
+    def to_cvat_masks(self) -> List[Dict[str, Any]]:
+        """Return pure CVAT mask response shapes."""
+        return [s for s in self.shapes if s.get("type") == "mask"]
 
 
 def annotate_image(
@@ -54,6 +59,8 @@ def annotate_image(
     temperature: float = 0.0,
     max_tokens: int = 4096,
     fallback_confidence: Optional[float] = None,
+    mode: Optional[str] = None,
+    output_mode: Optional[str] = None,
 ) -> AnnotationResult:
     """Run end-to-end in-memory detection on an image.
 
@@ -68,33 +75,36 @@ def annotate_image(
         temperature: Sampling temperature for model completion.
         max_tokens: Maximum completion tokens.
         fallback_confidence: Default confidence to assign when model omits confidence (defaults to None; never fake 1.0).
+        mode: Detection output mode: 'box' (default), 'mask', or 'box_and_mask'. Alias for output_mode.
+        output_mode: Detection output mode: 'box' (default), 'mask', or 'box_and_mask'.
 
     Returns:
-        AnnotationResult containing CVAT rectangle shapes and parsed objects.
+        AnnotationResult containing CVAT shapes and parsed objects.
     """
     total_start = time.perf_counter()
     warnings: List[str] = []
+    active_mode = output_mode or mode or MODE_BOX
 
     # 1. Resolve model dynamically if not explicitly specified
     active_model = model or client.resolve_vision_model()
 
-    # 1. Resolve candidate labels
+    # 2. Resolve candidate labels
     labels = list(candidate_labels) if candidate_labels else list(DEFAULT_BBOX_LABELS)
 
-    # 2. Load original image
+    # 3. Load original image
     pil_image = load_image(image_source)
     orig_w, orig_h = pil_image.size
 
-    # 3. Create aspect-ratio preserving copy for transmission
+    # 4. Create aspect-ratio preserving copy for transmission
     send_image, was_resized, (send_w, send_h) = resize_image_if_needed(
         pil_image, max_size=max_size
     )
 
-    # 4. Prepare Base64 Data URL and vision prompt
+    # 5. Prepare Base64 Data URL and vision prompt with requested mode
     data_url = image_to_data_url(send_image, format="JPEG", quality=90)
-    prompt = build_user_prompt(allowed_labels=labels)
+    prompt = build_user_prompt(allowed_labels=labels, mode=active_mode)
 
-    # 5. Send multimodal request to 9Router
+    # 6. Send multimodal request to 9Router
     vision_resp = client.send_vision_request(
         model=active_model,
         image_bytes_or_b64=data_url,
@@ -103,7 +113,7 @@ def annotate_image(
         max_tokens=max_tokens,
     )
 
-    # 6. Parse and validate response
+    # 7. Parse and validate response
     raw_text = getattr(vision_resp, "content", getattr(vision_resp, "raw_content", ""))
     parse_result: ParseResult = parse_and_validate(
         raw_response=raw_text,
@@ -115,43 +125,73 @@ def annotate_image(
     )
     warnings.extend(parse_result.warnings)
 
-    # 7. Apply confidence policy and format CVAT shapes
-    # Policy:
-    # - Model-reported confidence: validated in [0.0, 1.0] and filtered against threshold.
-    # - Missing confidence: NEVER represented as fake 100% certainty (no "1.0").
-    #   When threshold > 0.0, unrated detections cannot satisfy the threshold (unless fallback is set).
-    #   When threshold == 0.0, unrated detections are retained without a fake confidence score.
+    # 8. Apply confidence policy and format CVAT shapes according to mode
     filtered_objects: List[ParsedObject] = []
     cvat_shapes: List[Dict[str, Any]] = []
 
     for obj in parse_result.objects:
-        pts = obj.pixel_box if obj.pixel_box is not None else [0.0, 0.0, 0.0, 0.0]
-        shape_dict: Dict[str, Any] = {
-            "label": obj.label,
-            "points": [round(float(p), 2) for p in pts],
-            "type": "rectangle",
-        }
-
+        effective_conf: Optional[float] = None
         if obj.confidence is not None:
-            # Real model-reported confidence
             if threshold > 0.0 and obj.confidence < threshold:
                 continue
-            shape_dict["confidence"] = str(round(float(obj.confidence), 2))
-            filtered_objects.append(obj)
-            cvat_shapes.append(shape_dict)
+            effective_conf = obj.confidence
         elif fallback_confidence is not None:
-            # Explicitly configured fallback
             if threshold > 0.0 and fallback_confidence < threshold:
                 continue
-            shape_dict["confidence"] = str(round(float(fallback_confidence), 2))
-            filtered_objects.append(obj)
-            cvat_shapes.append(shape_dict)
+            effective_conf = fallback_confidence
         else:
-            # Omitted confidence: do NOT assign fake 1.0!
             if threshold > 0.0:
                 continue
-            filtered_objects.append(obj)
-            cvat_shapes.append(shape_dict)
+
+        filtered_objects.append(obj)
+        conf_str = str(round(float(effective_conf), 2)) if effective_conf is not None else None
+
+        # Format shapes based on requested mode
+        if active_mode in (MODE_BOX, MODE_BOX_AND_MASK):
+            pts = obj.pixel_box if obj.pixel_box is not None else [0.0, 0.0, 0.0, 0.0]
+            box_shape: Dict[str, Any] = {
+                "label": obj.label,
+                "points": [round(float(p), 2) for p in pts],
+                "type": "rectangle",
+            }
+            if conf_str is not None:
+                box_shape["confidence"] = conf_str
+            if active_mode == MODE_BOX_AND_MASK and obj.group_id is not None:
+                box_shape["group_id"] = obj.group_id
+            cvat_shapes.append(box_shape)
+
+        if active_mode in (MODE_MASK, MODE_BOX_AND_MASK):
+            mask_shape: Optional[Dict[str, Any]] = None
+            if obj.cvat_mask is not None:
+                mask_shape = {
+                    "label": obj.label,
+                    "type": "mask",
+                    "mask": obj.cvat_mask,
+                }
+            elif obj.pixel_box is not None:
+                # Fallback: if model omitted contour, rasterize the bounding box as rectangular mask
+                from core.geometry import polygon_to_cvat_mask
+                x1, y1, x2, y2 = obj.pixel_box
+                box_contour = [
+                    [(x1 / orig_w) * 1000.0, (y1 / orig_h) * 1000.0],
+                    [(x2 / orig_w) * 1000.0, (y1 / orig_h) * 1000.0],
+                    [(x2 / orig_w) * 1000.0, (y2 / orig_h) * 1000.0],
+                    [(x1 / orig_w) * 1000.0, (y2 / orig_h) * 1000.0],
+                ]
+                geo_fallback = polygon_to_cvat_mask(box_contour, width=orig_w, height=orig_h)
+                if geo_fallback:
+                    mask_shape = {
+                        "label": obj.label,
+                        "type": "mask",
+                        "mask": geo_fallback["mask"],
+                    }
+
+            if mask_shape is not None:
+                if conf_str is not None:
+                    mask_shape["confidence"] = conf_str
+                if active_mode == MODE_BOX_AND_MASK and obj.group_id is not None:
+                    mask_shape["group_id"] = obj.group_id
+                cvat_shapes.append(mask_shape)
 
     total_duration = time.perf_counter() - total_start
 
@@ -165,5 +205,6 @@ def annotate_image(
         api_duration_seconds=vision_resp.duration_seconds,
         total_duration_seconds=round(total_duration, 3),
         model_used=active_model,
+        mode=active_mode,
         warnings=warnings,
     )

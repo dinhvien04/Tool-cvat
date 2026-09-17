@@ -78,6 +78,13 @@ def parse_arguments() -> argparse.Namespace:
         help="Strict validation mode: fail on unknown labels or malformed boxes rather than skipping them",
     )
     parser.add_argument(
+        "--mode",
+        type=str,
+        default="box_and_mask",
+        choices=["box", "mask", "box_and_mask", "box-mask"],
+        help="Detection mode: 'box' (rectangles only), 'mask' (polygons/masks only), or 'box_and_mask' (both)",
+    )
+    parser.add_argument(
         "--temperature",
         type=float,
         default=0.0,
@@ -145,6 +152,7 @@ def main() -> None:
         strict=args.strict,
         temperature=args.temperature,
         max_tokens=args.max_tokens,
+        mode=args.mode.replace("-", "_"),
     )
 
     try:

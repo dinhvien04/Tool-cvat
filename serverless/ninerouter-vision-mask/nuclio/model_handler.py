@@ -1,8 +1,8 @@
-"""ModelHandler for 9Router Vision Nuclio Detector.
+"""ModelHandler for 9Router Vision Mask Nuclio Detector (Instance Segmentation).
 
 Bridges CVAT's serverless detector invocation with the local 9Router vision model.
-Converts normalized [0, 1000] integer bounding boxes from remote LLM vision models
-into CVAT pixel coordinates [xtl, ytl, xbr, ybr].
+Converts polygon contours and instance segmentations from remote LLM vision models
+into CVAT's native 1D flattened binary mask format: [crop_bits..., xmin, ymin, xmax, ymax].
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from app.config import (
 from app.service import AnnotationResult, annotate_image
 from core.vision_contract import DEFAULT_BBOX_LABELS, MODE_BOX, MODE_BOX_AND_MASK, MODE_MASK
 
-logger = logging.getLogger("cvat.nuclio.ninerouter")
+logger = logging.getLogger("cvat.nuclio.ninerouter.mask")
 
 
 def load_spec_labels_from_function_yaml(yaml_path: Optional[Path | str] = None) -> List[str]:
@@ -62,7 +62,7 @@ def load_spec_labels_from_function_yaml(yaml_path: Optional[Path | str] = None) 
 
 
 class ModelHandler:
-    """Manages the 9Router vision client and runs inference for CVAT detector requests."""
+    """Manages the 9Router vision client and runs instance segmentation inference for CVAT."""
 
     def __init__(
         self,
@@ -77,10 +77,10 @@ class ModelHandler:
         self.base_url = base_url or os.getenv("NINEROUTER_URL", DEFAULT_NINEROUTER_URL_CONTAINER)
         self.api_key = api_key or os.getenv("NINEROUTER_KEY")
         self.requested_model = model or os.getenv("VISION_MODEL")
-        env_mode = os.getenv("DETECTION_MODE", MODE_BOX)
-        self.default_mode = (mode or env_mode or MODE_BOX).strip().lower()
+        env_mode = os.getenv("DETECTION_MODE", MODE_MASK)
+        self.default_mode = (mode or env_mode or MODE_MASK).strip().lower()
         if self.default_mode not in (MODE_BOX, MODE_MASK, MODE_BOX_AND_MASK):
-            self.default_mode = MODE_BOX
+            self.default_mode = MODE_MASK
 
         timeout_env = os.getenv("NINEROUTER_TIMEOUT")
         try:
@@ -109,10 +109,7 @@ class ModelHandler:
             timeout=self.timeout,
         )
 
-        # Dynamic model resolution:
-        # - Remove assumption that ag/gemini-3.8-flash-high always exists
-        # - Use supplied VISION_MODEL if valid, else resolve first available vision model
-        # - Never fabricate model IDs; fail if requested model is unavailable (no soft warning)
+        # Dynamic model resolution
         try:
             self.active_model: str = self.client.resolve_vision_model(self.requested_model)
         except Exception as e:
@@ -120,7 +117,7 @@ class ModelHandler:
             raise
 
         logger.info(
-            f"Initialized ModelHandler: base_url={self.base_url!r}, "
+            f"Initialized ModelHandler (Mask): base_url={self.base_url!r}, "
             f"key={mask_api_key(self.api_key)}, model={self.active_model!r}, "
             f"timeout={self.timeout}s, labels_count={len(self.candidate_labels)}"
         )
@@ -128,7 +125,7 @@ class ModelHandler:
     def __repr__(self) -> str:
         """Safe string representation masking API keys."""
         return (
-            f"ModelHandler(base_url={self.base_url!r}, "
+            f"ModelHandler(mask, base_url={self.base_url!r}, "
             f"key={mask_api_key(self.api_key)!r}, "
             f"model={self.active_model!r}, "
             f"timeout={self.timeout})"
@@ -145,7 +142,7 @@ class ModelHandler:
         threshold: float = 0.5,
         mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Process incoming image bytes and return CVAT-compatible shapes.
+        """Process incoming image bytes and return CVAT-compatible mask shapes.
 
         Args:
             image_bytes: Raw JPEG/PNG image binary data.
@@ -154,7 +151,16 @@ class ModelHandler:
                   Defaults to self.default_mode (configured via DETECTION_MODE env).
 
         Returns:
-            List of CVAT shape dictionaries.
+            List of CVAT mask dictionaries:
+            [
+                {
+                    "confidence": "0.95",
+                    "label": "car",
+                    "type": "mask",
+                    "mask": [p0, p1, ..., xmin, ymin, xmax, ymax],
+                    "points": [x1, y1, x2, y2, ...]
+                }
+            ]
         """
         if not image_bytes:
             raise ValueError("Empty image payload received")
@@ -178,7 +184,7 @@ class ModelHandler:
         )
 
         logger.info(
-            f"Inference complete: model={self.active_model}, mode={active_mode}, "
+            f"Mask inference complete: model={self.active_model}, mode={active_mode}, "
             f"image={result.original_dimensions[0]}x{result.original_dimensions[1]}, "
             f"api_latency={result.api_duration_seconds:.2f}s, "
             f"shapes_returned={len(result.shapes)} (threshold={threshold})"

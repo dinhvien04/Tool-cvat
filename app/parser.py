@@ -25,6 +25,9 @@ class VisionParseError(ValueError):
     pass
 
 
+MAX_CONTOUR_VERTICES: int = 10_000
+
+
 @dataclass
 class ParsedObject:
     """Represents a validated detected object."""
@@ -32,6 +35,10 @@ class ParsedObject:
     box_2d: List[int]  # [ymin, xmin, ymax, xmax] in [0, 1000]
     pixel_box: Optional[List[float]] = None  # [x1, y1, x2, y2] clamped to image dimensions
     confidence: Optional[float] = None
+    mask: Optional[List[List[Union[int, float]]]] = None  # [[x, y], ...] normalized in [0, 1000]
+    pixel_polygon: Optional[List[Tuple[float, float]]] = None  # [(x, y), ...] in image pixel space
+    cvat_mask: Optional[List[int]] = None  # [crop_pixels..., xmin, ymin, xmax, ymax]
+    group_id: Optional[int] = None  # Optional instance grouping ID
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation."""
@@ -43,6 +50,12 @@ class ParsedObject:
             data["confidence"] = round(float(self.confidence), 3)
         if self.pixel_box is not None:
             data["pixel_box"] = [round(float(c), 2) for c in self.pixel_box]
+        if self.mask is not None:
+            data["mask"] = [[int(round(float(c))) for c in pt] for pt in self.mask]
+        if self.pixel_polygon is not None:
+            data["pixel_polygon"] = [[round(float(c), 2) for c in pt] for pt in self.pixel_polygon]
+        if self.group_id is not None:
+            data["group_id"] = self.group_id
         return data
 
     def to_cvat_shape(self, occluded: bool = False) -> Dict[str, Any]:
@@ -57,6 +70,25 @@ class ParsedObject:
         }
         if self.confidence is not None:
             res["confidence"] = round(float(self.confidence), 3)
+        if self.group_id is not None:
+            res["group_id"] = self.group_id
+        return res
+
+    def to_cvat_mask_shape(self) -> Optional[Dict[str, Any]]:
+        """Convert to CVAT mask shape specification."""
+        if not self.cvat_mask:
+            return None
+        res: Dict[str, Any] = {
+            "type": "mask",
+            "label": self.label,
+            "mask": self.cvat_mask,
+        }
+        if self.pixel_polygon:
+            res["points"] = [round(float(c), 2) for pt in self.pixel_polygon for c in pt]
+        if self.confidence is not None:
+            res["confidence"] = str(round(float(self.confidence), 2))
+        if self.group_id is not None:
+            res["group_id"] = self.group_id
         return res
 
 
@@ -318,11 +350,65 @@ def parse_and_validate(
         else:
             conf_val = fallback_confidence
 
+        # Parse optional mask / polygon contour
+        raw_mask = item.get("mask") or item.get("polygon")
+        parsed_mask: Optional[List[List[Union[int, float]]]] = None
+        pixel_polygon: Optional[List[Tuple[float, float]]] = None
+        cvat_mask: Optional[List[int]] = None
+
+        if raw_mask is not None:
+            if isinstance(raw_mask, list) and len(raw_mask) > MAX_CONTOUR_VERTICES:
+                if strict:
+                    raise VisionParseError(
+                        f"Detection at index {idx} has {len(raw_mask)} vertices, exceeding maximum allowed limit ({MAX_CONTOUR_VERTICES})"
+                    )
+                warnings.append(
+                    f"Detection at index {idx} has {len(raw_mask)} vertices exceeding limit {MAX_CONTOUR_VERTICES}; clamped to first {MAX_CONTOUR_VERTICES}"
+                )
+                raw_mask = raw_mask[:MAX_CONTOUR_VERTICES]
+
+            if isinstance(raw_mask, list) and len(raw_mask) >= 3:
+                valid_contour = True
+                norm_contour: List[List[Union[int, float]]] = []
+                for pt_idx, pt in enumerate(raw_mask):
+                    if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                        valid_contour = False
+                        break
+                    try:
+                        px = float(pt[0])
+                        py = float(pt[1])
+                        norm_contour.append([px, py])
+                    except (ValueError, TypeError):
+                        valid_contour = False
+                        break
+                if valid_contour and len(norm_contour) >= 3:
+                    parsed_mask = norm_contour
+                    if image_width is not None and image_height is not None and image_width > 0 and image_height > 0:
+                        from core.geometry import polygon_to_cvat_mask
+                        geo_res = polygon_to_cvat_mask(parsed_mask, width=image_width, height=image_height)
+                        if geo_res:
+                            pixel_polygon = geo_res.get("pixel_polygon")
+                            cvat_mask = geo_res["mask"]
+                elif strict:
+                    raise VisionParseError(f"Detection at index {idx} has invalid mask format: {raw_mask!r}")
+                else:
+                    warnings.append(f"Detection at index {idx} has degenerate mask ignored: {raw_mask!r}")
+            elif strict and raw_mask is not None:
+                raise VisionParseError(f"Detection at index {idx} has invalid mask format: {raw_mask!r}")
+            elif raw_mask is not None:
+                warnings.append(f"Detection at index {idx} has degenerate mask ignored: {raw_mask!r}")
+
+        group_id = item.get("group_id", idx + 1)
+
         obj = ParsedObject(
             label=label,
             box_2d=[ymin, xmin, ymax, xmax],
             pixel_box=pixel_box,
             confidence=conf_val,
+            mask=parsed_mask,
+            pixel_polygon=pixel_polygon,
+            cvat_mask=cvat_mask,
+            group_id=group_id,
         )
         validated_objects.append(obj)
 

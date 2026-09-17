@@ -73,6 +73,7 @@ class PipelineOptions:
     strict: bool = False
     temperature: float = 0.0
     max_tokens: int = 4096
+    mode: str = "box_and_mask"
 
     def __repr__(self) -> str:
         """Safe string representation masking API keys."""
@@ -87,7 +88,8 @@ class PipelineOptions:
             f"ninerouter_key={masked_key!r}, "
             f"strict={self.strict}, "
             f"temperature={self.temperature}, "
-            f"max_tokens={self.max_tokens})"
+            f"max_tokens={self.max_tokens}, "
+            f"mode={self.mode!r})"
         )
 
 
@@ -218,6 +220,7 @@ def run_pipeline(options: PipelineOptions) -> PipelineResult:
         allowed_labels=target_labels,
         temperature=options.temperature,
         max_tokens=options.max_tokens,
+        mode=options.mode,
     )
     logger.info(
         f"Received model response in {vision_resp.duration_seconds:.2f}s "

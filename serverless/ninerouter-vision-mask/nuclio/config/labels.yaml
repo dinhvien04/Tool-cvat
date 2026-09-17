@@ -1,0 +1,144 @@
+# CVAT and 9Router Vision Label Configuration
+# IMPORTANT: Labels with similar or overlapping meanings (e.g. 'pedestrian' vs 'person',
+# 'traffic light' vs 'traffic_light', 'traffic sign' vs 'traffic_sign') are intentional.
+# DO NOT merge, normalize, alias, or rename them.
+
+all_labels:
+  - "pedestrian"
+  - "rider"
+  - "car"
+  - "truck"
+  - "bus"
+  - "train"
+  - "motorcycle"
+  - "bicycle"
+  - "traffic light"
+  - "traffic sign"
+  - "area/alternative"
+  - "area/drivable"
+  - "lane/crosswalk"
+  - "lane/double white"
+  - "lane/double yellow"
+  - "lane/road curb"
+  - "lane/single other"
+  - "lane/single white"
+  - "lane/single yellow"
+  - "road"
+  - "sidewalk"
+  - "building"
+  - "wall"
+  - "fence"
+  - "pole"
+  - "vegetation"
+  - "terrain"
+  - "sky"
+  - "person"
+  - "traffic_light"
+  - "traffic_sign"
+
+# Default rectangular bounding box label candidates (13 labels)
+# Used for Phase 1 2D object detection MVP.
+bbox_labels:
+  - "pedestrian"
+  - "rider"
+  - "car"
+  - "truck"
+  - "bus"
+  - "train"
+  - "motorcycle"
+  - "bicycle"
+  - "traffic light"
+  - "traffic sign"
+  - "person"
+  - "traffic_light"
+  - "traffic_sign"
+
+# Semantic region / non-bbox labels (18 labels)
+# Excluded from rectangular detection MVP (polygons/masks/lines).
+non_bbox_labels:
+  - "area/alternative"
+  - "area/drivable"
+  - "lane/crosswalk"
+  - "lane/double white"
+  - "lane/double yellow"
+  - "lane/road curb"
+  - "lane/single other"
+  - "lane/single white"
+  - "lane/single yellow"
+  - "road"
+  - "sidewalk"
+  - "building"
+  - "wall"
+  - "fence"
+  - "pole"
+  - "vegetation"
+  - "terrain"
+  - "sky"
+
+# Label categories and metadata for CVAT project import
+cvat_schema:
+  rectangle:
+    - name: "pedestrian"
+      attributes: []
+    - name: "rider"
+      attributes: []
+    - name: "car"
+      attributes: []
+    - name: "truck"
+      attributes: []
+    - name: "bus"
+      attributes: []
+    - name: "train"
+      attributes: []
+    - name: "motorcycle"
+      attributes: []
+    - name: "bicycle"
+      attributes: []
+    - name: "traffic light"
+      attributes: []
+    - name: "traffic sign"
+      attributes: []
+    - name: "person"
+      attributes: []
+    - name: "traffic_light"
+      attributes: []
+    - name: "traffic_sign"
+      attributes: []
+  polygon:
+    - name: "area/alternative"
+      attributes: []
+    - name: "area/drivable"
+      attributes: []
+    - name: "lane/crosswalk"
+      attributes: []
+    - name: "road"
+      attributes: []
+    - name: "sidewalk"
+      attributes: []
+    - name: "building"
+      attributes: []
+    - name: "wall"
+      attributes: []
+    - name: "fence"
+      attributes: []
+    - name: "pole"
+      attributes: []
+    - name: "vegetation"
+      attributes: []
+    - name: "terrain"
+      attributes: []
+    - name: "sky"
+      attributes: []
+  polyline:
+    - name: "lane/double white"
+      attributes: []
+    - name: "lane/double yellow"
+      attributes: []
+    - name: "lane/road curb"
+      attributes: []
+    - name: "lane/single other"
+      attributes: []
+    - name: "lane/single white"
+      attributes: []
+    - name: "lane/single yellow"
+      attributes: []
