@@ -91,23 +91,32 @@ def handler(context, event):
     # Dual-Dispatch: Check if incoming request is a CVAT Webhook event
     # -------------------------------------------------------------------------
     headers = getattr(event, "headers", {}) or {}
-    event_type = data.get("event") or headers.get("X-CVAT-Event") or headers.get("x-cvat-event")
+    from app.cvat_sync import (
+        extract_cvat_event_header,
+        extract_cvat_signature_header,
+        verify_cvat_webhook_signature,
+    )
+    event_type = data.get("event") or extract_cvat_event_header(headers)
     if event_type:
         context.logger.info(f"Received CVAT Webhook event: {event_type}")
         # Webhook signature verification if secret is configured
         webhook_secret = os.getenv("CVAT_WEBHOOK_SECRET")
-        sig_header = headers.get("X-CVAT-Signature") or headers.get("x-cvat-signature") or headers.get("X-Signature-256")
+        sig_header = extract_cvat_signature_header(headers)
+
         if webhook_secret:
-            from app.cvat_sync import verify_cvat_webhook_signature
-            raw_bytes = raw_body if isinstance(raw_body, bytes) else str(raw_body).encode("utf-8")
-            if not verify_cvat_webhook_signature(raw_bytes, sig_header, webhook_secret):
-                context.logger.warning("CVAT Webhook signature verification failed.")
+            raw_bytes = raw_body if isinstance(raw_body, (bytes, bytearray)) else str(raw_body).encode("utf-8")
+            if not sig_header or not verify_cvat_webhook_signature(raw_bytes, sig_header, webhook_secret):
+                context.logger.warning("CVAT Webhook signature verification failed or signature missing.")
                 return context.Response(
                     body=json.dumps({"error": "Invalid webhook signature"}),
                     headers={},
                     content_type="application/json",
                     status_code=401,
                 )
+        else:
+            context.logger.warning(
+                "CVAT_WEBHOOK_SECRET is not configured; running webhook dispatch in local dev mode without signature verification."
+            )
 
         # Process job/task completion events
         if "job" in event_type or "task" in event_type:

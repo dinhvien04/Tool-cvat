@@ -110,6 +110,8 @@ class AnnotationResult:
     warnings: List[str] = field(default_factory=list)
     image_hash: Optional[str] = None
     rules_injected: List[str] = field(default_factory=list)
+    visual_examples_used: int = 0
+    text_rules_used: int = 0
 
     def to_cvat_rectangles(self) -> List[Dict[str, Any]]:
         """Return pure CVAT detector response shapes."""
@@ -216,6 +218,10 @@ def annotate_image(
         image_hash = None
 
     rules_injected: List[str] = []
+    visual_examples: List[Dict[str, Any]] = []
+    visual_examples_used: int = 0
+    text_rules_used: int = 0
+
     f_db = feedback_db if feedback_db is not None else FeedbackDatabase()
     if enable_feedback and f_db.is_enabled():
         try:
@@ -224,6 +230,9 @@ def annotate_image(
             if retrieval_res.prompt_extension:
                 prompt += "\n\n" + retrieval_res.prompt_extension
             rules_injected = retrieval_res.rules
+            text_rules_used = len(rules_injected)
+            visual_examples = retrieval_res.visual_examples
+            visual_examples_used = len(visual_examples)
         except Exception as e:
             warnings.append(f"feedback_retrieval_warning: {e}")
 
@@ -234,6 +243,7 @@ def annotate_image(
         prompt=prompt,
         temperature=temperature,
         max_tokens=max_tokens,
+        visual_examples=visual_examples if visual_examples else None,
     )
 
     # 7. Parse and validate response
@@ -527,4 +537,6 @@ def annotate_image(
         warnings=warnings,
         image_hash=image_hash,
         rules_injected=rules_injected,
+        visual_examples_used=visual_examples_used,
+        text_rules_used=text_rules_used,
     )

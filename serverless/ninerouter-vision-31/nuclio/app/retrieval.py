@@ -10,9 +10,15 @@ Zero-Heavy-ML Directive:
 
 from __future__ import annotations
 
+import base64
+import io
+import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
+
+from PIL import Image
 
 from app.feedback import (
     CORRECTION_ADD_MISSING,
@@ -27,6 +33,8 @@ from app.feedback import (
     FeedbackDatabase,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class RetrievalResult:
@@ -34,9 +42,10 @@ class RetrievalResult:
     rules: List[str] = field(default_factory=list)
     examples: List[Dict[str, Any]] = field(default_factory=list)
     prompt_extension: str = ""
+    visual_examples: List[Dict[str, Any]] = field(default_factory=list)
 
     def has_content(self) -> bool:
-        return bool(self.rules or self.examples or self.prompt_extension)
+        return bool(self.rules or self.examples or self.prompt_extension or self.visual_examples)
 
 
 class CorrectionRetrievalEngine:
@@ -48,11 +57,13 @@ class CorrectionRetrievalEngine:
         max_examples_per_pass: int = 3,
         use_rules: bool = True,
         use_examples: bool = True,
+        use_visual_examples: bool = True,
     ):
         self.db = db or FeedbackDatabase()
         self.max_examples_per_pass = max_examples_per_pass
         self.use_rules = use_rules
         self.use_examples = use_examples
+        self.use_visual_examples = use_visual_examples
 
     def retrieve(
         self,
@@ -64,7 +75,7 @@ class CorrectionRetrievalEngine:
             candidate_labels: List of active class labels for the current detection task.
 
         Returns:
-            RetrievalResult containing rule strings, example records, and formatted prompt text.
+            RetrievalResult containing rule strings, example records, visual examples, and formatted prompt text.
         """
         if not self.db.is_enabled():
             return RetrievalResult()
@@ -74,8 +85,11 @@ class CorrectionRetrievalEngine:
             rules = self.db.get_active_rules(labels=candidate_labels)
 
         examples: List[Dict[str, Any]] = []
+        visual_examples: List[Dict[str, Any]] = []
         if self.use_examples:
             examples = self._select_few_shot_examples(candidate_labels=candidate_labels)
+            if self.use_visual_examples:
+                visual_examples = self._build_visual_examples(examples)
 
         prompt_ext = self._format_prompt_extension(rules, examples)
 
@@ -83,6 +97,7 @@ class CorrectionRetrievalEngine:
             rules=rules,
             examples=examples,
             prompt_extension=prompt_ext,
+            visual_examples=visual_examples,
         )
 
     def _select_few_shot_examples(
@@ -132,14 +147,152 @@ class CorrectionRetrievalEngine:
                     "correction_type": r["correction_type"],
                     "ai_label": r["ai_label"],
                     "human_label": r["human_label"],
+                    "ai_shape_json": r["ai_shape_json"],
+                    "human_shape_json": r["human_shape_json"],
                     "iou": r["iou"],
                     "crop_path": r["crop_path"],
+                    "details_json": r["details_json"],
                     "created_at": r["created_at"],
                 }
                 selected.append(item)
             return selected
         finally:
             conn.close()
+
+    def _build_visual_examples(
+        self,
+        examples: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Build real multimodal few-shot visual examples with crop data URLs and expected annotations.
+
+        Converts human-corrected geometry and labels into structured ground-truth annotations
+        matching the 9Router vision contract. Safely skips unreadable, corrupt, or missing crops.
+        """
+        visual_examples: List[Dict[str, Any]] = []
+
+        for item in examples:
+            if len(visual_examples) >= self.max_examples_per_pass:
+                break
+
+            crop_rel = item.get("crop_path")
+            if not crop_rel:
+                continue
+
+            resolved_path = self.db.resolve_crop_path(crop_rel)
+            if not resolved_path or not resolved_path.exists() or not resolved_path.is_file():
+                continue
+
+            # Load and encode crop safely
+            try:
+                with Image.open(resolved_path) as im:
+                    rgb_im = im.convert("RGB")
+                    if max(rgb_im.size) > 512:
+                        rgb_im.thumbnail((512, 512), Image.Resampling.LANCZOS)
+                    buf = io.BytesIO()
+                    rgb_im.save(buf, format="JPEG", quality=85)
+                    crop_data_url = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+            except Exception as e:
+                logger.debug(f"Skipping corrupt or unreadable crop file {resolved_path}: {e}")
+                continue
+
+            ctype = item.get("correction_type")
+            ai_lbl = item.get("ai_label")
+            human_lbl = item.get("human_label")
+
+            # Parse details and shape JSONs
+            details = {}
+            if item.get("details_json"):
+                try:
+                    details = json.loads(item["details_json"])
+                except Exception:
+                    details = {}
+
+            human_shape = {}
+            if item.get("human_shape_json"):
+                try:
+                    human_shape = json.loads(item["human_shape_json"])
+                except Exception:
+                    human_shape = {}
+
+            # Construct expected structured annotation
+            target_label = human_lbl or ai_lbl or "object"
+            crop_coords = details.get("crop_coords")  # [cx1, cy1, cx2, cy2] in original image pixels
+
+            if ctype == CORRECTION_DELETE_FALSE_POSITIVE:
+                # Reviewer deleted false positive; expected output has no object
+                expected_output = {"objects": []}
+                description = f"False positive '{ai_lbl}' deleted by human reviewer (negative example)"
+            else:
+                # Bounding box calculation relative to crop in [0, 1000]
+                box_2d = [100, 100, 900, 900]  # Centered default fallback
+                if crop_coords and len(crop_coords) == 4:
+                    cx1, cy1, cx2, cy2 = [float(c) for c in crop_coords]
+                    cw = max(cx2 - cx1, 1.0)
+                    ch = max(cy2 - cy1, 1.0)
+
+                    pts = human_shape.get("points") or []
+                    if human_shape.get("type") == "rectangle" and len(pts) >= 4:
+                        xtl, ytl, xbr, ybr = pts[:4]
+                        rx1 = int(round(max(0.0, min(1000.0, (xtl - cx1) / cw * 1000.0))))
+                        ry1 = int(round(max(0.0, min(1000.0, (ytl - cy1) / ch * 1000.0))))
+                        rx2 = int(round(max(0.0, min(1000.0, (xbr - cx1) / cw * 1000.0))))
+                        ry2 = int(round(max(0.0, min(1000.0, (ybr - cy1) / ch * 1000.0))))
+                        ymin, ymax = min(ry1, ry2), max(ry1, ry2)
+                        xmin, xmax = min(rx1, rx2), max(rx1, rx2)
+                        if ymax - ymin < 10:
+                            ymax = min(1000, ymin + 10)
+                            ymin = max(0, ymax - 10)
+                        if xmax - xmin < 10:
+                            xmax = min(1000, xmin + 10)
+                            xmin = max(0, xmax - 10)
+                        box_2d = [ymin, xmin, ymax, xmax]
+
+                target_obj: Dict[str, Any] = {
+                    "label": target_label,
+                    "box_2d": box_2d,
+                }
+
+                # If polygon / contour points exist, compute relative mask
+                poly_pts = human_shape.get("points") or []
+                if human_shape.get("type") in ("polygon", "mask") and len(poly_pts) >= 6 and crop_coords:
+                    cx1, cy1, cx2, cy2 = [float(c) for c in crop_coords]
+                    cw = max(cx2 - cx1, 1.0)
+                    ch = max(cy2 - cy1, 1.0)
+                    norm_poly = []
+                    for i in range(0, len(poly_pts), 2):
+                        px = int(round(max(0.0, min(1000.0, (poly_pts[i] - cx1) / cw * 1000.0))))
+                        py = int(round(max(0.0, min(1000.0, (poly_pts[i + 1] - cy1) / ch * 1000.0))))
+                        norm_poly.append([px, py])
+                    if len(norm_poly) >= 3:
+                        target_obj["mask"] = norm_poly
+
+                expected_output = {"objects": [target_obj]}
+
+                if ctype == CORRECTION_RELABEL:
+                    description = f"Relabeled: '{ai_lbl}' corrected to human label '{human_lbl}'"
+                elif ctype == CORRECTION_ADD_MISSING:
+                    description = f"Missed object: human added omitted '{human_lbl}'"
+                elif ctype in (CORRECTION_BOX_MOVE, CORRECTION_BOX_RESIZE):
+                    description = f"Box alignment: human adjusted bounding box for '{target_label}'"
+                elif ctype in (CORRECTION_MASK_EDIT, CORRECTION_REGION_EDIT):
+                    description = f"Mask refinement: human refined segmentation contour for '{target_label}'"
+                elif ctype == CORRECTION_LANE_EDIT:
+                    description = f"Lane alignment: human refined lane marking for '{target_label}'"
+                else:
+                    description = f"Human correction: '{target_label}'"
+
+            visual_examples.append({
+                "id": item["id"],
+                "correction_type": ctype,
+                "crop_data_url": crop_data_url,
+                "expected_output": expected_output,
+                "expected_output_json": json.dumps(expected_output, indent=2),
+                "description": description,
+                "ai_label": ai_lbl,
+                "human_label": human_lbl,
+            })
+
+        return visual_examples
 
     def _format_prompt_extension(
         self,

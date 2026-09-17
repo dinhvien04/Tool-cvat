@@ -346,12 +346,34 @@ Bộ dò 31 nhãn chuẩn (`ninerouter-vision-31`) được tích hợp cơ ch�
                                 +-------------------------------------+
 ```
 
-### 8.1 Vân tay định danh ảnh SHA-256 (`image_hash`)
-Do CVAT Serverless Lambda Manager chỉ gửi payload ẩn danh dạng `{"image": "<base64>", "threshold": 0.5}` mà không kèm `task_id` hay `job_id`, hệ thống sử dụng thuật toán băm SHA-256 trên chuỗi byte ảnh thô (`compute_image_hash`).
-- Khi chạy suy luận ban đầu, kết quả AI được lưu vào bảng `predictions` với khóa chính là `image_hash`.
-- Khi người dùng đồng bộ công việc (Sync Job), ảnh từng frame được tải về và băm lại, cho phép hệ thống đối chiếu chính xác 100% giữa dự đoán ban đầu của AI và kết quả chỉnh sửa cuối cùng của con người.
+### 8.1 Vân tay định danh ảnh chuẩn hóa (Canonical Visual Fingerprinting)
+Do CVAT Serverless Lambda Manager chỉ gửi payload ẩn danh dạng `{"image": "<base64>", "threshold": 0.5}` mà không kèm `task_id` hay `job_id`, việc liên kết giữa dự đoán gốc của AI và các frame được tải về sau này dựa trên hàm băm hình ảnh chuẩn hóa duy nhất (`compute_visual_fingerprint` / `compute_image_hash`):
+- **Độc lập định dạng container**: Thay vì băm chuỗi byte nén JPEG/PNG (vốn thay đổi theo thuật toán nén và metadata của thư viện), hàm giải mã ảnh sang bộ đệm pixel RGB thô không nén (`im.convert("RGB").tobytes()`), kết hợp với tiêu đề kích thước chiều rộng x chiều cao (`{w}x{h}_`).
+- **Đồng nhất 100%**: Ảnh dưới dạng đối tượng `PIL.Image`, chuỗi byte PNG, chuỗi byte JPEG, file lưu trên ổ đĩa, hay frame tải về từ CVAT REST API `/api/jobs/{id}/data?type=frame` đều tạo ra chuỗi hash SHA-256 hoàn toàn giống nhau.
+- Khi detector chạy lần đầu, kết quả AI được lưu vào bảng `predictions` với khóa chính là `image_hash`.
+- Khi người dùng hoặc webhook kích hoạt đồng bộ (Sync Job), frame được tải về, giải mã và băm lại, đảm bảo tìm thấy đúng dự đoán nền (baseline) của AI.
 
-### 8.2 Động cơ so khớp song ánh IoU (CorrectionDiffEngine) & 9 dạng chỉnh sửa
+### 8.2 Cơ sở dữ liệu phản hồi dùng chung & Cấu hình Bind Mount
+Hệ thống sử dụng **duy nhất một cơ sở dữ liệu SQLite** lưu trữ liên tục tại host `.tool-cvat/feedback.sqlite3` và thư mục ảnh crop `.tool-cvat/examples/`:
+- **Docker Bind Mount**: Khi triển khai detector `ninerouter-vision-31`, thư mục host `.tool-cvat` được gắn kết (bind mount) trực tiếp vào container tại `/opt/nuclio/feedback`:
+  ```yaml
+  spec:
+    volumes:
+      - volume:
+          name: feedback-data
+          hostPath:
+            path: 'D:/tool-cvat/.tool-cvat'
+        volumeMount:
+          name: feedback-data
+          mountPath: '/opt/nuclio/feedback'
+  ```
+- **Biến môi trường đồng bộ**:
+  - `FEEDBACK_DATA_DIR=/opt/nuclio/feedback`
+  - `FEEDBACK_DB_PATH=/opt/nuclio/feedback/feedback.sqlite3`
+  - Cả container Nuclio và CLI trên máy host (Windows PowerShell / Bash) cùng đọc và ghi chung một file SQLite (bật chế độ WAL `PRAGMA journal_mode=WAL`).
+- **An toàn dữ liệu**: Database và ảnh crop hoàn toàn tồn tại độc lập trên host, không bị xóa khi rebuild hoặc xóa container.
+
+### 8.3 Động cơ so khớp song ánh IoU (CorrectionDiffEngine) & 9 dạng chỉnh sửa
 Để tránh lỗi phân loại nhầm (ví dụ: AI đoán `car`, người dùng sửa nhãn thành `truck` tại cùng vị trí nếu so khớp theo tên nhãn sẽ bị tính thành 1 lần xóa xe + 1 lần thêm xe tải), `CorrectionDiffEngine` tính ma trận chỉ số giao trên hợp (IoU) hình học trước:
 1. **`RELABEL`**: Hai hình có IoU >= 0.60 nhưng mang nhãn khác nhau.
 2. **`BOX_MOVE`**: Cùng nhãn, hộp chữ nhật bounding box có tâm dịch chuyển > 5px.
@@ -363,8 +385,7 @@ Do CVAT Serverless Lambda Manager chỉ gửi payload ẩn danh dạng `{"image"
 8. **`ADD_MISSING`**: Đối tượng người dùng vẽ thêm mới mà AI bỏ sót.
 9. **`NO_CHANGE`**: Đối tượng AI sinh ra được người dùng giữ nguyên vẹn (IoU >= 0.92, không dịch chuyển tâm/kích thước).
 
-### 8.3 Tự động suy diễn quy tắc (Rule Derivation) & Lưu trữ SQLite
-- Dữ liệu được lưu trữ trong cơ sở dữ liệu SQLite cục bộ tại `.tool-cvat/feedback.sqlite3` (được đưa vào `.gitignore`, độc lập với các chu kỳ rebuild của container Docker).
+### 8.4 Tự động suy diễn quy tắc & Quản lý Crop an toàn
 - **Hạn mức lưu trữ an toàn (Storage Quotas)**:
   - Tối đa 50MB dung lượng bộ nhớ đệm hình ảnh crop.
   - Tối đa 150 ảnh crop tổng cộng, mỗi nhãn không vượt quá 10 crop.
@@ -372,40 +393,56 @@ Do CVAT Serverless Lambda Manager chỉ gửi payload ẩn danh dạng `{"image"
   - Tuyệt đối không lưu trữ khóa API hay chuỗi Base64 nguyên ảnh vào CSDL.
 - **Suy diễn quy tắc thống kê**:
   - Hệ thống sử dụng truy vấn SQL tổng hợp: `HAVING COUNT(*) >= min_rule_samples` (mặc định ngưỡng >= 3 mẫu lặp lại).
-  - Khi một lỗi xảy ra từ 3 lần trở lên (ví dụ: mô hình liên tục nhầm `car` thành `truck`), quy tắc nhắc nhở sẽ được tự động kích hoạt:
-    * *"When detecting high-profile heavy cargo vehicles, prefer truck over car."*
-    * *"Ensure bounding boxes around pedestrian tightly bound the extremities without including surrounding ground."*
+  - Khi một lỗi xảy ra từ 3 lần trở lên, quy tắc tự động kích hoạt để hướng dẫn mô hình.
 
-### 8.4 Truy xuất ít mẫu (Few-Shot Retrieval) & Bơm nhắc nhở thích ứng
-Mỗi khi gửi yêu cầu nhận diện hình ảnh mới tới 9Router:
-1. `CorrectionRetrievalEngine` kiểm tra cơ sở dữ liệu để lấy các quy tắc đang có hiệu lực.
-2. Chọn lọc 2-4 mẫu chỉnh sửa tiêu biểu nhất.
-3. Ghép nối thành phần mở rộng nhắc nhở (`prompt_extension`) và chèn trực tiếp vào Vision Prompt của 9Router.
-4. Mô hình VLM tiếp nhận các chỉ dẫn điều chỉnh này trong ngữ cảnh (in-context), giúp các dự đoán tiếp theo khắc phục triệt để các lỗi thường gặp trong dự án.
+### 8.5 Học qua vài mẫu trực quan đa thể thức (Real Multimodal Few-Shot)
+Thay vì chỉ gửi hướng dẫn bằng chữ trừu tượng, hệ thống triển khai cơ chế **Multimodal Interleaved Few-Shot**:
+1. `CorrectionRetrievalEngine` chọn tối đa 2-3 ví dụ sửa đổi tiêu biểu nhất (`max_examples_per_pass = 2..3`).
+2. Trích xuất ảnh crop đã được người dùng chỉnh sửa, mã hóa thành Base64 Data URL (`data:image/jpeg;base64,...`).
+3. Chuẩn bị định dạng kết quả cấu trúc JSON mong đợi (`expected_output` chứa mảng `objects` với nhãn và tọa độ chuẩn hóa).
+4. Tạo mảng tin nhắn người dùng (user content array) lồng ghép đan xen:
+   - `text`: Mô tả ví dụ sửa đổi (ví dụ: `Reviewer relabeled truck -> bus`)
+   - `image_url`: Ảnh crop vùng đối tượng thực tế
+   - `text`: Cấu trúc JSON mong đợi
+   - `text`: Ảnh mục tiêu cần gán nhãn
+   - `image_url`: Toàn bộ ảnh mục tiêu
+5. **Đo lường & Giám sát (Instrumentation)**: `AnnotationResult` ghi nhận chính xác `visual_examples_used` và `text_rules_used`.
 
-### 8.5 Bộ công cụ dòng lệnh quản trị (CLI Feedback Commands)
+### 8.6 Xác thực chữ ký Webhook HMAC-SHA256 bảo mật
+Container `ninerouter-vision-31` hỗ trợ tiếp nhận sự kiện Webhook từ CVAT (`update:job`, `create:job`):
+- **Xác thực chữ ký HMAC-SHA256**: Xác thực trực tiếp trên chuỗi byte thô của body request (`raw_body`), không parse lại JSON rồi dump để tránh sai lệch ký tự/khoảng trắng.
+- **Tra cứu Header không phân biệt hoa thường**: Hỗ trợ `X-Signature-256`, `x-signature-256`, `X-CVAT-Signature`, `x-cvat-signature`, `X-Hub-Signature-256`.
+- **An toàn khi không cấu hình Secret**: Nếu `CVAT_WEBHOOK_SECRET` không được thiết lập, hệ thống ghi log cảnh báo và cho phép chạy chế độ dev nội bộ; khi đã cấu hình secret, mọi request thiếu chữ ký hoặc chữ ký không hợp lệ bị từ chối với mã lỗi 401.
+
+### 8.7 Bộ công cụ dòng lệnh quản trị (CLI Feedback Commands)
 Người dùng có thể giám sát và điều khiển toàn bộ bộ nhớ sửa đổi thông qua `main.py`:
 
 ```bash
-# 1. Đồng bộ kết quả chỉnh sửa từ CVAT Job (kèm token nếu CVAT yêu cầu đăng nhập)
-python main.py feedback-sync --job 14 --url http://localhost:18080
+# 1. Cấu hình hoặc kiểm tra Webhook tự động trong CVAT
+python main.py feedback-webhook-setup --url http://localhost:18080 --target-url http://nuclio-nuclio-ninerouter-vision-31:8080 --secret toolcvat_webhook_secret_2026
 
-# 2. Xem bảng thống kê hiệu chỉnh chi tiết của toàn bộ 31 nhãn và các quy tắc đang hoạt động
+# 2. Liệt kê các Webhook đang đăng ký trong CVAT
+python main.py feedback-webhook-setup --url http://localhost:18080 --list
+
+# 3. Đồng bộ thủ công kết quả chỉnh sửa từ CVAT Job (kèm token nếu CVAT yêu cầu đăng nhập)
+python main.py feedback-sync --job 15 --url http://localhost:18080
+
+# 4. Xem bảng thống kê hiệu chỉnh chi tiết của toàn bộ 31 nhãn và các quy tắc đang hoạt động
 python main.py feedback-stats
 
-# 3. Liệt kê danh sách các bản ghi hiệu chỉnh gần nhất
+# 5. Liệt kê danh sách các bản ghi hiệu chỉnh gần nhất
 python main.py feedback-list --limit 20 --label car
 
-# 4. Tắt/bật tính năng ghi nhớ và gợi ý thích ứng
+# 6. Tắt/bật tính năng ghi nhớ và gợi ý thích ứng
 python main.py feedback-disable
 python main.py feedback-enable
 
-# 5. Dọn dẹp bộ nhớ đệm
+# 7. Dọn dẹp bộ nhớ đệm
 python main.py feedback-clear --crops   # Xóa các file ảnh crop
 python main.py feedback-clear --rules   # Xóa các quy tắc đã suy diễn
 python main.py feedback-clear --all     # Xóa toàn bộ dữ liệu phản hồi
 
-# 6. So sánh trực tiếp hiệu quả trước và sau khi áp dụng gợi ý thích ứng
+# 8. So sánh trực tiếp hiệu quả trước và sau khi áp dụng gợi ý thích ứng
 python main.py feedback-eval --image test.jpg
 ```
 
@@ -413,11 +450,11 @@ python main.py feedback-eval --image test.jpg
 
 ## 9. Quản Trị Hệ Thống & Khắc Phục Sự Cố (Troubleshooting)
 
-### 8.1 Lỗi Timeout VLM khi xử lý ảnh phức tạp (Request timed out after 60s)
+### 9.1 Lỗi Timeout VLM khi xử lý ảnh phức tạp (Request timed out after 60s)
 - **Nguyên nhân**: Khi phát hiện toàn diện 31 nhãn trên ảnh độ phân giải cao, mô hình lý luận (Reasoning Model) của 9Router có thể mất 45-65 giây.
 - **Giải pháp**: Cấu hình `NINEROUTER_TIMEOUT=120.0` trong `function.yaml`, `app/config.py` và truyền cờ `--env "NINEROUTER_TIMEOUT=120.0"` khi triển khai qua nuctl.
 
-### 8.2 Lỗi kết nối WSL vsock (`Wsl/Service/0x8007274c`)
+### 9.2 Lỗi kết nối WSL vsock (`Wsl/Service/0x8007274c`)
 - **Nguyên nhân**: Quá trình kết nối vsock giữa Windows host và WSL Ubuntu bị gián đoạn hoặc treo tạm thời.
 - **Giải pháp**:
   - Không sử dụng lệnh gọi con `wslpath`. Script `phase3b_deploy.ps1` sử dụng giải thuật chuyển đổi chuỗi đường dẫn PowerShell thuần túy.
@@ -427,7 +464,7 @@ python main.py feedback-eval --image test.jpg
     ```
   - Thao tác này an toàn 100%, không ảnh hưởng tới Docker daemon hay dữ liệu CVAT.
 
-### 8.3 An toàn dữ liệu tuyệt đối (Zero Volume Impact)
+### 9.3 An toàn dữ liệu tuyệt đối (Zero Volume Impact)
 - Khi cần gỡ bỏ hàm Nuclio để nâng cấp hoặc cài lại, **CHỈ** sử dụng script an toàn:
   ```powershell
   .\scripts\phase3b_remove.ps1 -Target 31

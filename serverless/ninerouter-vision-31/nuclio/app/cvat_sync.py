@@ -33,15 +33,15 @@ logger = logging.getLogger(__name__)
 
 
 def verify_cvat_webhook_signature(
-    payload_bytes: bytes,
+    payload_bytes: Union[bytes, bytearray, str],
     signature_header: Optional[str],
     secret: str,
 ) -> bool:
-    """Verify CVAT webhook HMAC-SHA256 signature (X-CVAT-Signature header).
+    """Verify CVAT webhook HMAC-SHA256 signature against original request bytes.
 
     Args:
-        payload_bytes: Raw HTTP request body bytes.
-        signature_header: Contents of 'X-CVAT-Signature' or 'X-Signature-256' header.
+        payload_bytes: Raw HTTP request body bytes (NOT re-serialized JSON).
+        signature_header: Contents of 'X-Signature-256' or 'X-CVAT-Signature' header.
         secret: Configured shared secret string.
 
     Returns:
@@ -50,17 +50,48 @@ def verify_cvat_webhook_signature(
     if not signature_header or not secret:
         return False
 
+    if isinstance(payload_bytes, str):
+        raw_bytes = payload_bytes.encode("utf-8")
+    else:
+        raw_bytes = bytes(payload_bytes)
+
     sig = signature_header.strip()
     if sig.startswith("sha256="):
         sig = sig[7:].strip()
 
     expected_sig = hmac.new(
         secret.encode("utf-8"),
-        payload_bytes,
+        raw_bytes,
         hashlib.sha256,
     ).hexdigest()
 
     return hmac.compare_digest(expected_sig.lower(), sig.lower())
+
+
+def extract_cvat_signature_header(headers: Dict[str, Any]) -> Optional[str]:
+    """Case-insensitive extraction of CVAT webhook signature header.
+
+    Supports 'X-Signature-256', 'x-signature-256', 'X-CVAT-Signature',
+    'x-cvat-signature', and 'X-Hub-Signature-256'.
+    """
+    if not isinstance(headers, dict):
+        return None
+    lower_map = {str(k).lower(): str(v) for k, v in headers.items()}
+    for key in ("x-signature-256", "x-cvat-signature", "x-hub-signature-256"):
+        if key in lower_map:
+            return lower_map[key]
+    return None
+
+
+def extract_cvat_event_header(headers: Dict[str, Any]) -> Optional[str]:
+    """Case-insensitive extraction of CVAT webhook event header."""
+    if not isinstance(headers, dict):
+        return None
+    lower_map = {str(k).lower(): str(v) for k, v in headers.items()}
+    for key in ("x-cvat-event", "x-event"):
+        if key in lower_map:
+            return lower_map[key]
+    return None
 
 
 @dataclass
@@ -103,6 +134,7 @@ class CVATSyncClient:
         self.token = token
         self.timeout = timeout
         self.session = requests.Session()
+        self.session.headers.update({"Accept": "application/vnd.cvat+json"})
         if token:
             self.session.headers.update({"Authorization": f"Token {token}"})
 
@@ -119,11 +151,13 @@ class CVATSyncClient:
 
     def get_labels(self, task_id: int) -> Dict[int, str]:
         """Fetch task labels mapping {label_id: label_name}."""
-        url = f"{self.base_url}/api/labels?task_id={task_id}"
+        url = f"{self.base_url}/api/labels?task_id={task_id}&page_size=100"
         mapping: Dict[int, str] = {}
         try:
-            resp = self.session.get(url, timeout=self.timeout)
-            if resp.status_code == 200:
+            while url:
+                resp = self.session.get(url, timeout=self.timeout)
+                if resp.status_code != 200:
+                    break
                 data = resp.json()
                 results = data.get("results", data if isinstance(data, list) else [])
                 for item in results:
@@ -131,6 +165,7 @@ class CVATSyncClient:
                     name = item.get("name")
                     if lid is not None and name:
                         mapping[int(lid)] = str(name)
+                url = data.get("next") if isinstance(data, dict) else None
         except Exception as e:
             logger.debug("Failed GET %s: %s", url, e)
         return mapping
@@ -156,6 +191,107 @@ class CVATSyncClient:
         except Exception as e:
             logger.debug("Failed GET %s: %s", url, e)
         return None
+
+    def list_webhooks(self) -> List[Dict[str, Any]]:
+        """Fetch all webhooks registered in CVAT."""
+        url = f"{self.base_url}/api/webhooks"
+        try:
+            resp = self.session.get(url, timeout=self.timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("results", data if isinstance(data, list) else [])
+        except Exception as e:
+            logger.debug("Failed GET %s: %s", url, e)
+        return []
+
+    def create_webhook(
+        self,
+        target_url: str,
+        events: Optional[List[str]] = None,
+        secret: Optional[str] = None,
+        description: str = "tool-cvat-feedback",
+    ) -> Optional[Dict[str, Any]]:
+        """Register a new webhook in CVAT."""
+        url = f"{self.base_url}/api/webhooks"
+        payload: Dict[str, Any] = {
+            "target_url": target_url,
+            "description": description,
+            "events": events or ["update:job", "create:job"],
+            "is_active": True,
+        }
+        if secret:
+            payload["secret"] = secret
+        try:
+            resp = self.session.post(url, json=payload, timeout=self.timeout)
+            if resp.status_code in (200, 201):
+                return resp.json()
+            logger.warning("Failed POST %s (status %d): %s", url, resp.status_code, resp.text[:200])
+        except Exception as e:
+            logger.debug("Failed POST %s: %s", url, e)
+        return None
+
+    def update_webhook(
+        self,
+        webhook_id: int,
+        target_url: Optional[str] = None,
+        events: Optional[List[str]] = None,
+        secret: Optional[str] = None,
+        description: Optional[str] = None,
+        is_active: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """Update an existing CVAT webhook."""
+        url = f"{self.base_url}/api/webhooks/{webhook_id}"
+        payload: Dict[str, Any] = {"is_active": is_active}
+        if target_url:
+            payload["target_url"] = target_url
+        if events:
+            payload["events"] = events
+        if secret:
+            payload["secret"] = secret
+        if description:
+            payload["description"] = description
+        try:
+            resp = self.session.patch(url, json=payload, timeout=self.timeout)
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning("Failed PATCH %s (status %d): %s", url, resp.status_code, resp.text[:200])
+        except Exception as e:
+            logger.debug("Failed PATCH %s: %s", url, e)
+        return None
+
+    def setup_webhook(
+        self,
+        target_url: str,
+        secret: Optional[str] = None,
+        description: str = "tool-cvat-feedback",
+        events: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Safely inspect, create, or update the feedback webhook."""
+        existing = self.list_webhooks()
+        matching = None
+        for wh in existing:
+            if wh.get("description") == description or wh.get("target_url") == target_url:
+                matching = wh
+                break
+
+        if matching:
+            wh_id = matching["id"]
+            updated = self.update_webhook(
+                webhook_id=wh_id,
+                target_url=target_url,
+                events=events or ["update:job", "create:job"],
+                secret=secret,
+                description=description,
+            )
+            return {"action": "updated", "webhook": updated or matching, "id": wh_id}
+        else:
+            created = self.create_webhook(
+                target_url=target_url,
+                events=events or ["update:job", "create:job"],
+                secret=secret,
+                description=description,
+            )
+            return {"action": "created", "webhook": created, "id": created.get("id") if created else None}
 
 
 def sync_job_feedback(
@@ -310,3 +446,35 @@ def sync_job_feedback(
     report.message = f"Synchronized job #{job_id}: {report.frames_reconciled}/{report.frames_checked} frames reconciled with baseline."
 
     return report
+
+
+if __name__ == "__main__":
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(description="CVAT Feedback Synchronization and Webhook Setup")
+    parser.add_argument("--job-id", type=int, help="CVAT job ID to synchronize")
+    parser.add_argument("--cvat-url", type=str, default=os.getenv("CVAT_URL", "http://localhost:18080"), help="CVAT server URL")
+    parser.add_argument("--token", type=str, default=os.getenv("CVAT_TOKEN"), help="CVAT authentication token")
+    parser.add_argument("--setup-webhook", action="store_true", help="Inspect or register CVAT feedback webhook")
+    parser.add_argument("--target-url", type=str, default="http://nuclio-nuclio-ninerouter-vision-31:8080", help="Webhook destination URL")
+    parser.add_argument("--webhook-secret", type=str, default=os.getenv("CVAT_WEBHOOK_SECRET"), help="Webhook HMAC shared secret")
+    parser.add_argument("--list-webhooks", action="store_true", help="List registered webhooks")
+
+    args = parser.parse_args()
+    sync_client = CVATSyncClient(base_url=args.cvat_url, token=args.token)
+
+    if args.list_webhooks:
+        hooks = sync_client.list_webhooks()
+        print(f"Registered Webhooks ({len(hooks)}):")
+        for h in hooks:
+            print(f"  ID: {h.get('id')} | URL: {h.get('target_url')} | Desc: {h.get('description')}")
+    elif args.setup_webhook:
+        res = sync_client.setup_webhook(target_url=args.target_url, secret=args.webhook_secret)
+        print(f"Webhook setup result: {res['action']} (ID: {res.get('id')})")
+    elif args.job_id:
+        sync_report = sync_job_feedback(job_id=args.job_id, cvat_client=sync_client)
+        print(json.dumps(sync_report.to_dict(), indent=2))
+    else:
+        parser.print_help()
+

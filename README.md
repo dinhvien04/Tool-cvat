@@ -177,7 +177,7 @@ Send a test inference request to verify running containers:
 
 ## 🧠 Human-in-the-Loop Correction Memory & Adaptive Prompting
 
-The full 31-label detector (`ninerouter-vision-31`) is intrinsically **correction-aware**. When human annotators edit, correct, or delete AI-generated annotations in CVAT, the system reconciles the changes, records them into local memory, derives actionable rules, and injects dynamic few-shot guidance into future inference requests — **without local retraining or heavy ML dependencies**.
+The full 31-label detector (`ninerouter-vision-31`) is intrinsically **correction-aware**. When human annotators edit, correct, or delete AI-generated annotations in CVAT, the system reconciles the changes, records them into local memory, derives actionable rules, and injects dynamic multimodal visual few-shot guidance into future inference requests — **without local retraining or heavy ML dependencies**.
 
 ### How the Feedback Loop Works
 
@@ -185,14 +185,14 @@ The full 31-label detector (`ninerouter-vision-31`) is intrinsically **correctio
   1. AI Baseline Inference
      [Image] ──> [ninerouter-vision-31] ──> [Shapes Generated]
                          │
-                         └──> Saved to SQLite (.tool-cvat/feedback.sqlite3)
-                              Indexed by SHA-256 (image_hash)
+                         └──> Saved to Persistent SQLite (/opt/nuclio/feedback/feedback.sqlite3)
+                              Indexed by Canonical Visual Fingerprint ({w}x{h}_ + SHA256 of RGB buffer)
 
   2. Human Review & Editing in CVAT
      Annotator corrects mislabeled classes (car -> truck), adjusts contours,
      adds missed objects, or removes false positives.
 
-  3. Synchronization (Automated or CLI)
+  3. Synchronization (Automated Webhook or CLI)
      CVAT Webhook (`update:job`) ──> [Dual-Dispatch Nuclio Handler]
      OR manual CLI: python main.py feedback-sync --job <id>
 
@@ -207,72 +207,102 @@ The full 31-label detector (`ninerouter-vision-31`) is intrinsically **correctio
      Patterns with count >= min_samples (default 3) are synthesized into rules:
      "When detecting high-profile heavy cargo vehicles, prefer truck over car."
 
-  6. Adaptive Prompt Injection (CorrectionRetrievalEngine)
-     Future inferences retrieve active rules + 2-4 representative crops/examples,
-     dynamically prepending them into the vision prompt.
+  6. Real Multimodal Few-Shot Prompting (CorrectionRetrievalEngine)
+     Future inferences retrieve active rules + 2-3 visual JPEG crops (<=512px)
+     interleaved as Base64 Data URLs with expected structured JSON annotations,
+     dynamically prepending them into the vision model message content.
 ```
+
+### Shared Persistent Database & Docker Bind Mount
+
+The feedback database and visual crops persist across container rebuilds and host reboots via a Docker host bind mount:
+- **Host Location**: `.tool-cvat/feedback.sqlite3` and `.tool-cvat/examples/`
+- **Container Mount**: `/opt/nuclio/feedback` bound to host `.tool-cvat` via `spec.volumes` in `function.yaml`:
+  ```yaml
+  spec:
+    volumes:
+      - volume:
+          name: feedback-data
+          hostPath:
+            path: 'D:/tool-cvat/.tool-cvat'
+        volumeMount:
+          name: feedback-data
+          mountPath: '/opt/nuclio/feedback'
+  ```
+- **Environment Variables**:
+  - `FEEDBACK_DATA_DIR=/opt/nuclio/feedback`
+  - `FEEDBACK_DB_PATH=/opt/nuclio/feedback/feedback.sqlite3`
+  - WAL mode enabled (`PRAGMA journal_mode=WAL`) for concurrent host CLI and container access.
 
 ### CLI Feedback Management
 
 Manage and inspect correction memory directly from the terminal:
 
 ```bash
-# 1. Synchronize annotations from a CVAT job
-python main.py feedback-sync --job 14 [--url http://localhost:18080] [--token <token>]
+# 1. Setup or inspect automated CVAT Webhooks
+python main.py feedback-webhook-setup --url http://localhost:18080 --target-url http://nuclio-nuclio-ninerouter-vision-31:8080 --secret toolcvat_webhook_secret_2026
+python main.py feedback-webhook-setup --url http://localhost:18080 --list
 
-# 2. View per-label statistics and active rules across all 31 labels
+# 2. Synchronize annotations manually from a CVAT job
+python main.py feedback-sync --job 15 [--url http://localhost:18080] [--token <token>]
+
+# 3. View per-label statistics, active rules, and visual examples across all 31 labels
 python main.py feedback-stats
 
-# 3. Inspect recent individual correction records
+# 4. Inspect recent individual correction records
 python main.py feedback-list --limit 20 [--label car] [--type RELABEL]
 
-# 4. Toggle correction memory globally
+# 5. Toggle correction memory globally
 python main.py feedback-enable
 python main.py feedback-disable
 
-# 5. Clear stored records, crops, or derived rules
+# 6. Clear stored records, crops, or derived rules
 python main.py feedback-clear --crops   # Clears only image crops
 python main.py feedback-clear --rules   # Clears only derived rules
 python main.py feedback-clear --all     # Full reset of feedback database
 
-# 6. Comparative evaluation (side-by-side baseline vs. adaptive prompting)
+# 7. Comparative evaluation (side-by-side baseline vs. adaptive prompting)
 python main.py feedback-eval --image test.jpg
 ```
 
-### Dual-Dispatch Nuclio Handler & Webhooks
+### Dual-Dispatch Nuclio Handler & Secure Webhooks
 
 The serverless function (`ninerouter-vision-31`) handles both CVAT inference requests and CVAT webhooks within a single container:
-- **Inference**: Receives `{"image": "<base64>", "threshold": 0.5}`, checks active rules, saves baseline prediction, and returns shapes.
-- **Webhook**: Receives CVAT `update:job` or `update:task` events, verifies HMAC-SHA256 signatures via `X-CVAT-Signature`, and automatically reconciles job annotations when a job is marked `completed`.
-- Configurable environment variables: `CVAT_WEBHOOK_SECRET`, `CVAT_URL`, `CVAT_TOKEN`.
+- **Inference**: Receives `{"image": "<base64>", "threshold": 0.5}`, checks active rules & visual crops, saves baseline prediction with canonical fingerprint, and returns shapes with `visual_examples_used` and `text_rules_used` instrumentation.
+- **Webhook**: Receives CVAT `update:job` or `update:task` events, verifies HMAC-SHA256 signatures against raw request body bytes via case-insensitive headers (`X-Signature-256`, `X-CVAT-Signature`), and automatically reconciles job annotations when a job is marked `completed`.
+- Configurable environment variables: `CVAT_WEBHOOK_SECRET`, `CVAT_URL`, `CVAT_TOKEN`, `FEEDBACK_DB_PATH`, `FEEDBACK_DATA_DIR`.
 
 ---
 
 ## 🔒 Security, Safety & Privacy Hygiene
 
 1. **Zero Database Destructive Actions**: Scripts never delete CVAT databases, tasks, jobs, or volumes (no `docker compose down -v`).
-2. **Credential Hygiene**:
+2. **Credential & Privacy Hygiene**:
    - Secrets are masked across all logging (`sk-...xyz`).
    - WSL deployments transfer `$NineRouterKey` in-memory via `WSLENV` without writing plaintext secrets to disk.
+   - Never log full image Base64 in terminal or application logs.
+   - Raw-bytes HMAC verification compares with `hmac.compare_digest` to prevent timing attacks.
 3. **DoS & Resource Exhaustion Defense**:
    - 32MB maximum request body size guard in handlers and `function.yaml`.
    - Polygon vertex count limit (10,000 vertices/polygon) prevents CPU rasterization starvation.
    - Per-frame detection limit (500 objects/image) prevents memory exhaustion.
    - Decompression bomb protection (`Image.MAX_IMAGE_PIXELS = 89_478_485`).
+   - Storage quotas on feedback crops: max 50MB, max 150 crops total, max 10 crops/label, max 512px per crop.
 4. **Honest Confidence Score Policy**: No false 1.0 confidence score fallbacks.
 
 ---
 
 ## 🧪 Testing
 
-The repository maintains 100% test pass rate across 418 automated tests:
+The repository maintains 100% test pass rate across 430 automated tests:
 
 ```bash
 python -m pytest
 ```
 
 Test breakdown:
-- `tests/test_feedback_learning.py`: 25 tests (SHA-256 hashing, bipartite IoU diff engine, 9-tier taxonomy, SQLite CRUD, storage bounds, rule derivation, few-shot retrieval, webhook verification, CVAT sync, CLI commands).
+- `tests/test_harden_feedback_multimodal.py`: 12 tests (Canonical visual fingerprinting across formats, baseline lookup, multimodal few-shot payload generation, storage bounds, corrupt crop resilience, raw-bytes webhook HMAC verification, case-insensitive headers, client payload construction, service instrumentation, webhook setup CLI).
+- `tests/test_feedback_learning.py`: 25 tests (Bipartite IoU diff engine, 9-tier taxonomy, SQLite CRUD, storage bounds, rule derivation, few-shot retrieval, webhook verification, CVAT sync, CLI commands).
 - `tests/test_phase3b_taxonomy.py`: 43 tests (31-label master schema, exact grouping, ambiguity policies, Django ORM task evaluator).
 - `tests/test_line_geometry.py`: 22 tests (2D spatial covariance PCA aspect ratio, medial pair resampling, Douglas-Peucker simplification).
 - `tests/test_phase3b_service.py`: 10 tests (3-tier shape routing, ROI coordinate translation, instance pairing, lane centerlines).

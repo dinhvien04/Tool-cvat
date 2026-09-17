@@ -36,6 +36,9 @@ param (
     [string]$NineRouterKey = $env:NINEROUTER_KEY,
 
     [Parameter(Mandatory = $false)]
+    [string]$CvatWebhookSecret = $env:CVAT_WEBHOOK_SECRET,
+
+    [Parameter(Mandatory = $false)]
     [switch]$SkipPreflight = $false
 )
 
@@ -225,15 +228,35 @@ foreach ($fn in $functionsToDeploy) {
     Write-Host "Deploying $fnDisplay ($fnName)..." -ForegroundColor Cyan
     Write-Host "----------------------------------------------------------------------" -ForegroundColor Gray
 
-    # Sync shared application modules to Nuclio build context
-    Write-Host "Syncing app, core, and config to $nuclioDir..." -ForegroundColor Gray
-    if (Test-Path "$nuclioDir\app") { Remove-Item -Recurse -Force "$nuclioDir\app" }
-    if (Test-Path "$nuclioDir\core") { Remove-Item -Recurse -Force "$nuclioDir\core" }
-    if (Test-Path "$nuclioDir\config") { Remove-Item -Recurse -Force "$nuclioDir\config" }
+    # Ensure host feedback directories exist
+    $hostFeedbackDir = Join-Path $RepoRoot ".tool-cvat"
+    $hostExamplesDir = Join-Path $hostFeedbackDir "examples"
+    if (-not (Test-Path $hostFeedbackDir)) { New-Item -ItemType Directory -Path $hostFeedbackDir -Force | Out-Null }
+    if (-not (Test-Path $hostExamplesDir)) { New-Item -ItemType Directory -Path $hostExamplesDir -Force | Out-Null }
 
-    Copy-Item -Path "$RepoRoot\app" -Destination "$nuclioDir\app" -Recurse -Force
-    Copy-Item -Path "$RepoRoot\core" -Destination "$nuclioDir\core" -Recurse -Force
-    Copy-Item -Path "$RepoRoot\config" -Destination "$nuclioDir\config" -Recurse -Force
+    # Sync canonical application modules to Nuclio build context
+    Write-Host "Syncing canonical app, core, and config to $nuclioDir..." -ForegroundColor Gray
+    python (Join-Path $ScriptDir "sync_serverless_modules.py")
+
+    $forwardHostFeedbackDir = $hostFeedbackDir -replace '\\', '/'
+    $yamlContent = Get-Content $functionYaml -Raw
+    if ($yamlContent -notmatch "volumes:") {
+        $volumeBlock = @"
+
+  volumes:
+    - volume:
+        name: feedback-data
+        hostPath:
+          path: '$forwardHostFeedbackDir'
+      volumeMount:
+        name: feedback-data
+        mountPath: '/opt/nuclio/feedback'
+"@
+        Add-Content -Path $functionYaml -Value $volumeBlock
+    } else {
+        $yamlContent = $yamlContent -replace "path:\s*'[^']*\.tool-cvat[^']*'", "path: '$forwardHostFeedbackDir'"
+        Set-Content -Path $functionYaml -Value $yamlContent -Encoding utf8
+    }
 
     if ($useWsl) {
         $driveLetter = $nuclioDir.Substring(0, 1).ToLower()
@@ -245,6 +268,11 @@ foreach ($fn in $functionsToDeploy) {
         if ($NineRouterKey) {
             $env:NINEROUTER_KEY = $NineRouterKey
             $env:WSLENV = if ($env:WSLENV) { "$($env:WSLENV):NINEROUTER_KEY" } else { "NINEROUTER_KEY" }
+        }
+
+        $extraEnvBash = ""
+        if ($CvatWebhookSecret) {
+            $extraEnvBash += "--env `"CVAT_WEBHOOK_SECRET=$CvatWebhookSecret`" "
         }
 
         $bashScript = @"
@@ -262,13 +290,16 @@ nuctl deploy $fnName \
     --env "NINEROUTER_URL=$NineRouterUrl" \
     --env "VISION_MODEL=$resolvedVisionModel" \
     --env "NINEROUTER_TIMEOUT=120.0" \
+    --env "FEEDBACK_DATA_DIR=/opt/nuclio/feedback" \
+    --env "FEEDBACK_DB_PATH=/opt/nuclio/feedback/feedback.sqlite3" \
+    $extraEnvBash \
     "`${extraArgs[@]}"
 "@
         $bashScriptUnix = $bashScript -replace "`r`n", "`n"
         $b64Script = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($bashScriptUnix))
 
         try {
-            Write-Host "Invoking nuctl deploy $fnName inside WSL (in-memory secure execution)..." -ForegroundColor Gray
+            Write-Host "Invoking nuctl deploy $fnName inside WSL (with shared volume mount in function.yaml)..." -ForegroundColor Gray
             & wsl -d Ubuntu bash -c "echo '$b64Script' | base64 -d | bash"
         } finally {
             $env:NINEROUTER_KEY = $null
@@ -285,10 +316,15 @@ nuctl deploy $fnName \
             "--env", "NINEROUTER_URL=$NineRouterUrl",
             "--env", "VISION_MODEL=$resolvedVisionModel",
             "--env", "NINEROUTER_TIMEOUT=120.0",
+            "--env", "FEEDBACK_DATA_DIR=/opt/nuclio/feedback",
+            "--env", "FEEDBACK_DB_PATH=/opt/nuclio/feedback/feedback.sqlite3",
             "--platform-config", "{`"attributes`": {`"network`": `"$networkName`"}}"
         )
         if ($NineRouterKey) {
             $deployArgs += @("--env", "NINEROUTER_KEY=$NineRouterKey")
+        }
+        if ($CvatWebhookSecret) {
+            $deployArgs += @("--env", "CVAT_WEBHOOK_SECRET=$CvatWebhookSecret")
         }
         & nuctl @deployArgs
         if ($LASTEXITCODE -ne 0) {

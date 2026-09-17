@@ -14,6 +14,7 @@ This module provides:
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
@@ -62,8 +63,34 @@ ALL_CORRECTION_TYPES = [
 ]
 
 
-def compute_image_hash(image_source: Union[bytes, str, Path, Image.Image]) -> str:
-    """Compute deterministic SHA-256 hexadecimal hash of an image.
+def compute_raw_file_hash(source: Union[bytes, bytearray, str, Path]) -> str:
+    """Compute SHA-256 hex digest of raw encoded file bytes for diagnostics."""
+    if isinstance(source, (str, Path)):
+        p = Path(source)
+        if not p.exists() or not p.is_file():
+            raise FileNotFoundError(f"Image file does not exist: {source}")
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    if isinstance(source, (bytes, bytearray)):
+        return hashlib.sha256(source).hexdigest()
+    raise TypeError(f"Unsupported source type for raw file hash: {type(source).__name__}")
+
+
+def compute_image_hash(image_source: Union[bytes, bytearray, str, Path, Image.Image]) -> str:
+    """Compute ONE canonical visual fingerprint of an image.
+
+    Decodes any decodable image representation (JPEG bytes, PNG bytes, PIL Image,
+    local file, CVAT downloaded frame) to uncompressed RGB pixel bytes, prepends
+    width/height header, and returns a deterministic SHA-256 hexadecimal digest.
+
+    Guarantees:
+    - Same pixel content produces the exact same fingerprint whether supplied as:
+      * JPEG bytes
+      * PNG bytes
+      * PIL Image
+      * CVAT downloaded frame
+      * Locally loaded image path
+    - Does NOT hash encoded container bytes as the primary visual identity.
+    - Gracefully falls back to raw byte hash if non-image binary data is passed.
 
     Args:
         image_source: Raw image bytes, filesystem path, or PIL.Image.Image.
@@ -71,24 +98,33 @@ def compute_image_hash(image_source: Union[bytes, str, Path, Image.Image]) -> st
     Returns:
         64-character lowercase SHA-256 hex string.
     """
-    if isinstance(image_source, (str, Path)):
+    if isinstance(image_source, Image.Image):
+        im = image_source.convert("RGB")
+    elif isinstance(image_source, (bytes, bytearray)):
+        try:
+            im = Image.open(io.BytesIO(image_source)).convert("RGB")
+        except Exception:
+            # Fallback for arbitrary non-image binary data (e.g. mock test buffers)
+            return hashlib.sha256(image_source).hexdigest()
+    elif isinstance(image_source, (str, Path)):
         p = Path(image_source)
         if not p.exists() or not p.is_file():
             raise FileNotFoundError(f"Image file does not exist: {image_source}")
-        data = p.read_bytes()
-        return hashlib.sha256(data).hexdigest()
+        try:
+            im = Image.open(p).convert("RGB")
+        except Exception:
+            return hashlib.sha256(p.read_bytes()).hexdigest()
+    else:
+        raise TypeError(f"Unsupported image source type for hashing: {type(image_source).__name__}")
 
-    if isinstance(image_source, bytes):
-        return hashlib.sha256(image_source).hexdigest()
+    w, h = im.size
+    header = f"{w}x{h}_".encode("ascii")
+    pixel_bytes = im.tobytes()
+    return hashlib.sha256(header + pixel_bytes).hexdigest()
 
-    if isinstance(image_source, Image.Image):
-        # Deterministic representation using dimensions and uncompressed pixel buffer
-        pixel_bytes = image_source.convert("RGB").tobytes()
-        w, h = image_source.size
-        header = f"{w}x{h}_".encode("ascii")
-        return hashlib.sha256(header + pixel_bytes).hexdigest()
 
-    raise TypeError(f"Unsupported image source type for hashing: {type(image_source).__name__}")
+# Alias for explicit visual identity contract
+compute_visual_fingerprint = compute_image_hash
 
 
 @dataclass
@@ -424,14 +460,33 @@ class FeedbackDatabase:
 
     def __init__(
         self,
-        db_path: Union[str, Path] = ".tool-cvat/feedback.sqlite3",
-        examples_dir: Union[str, Path] = ".tool-cvat/examples",
+        db_path: Optional[Union[str, Path]] = None,
+        examples_dir: Optional[Union[str, Path]] = None,
         max_examples_total: int = 150,
         max_storage_mb: int = 50,
         max_crop_dimension: int = 512,
     ):
-        self.db_path = Path(db_path)
-        self.examples_dir = Path(examples_dir)
+        env_data_dir = os.getenv("FEEDBACK_DATA_DIR")
+        env_db_path = os.getenv("FEEDBACK_DB_PATH")
+
+        if db_path is not None:
+            resolved_db = Path(db_path)
+        elif env_db_path:
+            resolved_db = Path(env_db_path)
+        elif env_data_dir:
+            resolved_db = Path(env_data_dir) / "feedback.sqlite3"
+        else:
+            resolved_db = Path(".tool-cvat") / "feedback.sqlite3"
+
+        if examples_dir is not None:
+            resolved_examples = Path(examples_dir)
+        elif env_data_dir:
+            resolved_examples = Path(env_data_dir) / "examples"
+        else:
+            resolved_examples = resolved_db.parent / "examples"
+
+        self.db_path = resolved_db
+        self.examples_dir = resolved_examples
         self.max_examples_total = max_examples_total
         self.max_storage_mb = max_storage_mb
         self.max_crop_dimension = max_crop_dimension
@@ -441,6 +496,23 @@ class FeedbackDatabase:
         self.examples_dir.mkdir(parents=True, exist_ok=True)
 
         self._init_db()
+
+    def resolve_crop_path(self, crop_path: Optional[Union[str, Path]]) -> Optional[Path]:
+        """Resolve a stored relative or absolute crop path to an existing local file."""
+        if not crop_path:
+            return None
+        p = Path(crop_path)
+        if p.is_absolute() and p.exists() and p.is_file():
+            return p
+        # Check relative to examples_dir.parent (e.g. .tool-cvat/examples/crop.jpg)
+        cand1 = self.examples_dir.parent / p
+        if cand1.exists() and cand1.is_file():
+            return cand1
+        # Check relative to examples_dir directly (e.g. filename only)
+        cand2 = self.examples_dir / p.name
+        if cand2.exists() and cand2.is_file():
+            return cand2
+        return None
 
     def _get_connection(self) -> sqlite3.Connection:
         """Create a connection with WAL mode and row factory."""
@@ -775,6 +847,10 @@ class FeedbackDatabase:
 
             crop_img = image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
             cw, ch = crop_img.size
+
+            # Store crop bounding coordinates in details for exact few-shot geometry normalization
+            item.details["crop_coords"] = [crop_x1, crop_y1, crop_x2, crop_y2]
+            item.details["crop_size"] = [cw, ch]
 
             # Resize if exceeding max allowed dimension (e.g. 512px)
             if max(cw, ch) > self.max_crop_dimension:

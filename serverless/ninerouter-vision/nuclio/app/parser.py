@@ -32,7 +32,7 @@ MAX_CONTOUR_VERTICES: int = 10_000
 class ParsedObject:
     """Represents a validated detected object."""
     label: str
-    box_2d: List[int]  # [ymin, xmin, ymax, xmax] in [0, 1000]
+    box_2d: Optional[List[int]] = None  # [ymin, xmin, ymax, xmax] in [0, 1000]
     pixel_box: Optional[List[float]] = None  # [x1, y1, x2, y2] clamped to image dimensions
     confidence: Optional[float] = None
     mask: Optional[List[List[Union[int, float]]]] = None  # [[x, y], ...] normalized in [0, 1000]
@@ -44,8 +44,9 @@ class ParsedObject:
         """Convert to dictionary representation."""
         data: Dict[str, Any] = {
             "label": self.label,
-            "box_2d": [int(c) for c in self.box_2d],
         }
+        if self.box_2d is not None:
+            data["box_2d"] = [int(c) for c in self.box_2d]
         if self.confidence is not None:
             data["confidence"] = round(float(self.confidence), 3)
         if self.pixel_box is not None:
@@ -96,18 +97,30 @@ class ParsedObject:
 class ParseResult:
     """Result of parsing and validating model response."""
     objects: List[ParsedObject] = field(default_factory=list)
+    regions: List[ParsedObject] = field(default_factory=list)
+    lanes: List[ParsedObject] = field(default_factory=list)
     raw_text: str = ""
     warnings: List[str] = field(default_factory=list)
 
+    @property
+    def all_items(self) -> List[ParsedObject]:
+        """Return all parsed objects, regions, and lanes combined."""
+        return self.objects + self.regions + self.lanes
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to prediction dictionary matching required output schema."""
-        return {
+        res: Dict[str, Any] = {
             "objects": [obj.to_dict() for obj in self.objects]
         }
+        if self.regions:
+            res["regions"] = [obj.to_dict() for obj in self.regions]
+        if self.lanes:
+            res["lanes"] = [obj.to_dict() for obj in self.lanes]
+        return res
 
     def to_cvat_annotations(self) -> List[Dict[str, Any]]:
         """Convert all objects to CVAT rectangle shapes."""
-        return [obj.to_cvat_shape() for obj in self.objects]
+        return [obj.to_cvat_shape() for obj in self.all_items]
 
 
 def clean_json_string(text: str) -> str:
@@ -212,29 +225,58 @@ def parse_and_validate(
                     f"Failed to parse vision model response as valid JSON: {e}. Cleaned text was: {cleaned[:300]!r}"
                 )
 
-    # Allow top-level list [ {...}, {...} ] or {"objects": [ ... ]}
+    # Allow top-level list [ {...}, {...} ] or {"objects": [ ... ], "regions": [ ... ], "lanes": [ ... ]}
+    raw_objects: List[Any] = []
+    raw_regions: List[Any] = []
+    raw_lanes: List[Any] = []
+
     if isinstance(data, list):
         raw_objects = data
     elif isinstance(data, dict):
-        if "objects" not in data:
+        has_any = False
+        if "objects" in data:
+            raw_objects = data["objects"]
+            has_any = True
+        if "regions" in data:
+            raw_regions = data["regions"]
+            has_any = True
+        if "lanes" in data:
+            raw_lanes = data["lanes"]
+            has_any = True
+        if not has_any:
             raise VisionParseError("Missing 'objects' key in vision model response")
-        raw_objects = data["objects"]
     else:
         raise VisionParseError(f"Expected top-level JSON object or array, got {type(data).__name__}")
 
     if not isinstance(raw_objects, list):
         raise VisionParseError(f"Expected 'objects' to be a list, got {type(raw_objects).__name__}")
+    if not isinstance(raw_regions, list):
+        raise VisionParseError(f"Expected 'regions' to be a list, got {type(raw_regions).__name__}")
+    if not isinstance(raw_lanes, list):
+        raise VisionParseError(f"Expected 'lanes' to be a list, got {type(raw_lanes).__name__}")
 
     allowed_set = set(allowed_labels) if allowed_labels is not None else None
     validated_objects: List[ParsedObject] = []
+    validated_regions: List[ParsedObject] = []
+    validated_lanes: List[ParsedObject] = []
 
-    for idx, item in enumerate(raw_objects):
+    region_and_lane_labels = {
+        "area/alternative", "area/drivable", "road", "sidewalk",
+        "building", "wall", "fence", "vegetation", "terrain", "sky",
+        "lane/crosswalk", "lane/double white", "lane/double yellow",
+        "lane/road curb", "lane/single other", "lane/single white",
+        "lane/single yellow"
+    }
+
+    current_group_counter = 1
+
+    def _parse_item(item: Any, idx: int, category: str, group_counter: int) -> Tuple[Optional[ParsedObject], int]:
         if not isinstance(item, dict):
             msg = f"Detection at index {idx} is not a dictionary: {item!r}"
             if strict:
                 raise VisionParseError(msg)
             warnings.append(msg)
-            continue
+            return None, group_counter
 
         label = item.get("label")
         box_2d = item.get("box_2d")
@@ -245,7 +287,7 @@ def parse_and_validate(
             if strict:
                 raise VisionParseError(msg)
             warnings.append(msg)
-            continue
+            return None, group_counter
 
         label = label.strip()
 
@@ -255,86 +297,101 @@ def parse_and_validate(
             if strict:
                 raise VisionParseError(msg)
             warnings.append(msg)
-            continue
+            return None, group_counter
 
-        # Coordinate format validation: [ymin, xmin, ymax, xmax]
-        if not isinstance(box_2d, (list, tuple)) or len(box_2d) != 4:
-            msg = f"Detection at index {idx} has invalid box_2d: {box_2d!r}. Expected 4 coordinates [ymin, xmin, ymax, xmax]."
-            if strict:
-                raise VisionParseError(msg)
-            warnings.append(msg)
-            continue
+        is_region_or_lane = (category in ("regions", "lanes")) or (label in region_and_lane_labels)
+        require_box = not is_region_or_lane
 
-        try:
-            ymin = int(round(float(box_2d[0])))
-            xmin = int(round(float(box_2d[1])))
-            ymax = int(round(float(box_2d[2])))
-            xmax = int(round(float(box_2d[3])))
-        except (ValueError, TypeError) as e:
-            msg = f"Detection at index {idx} coordinates cannot be converted to int: {e}"
-            if strict:
-                raise VisionParseError(msg)
-            warnings.append(msg)
-            continue
-
-        # Inversion checks
-        if ymin > ymax:
-            if strict:
-                raise VisionParseError(f"Detection at index {idx} has inverted y coordinates: ymin ({ymin}) > ymax ({ymax})")
-            warnings.append(f"Fixed inverted y coordinates for {label}: ymin={ymin}, ymax={ymax}")
-            ymin, ymax = ymax, ymin
-
-        if xmin > xmax:
-            if strict:
-                raise VisionParseError(f"Detection at index {idx} has inverted x coordinates: xmin ({xmin}) > xmax ({xmax})")
-            warnings.append(f"Fixed inverted x coordinates for {label}: xmin={xmin}, xmax={xmax}")
-            xmin, xmax = xmax, xmin
-
-        # Degenerate 0-area box
-        if ymin == ymax or xmin == xmax:
-            msg = f"Detection at index {idx} has zero area: {[ymin, xmin, ymax, xmax]}"
-            if strict:
-                raise VisionParseError(msg)
-            warnings.append(msg)
-            continue
-
-        # Range bounds [0, 1000]
-        if not (0 <= ymin <= 1000 and 0 <= ymax <= 1000 and 0 <= xmin <= 1000 and 0 <= xmax <= 1000):
-            if strict:
-                raise VisionParseError(f"Detection at index {idx} coordinates out of [0, 1000] bounds: {[ymin, xmin, ymax, xmax]}")
-            warnings.append(f"Clamped out of bounds coordinates for {label}: {[ymin, xmin, ymax, xmax]}")
-
-        ymin = max(0, min(1000, ymin))
-        xmin = max(0, min(1000, xmin))
-        ymax = max(0, min(1000, ymax))
-        xmax = max(0, min(1000, xmax))
-
-        # Calculate pixel coordinates if dimensions provided
+        box_2d_valid: Optional[List[int]] = None
         pixel_box: Optional[List[float]] = None
-        if image_width is not None and image_height is not None:
-            if image_width <= 0 or image_height <= 0:
-                raise VisionParseError(f"Invalid image dimensions: {image_width}x{image_height}")
 
-            x1 = (xmin / 1000.0) * float(image_width)
-            y1 = (ymin / 1000.0) * float(image_height)
-            x2 = (xmax / 1000.0) * float(image_width)
-            y2 = (ymax / 1000.0) * float(image_height)
-
-            # Clamp to image boundaries
-            x1 = max(0.0, min(float(image_width), x1))
-            y1 = max(0.0, min(float(image_height), y1))
-            x2 = max(0.0, min(float(image_width), x2))
-            y2 = max(0.0, min(float(image_height), y2))
-
-            # Reject invalid pixel boxes (x2 <= x1 or y2 <= y1)
-            if x2 <= x1 or y2 <= y1:
-                msg = f"Detection at index {idx} produced invalid pixel box: {[x1, y1, x2, y2]}"
+        if box_2d is None:
+            if require_box:
+                msg = f"Detection at index {idx} has invalid box_2d: {box_2d!r}. Expected 4 coordinates [ymin, xmin, ymax, xmax]."
                 if strict:
                     raise VisionParseError(msg)
                 warnings.append(msg)
-                continue
+                return None, group_counter
+        else:
+            # Coordinate format validation: [ymin, xmin, ymax, xmax]
+            if not isinstance(box_2d, (list, tuple)) or len(box_2d) != 4:
+                msg = f"Detection at index {idx} has invalid box_2d: {box_2d!r}. Expected 4 coordinates [ymin, xmin, ymax, xmax]."
+                if strict:
+                    raise VisionParseError(msg)
+                warnings.append(msg)
+                return None, group_counter
 
-            pixel_box = [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)]
+            try:
+                ymin = int(round(float(box_2d[0])))
+                xmin = int(round(float(box_2d[1])))
+                ymax = int(round(float(box_2d[2])))
+                xmax = int(round(float(box_2d[3])))
+            except (ValueError, TypeError) as e:
+                msg = f"Detection at index {idx} coordinates cannot be converted to int: {e}"
+                if strict:
+                    raise VisionParseError(msg)
+                warnings.append(msg)
+                return None, group_counter
+
+            # Inversion checks
+            if ymin > ymax:
+                if strict:
+                    raise VisionParseError(f"Detection at index {idx} has inverted y coordinates: ymin ({ymin}) > ymax ({ymax})")
+                warnings.append(f"Fixed inverted y coordinates for {label}: ymin={ymin}, ymax={ymax}")
+                ymin, ymax = ymax, ymin
+
+            if xmin > xmax:
+                if strict:
+                    raise VisionParseError(f"Detection at index {idx} has inverted x coordinates: xmin ({xmin}) > xmax ({xmax})")
+                warnings.append(f"Fixed inverted x coordinates for {label}: xmin={xmin}, xmax={xmax}")
+                xmin, xmax = xmax, xmin
+
+            # Degenerate 0-area box
+            if ymin == ymax or xmin == xmax:
+                msg = f"Detection at index {idx} has zero area: {[ymin, xmin, ymax, xmax]}"
+                if strict:
+                    raise VisionParseError(msg)
+                warnings.append(msg)
+                return None, group_counter
+
+            # Range bounds [0, 1000]
+            if not (0 <= ymin <= 1000 and 0 <= ymax <= 1000 and 0 <= xmin <= 1000 and 0 <= xmax <= 1000):
+                if strict:
+                    raise VisionParseError(f"Detection at index {idx} coordinates out of [0, 1000] bounds: {[ymin, xmin, ymax, xmax]}")
+                warnings.append(f"Clamped out of bounds coordinates for {label}: {[ymin, xmin, ymax, xmax]}")
+
+            ymin = max(0, min(1000, ymin))
+            xmin = max(0, min(1000, xmin))
+            ymax = max(0, min(1000, ymax))
+            xmax = max(0, min(1000, xmax))
+
+            # Calculate pixel coordinates if dimensions provided
+            if image_width is not None and image_height is not None:
+                if image_width <= 0 or image_height <= 0:
+                    raise VisionParseError(f"Invalid image dimensions: {image_width}x{image_height}")
+
+                x1 = (xmin / 1000.0) * float(image_width)
+                y1 = (ymin / 1000.0) * float(image_height)
+                x2 = (xmax / 1000.0) * float(image_width)
+                y2 = (ymax / 1000.0) * float(image_height)
+
+                # Clamp to image boundaries
+                x1 = max(0.0, min(float(image_width), x1))
+                y1 = max(0.0, min(float(image_height), y1))
+                x2 = max(0.0, min(float(image_width), x2))
+                y2 = max(0.0, min(float(image_height), y2))
+
+                # Reject invalid pixel boxes (x2 <= x1 or y2 <= y1)
+                if x2 <= x1 or y2 <= y1:
+                    msg = f"Detection at index {idx} produced invalid pixel box: {[x1, y1, x2, y2]}"
+                    if strict:
+                        raise VisionParseError(msg)
+                    warnings.append(msg)
+                    return None, group_counter
+
+                pixel_box = [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)]
+
+            box_2d_valid = [ymin, xmin, ymax, xmax]
 
         # Parse confidence with fallback policy
         raw_conf = item.get("confidence")
@@ -342,7 +399,7 @@ def parse_and_validate(
         if raw_conf is not None:
             try:
                 conf_val = parse_confidence_score(raw_conf)
-            except Exception as e:
+            except Exception:
                 if strict:
                     raise VisionParseError(f"Detection at index {idx} has invalid confidence: {raw_conf!r}")
                 warnings.append(f"Detection at index {idx} has invalid confidence {raw_conf!r}; using fallback {fallback_confidence}")
@@ -351,7 +408,7 @@ def parse_and_validate(
             conf_val = fallback_confidence
 
         # Parse optional mask / polygon contour
-        raw_mask = item.get("mask") or item.get("polygon")
+        raw_mask = item.get("mask") or item.get("polygon") or item.get("polyline") or item.get("points")
         parsed_mask: Optional[List[List[Union[int, float]]]] = None
         pixel_polygon: Optional[List[Tuple[float, float]]] = None
         cvat_mask: Optional[List[int]] = None
@@ -398,11 +455,24 @@ def parse_and_validate(
             elif raw_mask is not None:
                 warnings.append(f"Detection at index {idx} has degenerate mask ignored: {raw_mask!r}")
 
-        group_id = item.get("group_id", idx + 1)
+        # Group ID handling
+        if is_region_or_lane:
+            group_id = None
+            next_counter = group_counter
+        else:
+            raw_gid = item.get("group_id")
+            if raw_gid is not None:
+                try:
+                    group_id = int(raw_gid)
+                except (ValueError, TypeError):
+                    group_id = group_counter
+            else:
+                group_id = group_counter
+            next_counter = max(group_counter + 1, (group_id + 1) if isinstance(group_id, int) else group_counter + 1)
 
         obj = ParsedObject(
             label=label,
-            box_2d=[ymin, xmin, ymax, xmax],
+            box_2d=box_2d_valid,
             pixel_box=pixel_box,
             confidence=conf_val,
             mask=parsed_mask,
@@ -410,10 +480,27 @@ def parse_and_validate(
             cvat_mask=cvat_mask,
             group_id=group_id,
         )
-        validated_objects.append(obj)
+        return obj, next_counter
+
+    for idx, item in enumerate(raw_objects):
+        obj, current_group_counter = _parse_item(item, idx, "objects", current_group_counter)
+        if obj is not None:
+            validated_objects.append(obj)
+
+    for idx, item in enumerate(raw_regions):
+        obj, current_group_counter = _parse_item(item, idx, "regions", current_group_counter)
+        if obj is not None:
+            validated_regions.append(obj)
+
+    for idx, item in enumerate(raw_lanes):
+        obj, current_group_counter = _parse_item(item, idx, "lanes", current_group_counter)
+        if obj is not None:
+            validated_lanes.append(obj)
 
     return ParseResult(
         objects=validated_objects,
+        regions=validated_regions,
+        lanes=validated_lanes,
         raw_text=raw_text,
         warnings=warnings,
     )

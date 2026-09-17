@@ -384,6 +384,37 @@ def handle_feedback_eval(argv: List[str]) -> int:
     return 0
 
 
+def handle_feedback_webhook_setup(argv: List[str]) -> int:
+    """Inspect or configure CVAT feedback webhook."""
+    import os
+    from app.cvat_sync import CVATSyncClient
+
+    parser = argparse.ArgumentParser(
+        prog="python main.py feedback-webhook-setup",
+        description="Inspect, register, or update CVAT feedback webhook",
+    )
+    parser.add_argument("--url", type=str, default=os.getenv("CVAT_URL", "http://localhost:18080"), help="CVAT server base URL")
+    parser.add_argument("--token", type=str, default=os.getenv("CVAT_TOKEN"), help="CVAT authentication token")
+    parser.add_argument("--target-url", type=str, default="http://nuclio-nuclio-ninerouter-vision-31:8080", help="Webhook destination URL")
+    parser.add_argument("--secret", type=str, default=os.getenv("CVAT_WEBHOOK_SECRET"), help="Webhook HMAC shared secret")
+    parser.add_argument("--list", action="store_true", help="List existing webhooks only")
+    args = parser.parse_args(argv)
+
+    client = CVATSyncClient(base_url=args.url, token=args.token)
+
+    if args.list:
+        hooks = client.list_webhooks()
+        print(f"\nRegistered CVAT Webhooks ({len(hooks)}):")
+        for h in hooks:
+            print(f"  ID: {h.get('id')} | URL: {h.get('target_url')} | Desc: {h.get('description')}")
+        print()
+        return 0
+
+    res = client.setup_webhook(target_url=args.target_url, secret=args.secret)
+    print(f"\n[Tool-cvat] Webhook setup result: {res['action']} (Webhook ID: {res.get('id')})\n")
+    return 0
+
+
 # -----------------------------------------------------------------------------
 # Main Entry Point
 # -----------------------------------------------------------------------------
@@ -401,6 +432,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         "feedback-enable",
         "feedback-clear",
         "feedback-eval",
+        "feedback-webhook-setup",
     ):
         subcmd = raw_args[0]
         sub_argv = raw_args[1:]
@@ -419,6 +451,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             code = handle_feedback_clear(sub_argv)
         elif subcmd == "feedback-eval":
             code = handle_feedback_eval(sub_argv)
+        elif subcmd == "feedback-webhook-setup":
+            code = handle_feedback_webhook_setup(sub_argv)
         else:
             code = 1
         sys.exit(code)

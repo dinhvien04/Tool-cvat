@@ -88,7 +88,8 @@ INTENTIONAL_DISTINCTIONS = {
 MODE_BOX = "box"
 MODE_MASK = "mask"
 MODE_BOX_AND_MASK = "box_and_mask"
-SUPPORTED_MODES = (MODE_BOX, MODE_MASK, MODE_BOX_AND_MASK)
+MODE_FULL_31 = "full_31"
+SUPPORTED_MODES = (MODE_BOX, MODE_MASK, MODE_BOX_AND_MASK, MODE_FULL_31)
 
 
 @dataclass
@@ -322,6 +323,99 @@ Rules:
 """
 
 
+def build_full_31_prompt(
+    allowed_labels: Optional[List[str]] = None,
+    include_confidence: bool = True,
+) -> str:
+    """Build the unified Phase 3B vision prompt for full 31-label multi-shape annotation.
+
+    Categorizes labels into:
+    1. Objects (instances: rectangle + mask)
+    2. Regions (semantic background: mask only)
+    3. Lanes (linear markings & crosswalks: polyline / polygon / mask)
+    """
+    labels = set(allowed_labels) if allowed_labels is not None else set(ALL_31_LABELS)
+
+    # 14 Instance Labels
+    instance_labels = [
+        l for l in (
+            "pedestrian", "rider", "car", "truck", "bus", "train",
+            "motorcycle", "bicycle", "traffic light", "traffic sign",
+            "pole", "person", "traffic_light", "traffic_sign"
+        ) if l in labels
+    ]
+
+    # 10 Semantic Region Labels
+    region_labels = [
+        l for l in (
+            "area/alternative", "area/drivable", "road", "sidewalk",
+            "building", "wall", "fence", "vegetation", "terrain", "sky"
+        ) if l in labels
+    ]
+
+    # 7 Lane / Marking Labels
+    lane_labels = [
+        l for l in (
+            "lane/crosswalk", "lane/double white", "lane/double yellow",
+            "lane/road curb", "lane/single other", "lane/single white",
+            "lane/single yellow"
+        ) if l in labels
+    ]
+
+    inst_str = "\n".join(f"  - {l}" for l in instance_labels) or "  (none)"
+    reg_str = "\n".join(f"  - {l}" for l in region_labels) or "  (none)"
+    lane_str = "\n".join(f"  - {l}" for l in lane_labels) or "  (none)"
+
+    conf_field = ',\n      "confidence": 0.95' if include_confidence else ""
+
+    return f"""Perform comprehensive road-scene multi-shape annotation on this image for autonomous driving perception.
+Detect all visible:
+1. Object Instances: countable foreground objects (box_2d + mask).
+2. Semantic Regions: background surface areas (mask only).
+3. Lane Markings: linear lane dividers, curbs, and crosswalks (mask only).
+
+Allowed Labels by Category:
+- Object Instances (14 classes):
+{inst_str}
+
+- Semantic Regions (10 classes):
+{reg_str}
+
+- Lane Markings (7 classes):
+{lane_str}
+
+Output schema:
+{{
+  "objects": [
+    {{
+      "label": "<instance_label>",
+      "box_2d": [ymin, xmin, ymax, xmax],
+      "mask": [[x1, y1], [x2, y2], [x3, y3], ...]{conf_field}
+    }}
+  ],
+  "regions": [
+    {{
+      "label": "<region_label>",
+      "mask": [[x1, y1], [x2, y2], [x3, y3], ...]{conf_field}
+    }}
+  ],
+  "lanes": [
+    {{
+      "label": "<lane_label>",
+      "mask": [[x1, y1], [x2, y2], [x3, y3], ...]{conf_field}
+    }}
+  ]
+}}
+
+Rules:
+1. Coordinates: All coordinates are normalized integers in [0, 1000].
+2. box_2d: [ymin, xmin, ymax, xmax] required ONLY for 'objects'. Do NOT include box_2d for 'regions' or 'lanes'.
+3. mask: Closed polygon contour boundary [[x1, y1], [x2, y2], ...] tracing the outer edge of each instance, region, or lane. Points are [x, y] in [0, 1000].
+4. Labels: Choose ONLY from the allowed lists. Never rename or alter labels.
+5. If no items are found for a category, return an empty array [].
+6. Output raw JSON only (no markdown fences, no explanatory text)."""
+
+
 def build_user_prompt(
     allowed_labels: Optional[List[str]] = None,
     include_confidence: bool = True,
@@ -332,8 +426,11 @@ def build_user_prompt(
     Args:
         allowed_labels: List of candidate labels.
         include_confidence: Whether to request confidence score.
-        mode: Detection mode ('box', 'mask', or 'box_and_mask').
+        mode: Detection mode ('box', 'mask', 'box_and_mask', or 'full_31').
     """
+    if mode == MODE_FULL_31:
+        return build_full_31_prompt(allowed_labels=allowed_labels, include_confidence=include_confidence)
+
     labels = allowed_labels if allowed_labels is not None else list(DEFAULT_BBOX_LABELS)
     labels_formatted = "\n".join(f"- {label}" for label in labels)
 
@@ -393,12 +490,13 @@ def build_openai_vision_payload(
     system_prompt: Optional[str] = None,
     temperature: float = 0.0,
     max_tokens: int = 4096,
+    mode: str = MODE_BOX,
 ) -> Dict[str, Any]:
     """
     Build an OpenAI-compatible multimodal chat completions request payload.
     """
     sys_prompt = system_prompt or SYSTEM_PROMPT
-    user_prompt = build_user_prompt(allowed_labels=allowed_labels)
+    user_prompt = build_user_prompt(allowed_labels=allowed_labels, mode=mode)
 
     # Clean base64 string if data url prefix is already present
     if image_base64.startswith("data:image/"):

@@ -510,6 +510,7 @@ class NineRouterClient:
         max_tokens: int = 4096,
         timeout: Optional[float] = None,
         mode: str = MODE_BOX,
+        visual_examples: Optional[List[Dict[str, Any]]] = None,
     ) -> VisionResponse:
         """Send a multimodal chat completion request to 9Router.
 
@@ -522,6 +523,8 @@ class NineRouterClient:
             temperature: Sampling temperature (default 0.0).
             max_tokens: Maximum tokens to generate (default 4096).
             timeout: Request timeout in seconds.
+            mode: Detection output mode.
+            visual_examples: Optional list of multimodal few-shot correction examples with crops.
 
         Returns:
             VisionResponse with parsed content, raw response, and duration.
@@ -546,6 +549,57 @@ class NineRouterClient:
             labels = allowed_labels if allowed_labels is not None else list(DEFAULT_BBOX_LABELS)
             user_text = build_user_prompt(allowed_labels=labels, mode=mode)
 
+        # Construct multimodal user content (interleaved visual few-shot if provided)
+        user_content: List[Dict[str, Any]] = []
+        if visual_examples:
+            for idx, ex in enumerate(visual_examples):
+                crop_url = ex.get("crop_data_url")
+                if not crop_url:
+                    continue
+                ex_desc = ex.get("description", f"Example #{idx + 1}")
+                ex_json = ex.get("expected_output_json") or json.dumps(ex.get("expected_output", {}), indent=2)
+                user_content.append({
+                    "type": "text",
+                    "text": f"--- Corrected Example #{idx + 1} ({ex_desc}) ---\nReviewer crop:",
+                })
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": crop_url,
+                        "detail": "high",
+                    },
+                })
+                user_content.append({
+                    "type": "text",
+                    "text": f"Expected structured annotation for Example #{idx + 1}:\n{ex_json}\n",
+                })
+
+            user_content.append({
+                "type": "text",
+                "text": f"--- Target Image to Annotate ---\n{user_text}",
+            })
+            user_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url,
+                    "detail": "high",
+                },
+            })
+        else:
+            user_content = [
+                {
+                    "type": "text",
+                    "text": user_text,
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url,
+                        "detail": "high",
+                    },
+                },
+            ]
+
         payload = {
             "model": model,
             "temperature": temperature,
@@ -559,19 +613,7 @@ class NineRouterClient:
                 },
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": user_text,
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_url,
-                                "detail": "high",
-                            },
-                        },
-                    ],
+                    "content": user_content,
                 },
             ],
         }
@@ -583,9 +625,10 @@ class NineRouterClient:
         url = f"{self.base_url}/v1/chat/completions"
 
         # Safe logging: log metadata only, NEVER log API keys or base64 payload
+        vis_count = len(visual_examples) if visual_examples else 0
         logger.info(
-            f"Sending vision request: model={model}, image_url_len={len(image_url)}, "
-            f"max_tokens={max_tokens}, temperature={temperature}"
+            f"Sending vision request: model={model}, target_image_url_len={len(image_url)}, "
+            f"visual_examples={vis_count}, max_tokens={max_tokens}, temperature={temperature}"
         )
 
         start_time = time.perf_counter()
@@ -622,19 +665,35 @@ class NineRouterClient:
                 response_body=self._sanitize_error_text(resp.text),
             )
 
-        try:
-            resp_data = resp.json()
-        except (json.JSONDecodeError, ValueError) as e:
-            raise NineRouterError(f"Failed to decode 9Router response as JSON: {self._sanitize_error_text(resp.text)}") from e
+        content_type = resp.headers.get("content-type", "")
+        if "event-stream" in content_type:
+            parts = []
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if line.startswith("data: ") and line != "data: [DONE]":
+                    try:
+                        chunk = json.loads(line[6:])
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        if "content" in delta:
+                            parts.append(delta["content"])
+                    except Exception:
+                        pass
+            content = "".join(parts)
+            resp_data = {"choices": [{"message": {"content": content}}], "model": model}
+        else:
+            try:
+                resp_data = resp.json()
+            except (json.JSONDecodeError, ValueError) as e:
+                raise NineRouterError(f"Failed to decode 9Router response as JSON: {self._sanitize_error_text(resp.text)}") from e
 
-        # Extract content
-        choices = resp_data.get("choices", [])
-        if not choices:
-            raise NineRouterError(f"No choices returned in 9Router response: {resp_data}")
+            # Extract content
+            choices = resp_data.get("choices", [])
+            if not choices:
+                raise NineRouterError(f"No choices returned in 9Router response: {resp_data}")
 
-        first_choice = choices[0]
-        message = first_choice.get("message", {})
-        content = message.get("content", "")
+            first_choice = choices[0]
+            message = first_choice.get("message", {})
+            content = message.get("content", "")
 
         return VisionResponse(
             content=content,

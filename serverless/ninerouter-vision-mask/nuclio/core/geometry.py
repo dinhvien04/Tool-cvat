@@ -781,3 +781,78 @@ def overlay_mask_on_image(
 
     stencil = mask_l.point(lambda p: 255 if p > 0 else 0)
     return Image.composite(blended, rgb, stencil)
+
+
+def calculate_box_iou(box_a: Sequence[Union[int, float]], box_b: Sequence[Union[int, float]]) -> float:
+    """Calculate Intersection-over-Union (IoU) between two bounding boxes [x1, y1, x2, y2].
+
+    Args:
+        box_a: Sequence of [x1, y1, x2, y2].
+        box_b: Sequence of [x1, y1, x2, y2].
+
+    Returns:
+        IoU as float in [0.0, 1.0].
+    """
+    if len(box_a) < 4 or len(box_b) < 4:
+        return 0.0
+
+    ax1, ay1, ax2, ay2 = float(box_a[0]), float(box_a[1]), float(box_a[2]), float(box_a[3])
+    bx1, by1, bx2, by2 = float(box_b[0]), float(box_b[1]), float(box_b[2]), float(box_b[3])
+
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+
+    if inter_area <= 0.0:
+        return 0.0
+
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union_area = area_a + area_b - inter_area
+
+    if union_area <= 0.0:
+        return 0.0
+
+    return inter_area / union_area
+
+
+def extract_shape_bbox(shape: Dict[str, Any]) -> Optional[List[float]]:
+    """Extract canonical pixel bounding box [x1, y1, x2, y2] from any CVAT shape dictionary.
+
+    Supports 'rectangle', 'mask', 'polygon', 'polyline', and shapes with 'points', 'mask', or 'pixel_box'.
+    """
+    stype = shape.get("type")
+    # 1. Rectangle
+    if stype == "rectangle" and "points" in shape and len(shape["points"]) >= 4:
+        pts = shape["points"]
+        return [
+            float(min(pts[0], pts[2])),
+            float(min(pts[1], pts[3])),
+            float(max(pts[0], pts[2])),
+            float(max(pts[1], pts[3])),
+        ]
+
+    # 2. Mask with last 4 elements as [xmin, ymin, xmax, ymax]
+    if "mask" in shape and isinstance(shape["mask"], (list, tuple)) and len(shape["mask"]) >= 4:
+        xmin, ymin, xmax, ymax = shape["mask"][-4:]
+        return [float(xmin), float(ymin), float(xmax), float(ymax)]
+
+    # 3. Polygon / Polyline with flat points [x0, y0, x1, y1, ...]
+    if "points" in shape and isinstance(shape["points"], (list, tuple)) and len(shape["points"]) >= 4:
+        pts = shape["points"]
+        xs = [float(pts[i]) for i in range(0, len(pts), 2)]
+        ys = [float(pts[i]) for i in range(1, len(pts), 2)]
+        if xs and ys:
+            return [min(xs), min(ys), max(xs), max(ys)]
+
+    # 4. Fallback to pixel_box if present
+    if "pixel_box" in shape and isinstance(shape["pixel_box"], (list, tuple)) and len(shape["pixel_box"]) >= 4:
+        b = shape["pixel_box"]
+        return [float(b[0]), float(b[1]), float(b[2]), float(b[3])]
+
+    return None
