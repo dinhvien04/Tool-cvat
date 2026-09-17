@@ -1,0 +1,23 @@
+# Environment and credentials
+.env
+.env.local
+*.env
+
+# Output artifacts
+output/
+outputs/
+*.log
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
