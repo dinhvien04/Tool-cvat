@@ -374,7 +374,7 @@ try {
         Write-Host "Warning: Expected $($deployedNames -join ', ') in CVAT Lambda Manager, but found ($($foundInCvat -join ', ')). Check Nuclio project assignment." -ForegroundColor Yellow
     }
 } catch {
-    Write-Host "Warning: Could not query CVAT Lambda Manager at $cvatCheckUrl: $_" -ForegroundColor Yellow
+    Write-Host "Warning: Could not query CVAT Lambda Manager at ${cvatCheckUrl} - $_" -ForegroundColor Yellow
 }
 
 Write-Host "`n======================================================================" -ForegroundColor Cyan

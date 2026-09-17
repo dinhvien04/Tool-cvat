@@ -227,8 +227,18 @@ def annotate_image(
     visual_examples_used: int = 0
     text_rules_used: int = 0
 
-    f_db = feedback_db if feedback_db is not None else FeedbackDatabase()
-    if enable_feedback and f_db.is_enabled():
+    f_db: Optional[FeedbackDatabase] = None
+    if enable_feedback:
+        try:
+            f_db = feedback_db if feedback_db is not None else FeedbackDatabase()
+            if not f_db.is_enabled():
+                f_db = None
+        except Exception as e:
+            logger.warning(f"Could not initialize feedback database: {e}")
+            warnings.append(f"feedback_init_warning: {e}")
+            f_db = None
+
+    if f_db is not None:
         try:
             retrieval_engine = CorrectionRetrievalEngine(db=f_db)
             retrieval_res = retrieval_engine.retrieve(candidate_labels=labels)
@@ -239,6 +249,7 @@ def annotate_image(
             visual_examples = retrieval_res.visual_examples
             visual_examples_used = len(visual_examples)
         except Exception as e:
+            logger.warning(f"Feedback retrieval warning: {e}")
             warnings.append(f"feedback_retrieval_warning: {e}")
 
     # 6. Send multimodal request to 9Router
@@ -512,7 +523,7 @@ def annotate_image(
                     cvat_shapes.append(mask_shape)
 
     # 9. Store AI prediction baseline for future human correction reconciliation
-    if enable_feedback and f_db.is_enabled() and image_hash:
+    if enable_feedback and f_db is not None and f_db.is_enabled() and image_hash:
         try:
             f_db.save_prediction_baseline(
                 image_hash=image_hash,

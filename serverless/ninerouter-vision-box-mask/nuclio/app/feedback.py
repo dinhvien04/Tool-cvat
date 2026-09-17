@@ -693,29 +693,20 @@ class FeedbackDatabase:
         return None
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Create a connection with WAL mode (or safe fallback journal mode) and row factory."""
+        """Create a connection with robust file-locking journal mode and row factory.
+
+        Uses TRUNCATE journal mode and busy_timeout=30000. TRUNCATE is universally
+        supported across Windows NTFS, Docker bind mounts (9P/VirtioFS), WSL2, and Linux,
+        completely avoiding POSIX shared-memory (-shm) failures seen with WAL mode on bind mounts.
+        """
         conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
         try:
-            cur = conn.execute("PRAGMA journal_mode=WAL")
-            row = cur.fetchone()
-            mode = (row[0] if row else "").upper()
-            if mode != "WAL":
-                logger.warning(
-                    "SQLite WAL mode not supported on filesystem (mode=%s); falling back to TRUNCATE",
-                    mode,
-                )
-                conn.execute("PRAGMA journal_mode=TRUNCATE")
-        except sqlite3.OperationalError as exc:
-            logger.warning(
-                "SQLite WAL mode failed (%s); falling back to TRUNCATE safe journal mode",
-                exc,
-            )
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.execute("PRAGMA journal_mode=TRUNCATE")
-        try:
             conn.execute("PRAGMA synchronous=NORMAL")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as exc:
+            logger.warning("Could not set SQLite pragmas (%s); proceeding with defaults", exc)
         return conn
 
     def _init_db(self) -> None:
@@ -1483,13 +1474,17 @@ class FeedbackDatabase:
 
     def is_enabled(self) -> bool:
         """Check if feedback learning is enabled."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT value FROM feedback_meta WHERE key = 'enabled'")
-            row = cursor.fetchone()
-            if not row:
-                return True  # Enabled by default
-            return row["value"].lower() == "true"
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM feedback_meta WHERE key = 'enabled'")
+                row = cursor.fetchone()
+                if not row:
+                    return True  # Enabled by default
+                return row["value"].lower() == "true"
+        except Exception as e:
+            logger.warning("Error reading feedback_meta: %s; defaulting is_enabled to True", e)
+            return True
 
     def clear(
         self,
