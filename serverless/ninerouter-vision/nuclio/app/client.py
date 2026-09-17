@@ -209,6 +209,41 @@ class NineRouterClient:
         models = self.get_vision_models()
         return [str(m["id"]) for m in models if isinstance(m, dict) and "id" in m]
 
+    def resolve_vision_model(self, preferred_model: Optional[str] = None) -> str:
+        """Resolve a real vision model available on 9Router.
+
+        - If preferred_model is explicitly supplied and exists in 9Router's vision models, use it.
+        - Otherwise query the actual local 9Router vision model list and return the first available model.
+        - Never fabricates model IDs.
+        - Raises NineRouterError if no vision models are available or if the requested model is not found.
+
+        Args:
+            preferred_model: Optional model ID requested by caller or environment.
+
+        Returns:
+            Resolved valid model ID string.
+
+        Raises:
+            NineRouterError: If no vision models are available, or requested model does not exist.
+        """
+        available_ids = self.get_vision_model_ids()
+        if not available_ids:
+            raise NineRouterError(
+                f"No vision-capable models found in 9Router at {self.base_url}."
+            )
+
+        if preferred_model and preferred_model.strip():
+            target = preferred_model.strip()
+            if target in available_ids:
+                return target
+            available_str = ", ".join(available_ids)
+            raise NineRouterError(
+                f"Requested vision model '{target}' is not available in 9Router. "
+                f"Available vision models: {available_str}"
+            )
+
+        return available_ids[0]
+
     def send_vision_request(
         self,
         model: str,

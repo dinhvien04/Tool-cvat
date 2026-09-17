@@ -65,10 +65,45 @@ def dummy_image_b64():
 def test_init_context():
     """Verify init_context initializes ModelHandler onto context.user_data."""
     ctx = MockContext()
-    with patch("model_handler.NineRouterClient"):
+    with patch("model_handler.NineRouterClient") as MockClient:
+        mock_inst = MockClient.return_value
+        mock_inst.resolve_vision_model.return_value = "auto-resolved-model"
         init_context(ctx)
     assert hasattr(ctx.user_data, "model_handler")
     assert isinstance(ctx.user_data.model_handler, ModelHandler)
+
+
+def test_model_handler_dynamic_resolution():
+    """Verify ModelHandler resolves vision model dynamically from 9Router."""
+    with patch("model_handler.NineRouterClient") as MockClient:
+        mock_inst = MockClient.return_value
+        mock_inst.resolve_vision_model.return_value = "dyn/test-vision-model"
+
+        handler_inst = ModelHandler(model=None)
+        assert handler_inst.active_model == "dyn/test-vision-model"
+        mock_inst.resolve_vision_model.assert_called_once_with(None)
+
+
+def test_model_handler_requested_model_resolution():
+    """Verify ModelHandler resolves and validates an explicitly requested vision model."""
+    with patch("model_handler.NineRouterClient") as MockClient:
+        mock_inst = MockClient.return_value
+        mock_inst.resolve_vision_model.return_value = "ag/gemini-3.8-flash-high"
+
+        handler_inst = ModelHandler(model="ag/gemini-3.8-flash-high")
+        assert handler_inst.active_model == "ag/gemini-3.8-flash-high"
+        mock_inst.resolve_vision_model.assert_called_once_with("ag/gemini-3.8-flash-high")
+
+
+def test_model_handler_invalid_model_fails_fast():
+    """Verify ModelHandler fails fast (raises) when requested model is invalid (no soft fallback)."""
+    from app.client import NineRouterError
+    with patch("model_handler.NineRouterClient") as MockClient:
+        mock_inst = MockClient.return_value
+        mock_inst.resolve_vision_model.side_effect = NineRouterError("Requested vision model 'invalid' is not available")
+
+        with pytest.raises(NineRouterError, match="not available"):
+            ModelHandler(model="invalid")
 
 
 def test_load_spec_labels_from_function_yaml():

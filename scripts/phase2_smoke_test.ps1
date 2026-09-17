@@ -160,13 +160,18 @@ foreach ($det in $detections) {
         Write-Error "Detection points must be [x1, y1, x2, y2]. Received: $($det.points -join ', ')"
         exit 1
     }
-    $conf = [double]$det.confidence
-    if ($conf -lt 0.0 -or $conf -gt 1.0) {
-        Write-Error "Detection confidence must be in range [0.0, 1.0]. Received: $conf"
-        exit 1
+    if ($det.PSObject.Properties['confidence'] -and $det.confidence -ne $null) {
+        $conf = [double]$det.confidence
+        if ($conf -lt 0.0 -or $conf -gt 1.0) {
+            Write-Error "Detection confidence must be in range [0.0, 1.0]. Received: $conf"
+            exit 1
+        }
+        $confDisplay = $det.confidence
+    } else {
+        $confDisplay = "<omitted>"
     }
     $validCount++
-    Write-Host "  -> [$($det.label)] confidence=$($det.confidence) points=[$($det.points -join ', ')]" -ForegroundColor Gray
+    Write-Host "  -> [$($det.label)] confidence=$confDisplay points=[$($det.points -join ', ')]" -ForegroundColor Gray
 }
 
 Write-Host "`n======================================================================" -ForegroundColor Green

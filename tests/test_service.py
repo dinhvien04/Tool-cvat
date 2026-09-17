@@ -152,13 +152,73 @@ def test_annotate_image_fallback_confidence(sample_image_bytes, mock_client):
     )
     mock_client.send_vision_request.return_value = fake_resp
 
-    # With default fallback 1.0
+    # With explicit fallback 1.0 (if user deliberately configured it)
     res = annotate_image(sample_image_bytes, mock_client, fallback_confidence=1.0)
     assert res.shapes[0]["confidence"] == "1.0"
 
     # With custom fallback 0.8
     res_custom = annotate_image(sample_image_bytes, mock_client, fallback_confidence=0.8)
     assert res_custom.shapes[0]["confidence"] == "0.8"
+
+
+def test_annotate_image_omitted_confidence_never_fake_one(sample_image_bytes, mock_client):
+    """Regression test: missing confidence is NEVER represented as fake 1.0 (100% certainty)."""
+    fake_resp = VisionResponse(
+        content=json.dumps({
+            "objects": [
+                {"label": "car", "box_2d": [100, 100, 200, 200]},  # confidence omitted by VLM
+            ]
+        }),
+        raw_response={},
+        duration_seconds=0.4,
+        model="ag/gemini-3.8-flash-high",
+        status_code=200,
+    )
+    mock_client.send_vision_request.return_value = fake_resp
+
+    # 1. When threshold == 0.0 and fallback_confidence is None (default):
+    # Shape must be kept, but confidence key MUST be omitted (never "1.0")
+    res_zero_threshold = annotate_image(
+        sample_image_bytes,
+        mock_client,
+        threshold=0.0,
+        fallback_confidence=None,
+    )
+    assert len(res_zero_threshold.shapes) == 1
+    assert "confidence" not in res_zero_threshold.shapes[0]
+    assert res_zero_threshold.shapes[0]["label"] == "car"
+
+    # 2. When threshold > 0.0 and fallback_confidence is None:
+    # Unrated detections cannot satisfy the threshold and MUST be filtered out
+    res_filtered = annotate_image(
+        sample_image_bytes,
+        mock_client,
+        threshold=0.5,
+        fallback_confidence=None,
+    )
+    assert len(res_filtered.shapes) == 0
+
+
+def test_annotate_image_dynamic_model_resolution(sample_image_bytes, mock_client):
+    """Verify annotate_image dynamically resolves model when not specified."""
+    mock_client.resolve_vision_model.return_value = "dynamic/resolved-vision-model"
+    fake_resp = VisionResponse(
+        content=json.dumps({
+            "objects": [{"label": "bus", "box_2d": [50, 50, 200, 200], "confidence": 0.9}]
+        }),
+        raw_response={},
+        duration_seconds=0.3,
+        model="dynamic/resolved-vision-model",
+        status_code=200,
+    )
+    mock_client.send_vision_request.return_value = fake_resp
+
+    # Omit model argument
+    res = annotate_image(sample_image_bytes, mock_client, model=None)
+
+    mock_client.resolve_vision_model.assert_called_once()
+    assert res.model_used == "dynamic/resolved-vision-model"
+    assert len(res.shapes) == 1
 
 
 def test_annotate_image_strict_mode_error(sample_image_bytes, mock_client):

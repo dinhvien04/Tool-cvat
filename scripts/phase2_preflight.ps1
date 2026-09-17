@@ -24,7 +24,10 @@ param (
     [string]$NineRouterUrl = "http://127.0.0.1:20128",
 
     [Parameter(Mandatory = $false)]
-    [string]$VisionModel = "ag/gemini-3.8-flash-high"
+    [string]$VisionModel = $env:VISION_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$NineRouterKey = $env:NINEROUTER_KEY
 )
 
 if ($env:NINEROUTER_URL) {
@@ -32,6 +35,14 @@ if ($env:NINEROUTER_URL) {
 }
 if ($env:VISION_MODEL) {
     $VisionModel = $env:VISION_MODEL
+}
+if ($env:NINEROUTER_KEY) {
+    $NineRouterKey = $env:NINEROUTER_KEY
+}
+
+$authHeaders = @{}
+if ($NineRouterKey -and $NineRouterKey.Trim() -ne "") {
+    $authHeaders["Authorization"] = "Bearer $NineRouterKey"
 }
 
 $script:TotalPass = 0
@@ -143,7 +154,7 @@ if ($resolvedCvatRoot) {
 # ---------------------------------------------------------------------
 $healthUrl = "$NineRouterUrl/api/health"
 try {
-    $healthResp = Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 5 -ErrorAction Stop
+    $healthResp = Invoke-RestMethod -Uri $healthUrl -Headers $authHeaders -Method Get -TimeoutSec 5 -ErrorAction Stop
     if ($healthResp.ok -eq $true) {
         Print-Result -Status "PASS" -CheckName "9Router host service is healthy" -Details "Endpoint: $healthUrl -> ok: true"
     } else {
@@ -172,21 +183,32 @@ try {
 }
 
 # ---------------------------------------------------------------------
-# Check 7: 9Router Vision Models & Active Model
+# Check 7: 9Router Vision Models & Active Model Resolution
 # ---------------------------------------------------------------------
+$resolvedActiveModel = $null
 try {
     $modelsUrl = "$NineRouterUrl/v1/models"
-    $modelsResp = Invoke-RestMethod -Uri $modelsUrl -Method Get -TimeoutSec 5 -ErrorAction Stop
+    $modelsResp = Invoke-RestMethod -Uri $modelsUrl -Headers $authHeaders -Method Get -TimeoutSec 5 -ErrorAction Stop
     $models = $modelsResp.data
-    $visionModels = @($models | Where-Object { $_.capabilities.vision -eq $true })
+    $visionModels = @($models | Where-Object {
+        $_.capabilities.vision -eq $true -or
+        ($_.id -match "(vision|vl|gemini|claude|gpt-4o|4o-mini|qwen-vl)" -and $_.capabilities.vision -ne $false)
+    })
 
     if ($visionModels.Count -gt 0) {
-        $modelFound = $visionModels | Where-Object { $_.id -eq $VisionModel }
-        if ($modelFound) {
-            Print-Result -Status "PASS" -CheckName "Target vision model is available" -Details "Model: $VisionModel (Total vision models: $($visionModels.Count))"
+        if ($VisionModel -and $VisionModel.Trim() -ne "") {
+            $modelFound = $visionModels | Where-Object { $_.id -eq $VisionModel }
+            if ($modelFound) {
+                $resolvedActiveModel = $modelFound.id
+                Print-Result -Status "PASS" -CheckName "Target vision model is available" -Details "Model: $resolvedActiveModel (Total vision models: $($visionModels.Count))"
+            } else {
+                $availableList = ($visionModels | ForEach-Object { $_.id }) -join ", "
+                Print-Result -Status "FAIL" -CheckName "Requested vision model not found" -Details "Explicitly requested '$VisionModel' is not available in 9Router. Available: $availableList"
+            }
         } else {
-            $fallback = $visionModels[0].id
-            Print-Result -Status "WARN" -CheckName "Target vision model not found; fallback available" -Details "Requested '$VisionModel' not listed. Available fallback: '$fallback'"
+            # Dynamically select the first real available vision model (no hardcoded assumption)
+            $resolvedActiveModel = $visionModels[0].id
+            Print-Result -Status "PASS" -CheckName "Dynamically resolved active vision model" -Details "Selected: $resolvedActiveModel (from $($visionModels.Count) available vision models)"
         }
     } else {
         Print-Result -Status "FAIL" -CheckName "No vision-capable models found in 9Router" -Details "Checked $modelsUrl"
@@ -196,37 +218,75 @@ try {
 }
 
 # ---------------------------------------------------------------------
-# Check 8: Nuclio CLI (nuctl) Availability & Version
+# Check 8: Nuclio CLI (nuctl) & CVAT Dashboard Version Compatibility
 # ---------------------------------------------------------------------
+# 1. Detect CVAT Nuclio dashboard version
+$nuclioDashboardVersion = $null
+try {
+    $containerImg = docker inspect nuclio --format '{{.Config.Image}}' 2>$null
+    if ($containerImg -match 'nuclio/dashboard:v?([0-9]+\.[0-9]+(\.[0-9]+)?)') {
+        $nuclioDashboardVersion = $Matches[1]
+    }
+} catch {}
+
+if (-not $nuclioDashboardVersion -and $resolvedCvatRoot) {
+    $composePath = Join-Path $resolvedCvatRoot "components\serverless\docker-compose.serverless.yml"
+    if (Test-Path $composePath) {
+        $composeContent = Get-Content $composePath -Raw
+        if ($composeContent -match 'nuclio/dashboard:v?([0-9]+\.[0-9]+(\.[0-9]+)?)') {
+            $nuclioDashboardVersion = $Matches[1]
+        }
+    }
+}
+
+# 2. Detect nuctl CLI availability and version
 $nuctlFound = $false
-$nuctlVersion = $null
+$nuctlRawVersion = $null
 $nuctlPath = $null
+$nuctlVersion = $null
 
 $winNuctl = Get-Command nuctl -ErrorAction SilentlyContinue
 if ($winNuctl) {
     $nuctlFound = $true
     $nuctlPath = $winNuctl.Source
-    $nuctlVersion = (nuctl version 2>$null | Out-String)
+    $nuctlRawVersion = (nuctl version 2>$null | Out-String)
 } else {
     try {
         $wslNuctl = wsl -d Ubuntu which nuctl 2>$null
         if ($LASTEXITCODE -eq 0 -and $wslNuctl) {
             $nuctlFound = $true
             $nuctlPath = "wsl -d Ubuntu nuctl ($wslNuctl)"
-            $nuctlVersion = (wsl -d Ubuntu nuctl version 2>$null | Out-String)
+            $nuctlRawVersion = (wsl -d Ubuntu nuctl version 2>$null | Out-String)
         }
     } catch {}
 }
 
 if ($nuctlFound) {
-    $verPattern = 'Label:\s*([0-9\.]+)'
-    $matchVersion = "1.16.3"
-    if ($nuctlVersion -match $verPattern) {
-        $matchVersion = $Matches[1]
+    if ($nuctlRawVersion -match 'Label:\s*v?([0-9]+\.[0-9]+(\.[0-9]+)?)') {
+        $nuctlVersion = $Matches[1]
+    } elseif ($nuctlRawVersion -match 'v?([0-9]+\.[0-9]+(\.[0-9]+)?)') {
+        $nuctlVersion = $Matches[1]
     }
-    Print-Result -Status "PASS" -CheckName "Nuclio CLI (nuctl) is available" -Details "Location: $nuctlPath | Version: $matchVersion"
+
+    # 3. Compare nuctl and Nuclio dashboard versions
+    if ($nuctlVersion -and $nuclioDashboardVersion) {
+        $nuctlParts = $nuctlVersion.Split('.')
+        $nuclioParts = $nuclioDashboardVersion.Split('.')
+        $nuctlMM = "$($nuctlParts[0]).$($nuctlParts[1])"
+        $nuclioMM = "$($nuclioParts[0]).$($nuclioParts[1])"
+
+        if ($nuctlMM -eq $nuclioMM) {
+            Print-Result -Status "PASS" -CheckName "nuctl and CVAT Nuclio versions are compatible" -Details "nuctl: $nuctlVersion | Nuclio dashboard: $nuclioDashboardVersion ($nuctlPath)"
+        } else {
+            Print-Result -Status "WARN" -CheckName "nuctl and CVAT Nuclio version mismatch" -Details "nuctl version ($nuctlVersion) does not match CVAT Nuclio dashboard ($nuclioDashboardVersion). CVAT requires compatible major.minor version."
+        }
+    } elseif ($nuctlVersion) {
+        Print-Result -Status "WARN" -CheckName "CVAT Nuclio dashboard version unknown" -Details "nuctl is available ($nuctlVersion, $nuctlPath), but CVAT Nuclio dashboard version could not be detected to verify compatibility."
+    } else {
+        Print-Result -Status "WARN" -CheckName "Nuclio CLI version could not be parsed" -Details "Location: $nuctlPath | Output: $($nuctlRawVersion.Trim())"
+    }
 } else {
-    Print-Result -Status "WARN" -CheckName "nuctl binary not found in Windows PATH or WSL" -Details "Required for function deployment. Can be downloaded or run via WSL."
+    Print-Result -Status "FAIL" -CheckName "nuctl CLI not found in Windows PATH or WSL" -Details "nuctl is required for deploying CVAT serverless detector functions."
 }
 
 # ---------------------------------------------------------------------

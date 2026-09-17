@@ -31,7 +31,7 @@ DEFAULT_NINEROUTER_URL_CONTAINER = "http://host.docker.internal:20128"
 DEFAULT_VISION_MODEL = "ag/gemini-3.8-flash-high"
 DEFAULT_MAX_IMAGE_SIZE = 1600
 DEFAULT_NINEROUTER_TIMEOUT = 60.0
-DEFAULT_FALLBACK_CONFIDENCE = 1.0
+DEFAULT_FALLBACK_CONFIDENCE: Optional[float] = None
 
 
 def is_running_in_container() -> bool:
@@ -111,7 +111,7 @@ class AppConfig:
     vision_model: str = DEFAULT_VISION_MODEL
     max_image_size: int = DEFAULT_MAX_IMAGE_SIZE
     ninerouter_timeout: float = DEFAULT_NINEROUTER_TIMEOUT
-    fallback_confidence: float = DEFAULT_FALLBACK_CONFIDENCE
+    fallback_confidence: Optional[float] = DEFAULT_FALLBACK_CONFIDENCE
     output_dir: Path = DEFAULT_OUTPUT_DIR
     labels_config_path: Path = DEFAULT_LABELS_PATH
     labels: LabelConfig = field(default_factory=LabelConfig)

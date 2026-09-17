@@ -43,9 +43,8 @@ def test_default_ninerouter_url_selection(monkeypatch):
 
 
 def test_fallback_confidence_constant():
-    """Verify DEFAULT_FALLBACK_CONFIDENCE is within [0.0, 1.0]."""
-    assert 0.0 <= DEFAULT_FALLBACK_CONFIDENCE <= 1.0
-    assert DEFAULT_FALLBACK_CONFIDENCE == 1.0
+    """Verify DEFAULT_FALLBACK_CONFIDENCE is None (never fake 1.0 certainty)."""
+    assert DEFAULT_FALLBACK_CONFIDENCE is None
 
 
 def test_app_config_phase2_defaults():

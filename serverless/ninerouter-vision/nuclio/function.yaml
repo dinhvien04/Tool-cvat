@@ -31,7 +31,7 @@ spec:
     - name: NINEROUTER_URL
       value: 'http://host.docker.internal:20128'
     - name: VISION_MODEL
-      value: 'ag/gemini-3.8-flash-high'
+      value: ''
     - name: NINEROUTER_TIMEOUT
       value: '60.0'
     - name: MAX_IMAGE_SIZE

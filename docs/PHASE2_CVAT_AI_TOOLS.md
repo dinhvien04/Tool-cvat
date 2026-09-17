@@ -56,6 +56,30 @@ Tài liệu này hướng dẫn chi tiết cách kích hoạt và sử dụng m�
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
+### 1.3 Chính Sách Xử Lý Confidence & Độ Tin Cậy Heuristic của LLM/VLM
+- **Bản chất điểm tin cậy của LLM/VLM:** Điểm số confidence trả về từ các mô hình VLM (Vision-Language Models) là ước lượng tự tin ngữ nghĩa heuristic (heuristic semantic certainty), không phải xác suất tần suất được chuẩn hóa nghiêm ngặt (calibrated frequentist probability) như mô hình phân loại truyền thống.
+- **Chính sách xử lý khi có điểm số:** Khi mô hình trả về trường `confidence` hợp lệ (nằm trong khoảng `[0.0, 1.0]`), hệ thống làm tròn 2 chữ số thập phân (ví dụ: `"0.95"`), gửi về CVAT và áp dụng bộ lọc ngưỡng `threshold` từ người dùng (`confidence >= threshold`).
+- **Chính sách tuyệt đối không giả lập 100%:** Khi mô hình bỏ qua hoặc không trả về trường `confidence`, hệ thống **TUYỆT ĐỐI KHÔNG** gán giá trị mặc định là `1.0` (100% chắc chắn giả mạo). Thay vào đó:
+  - Nếu người dùng đặt `threshold > 0.0`: Các dự đoán không có điểm số sẽ không thỏa mãn ngưỡng tin cậy và bị loại bỏ (trừ khi người dùng cấu hình rõ ràng một giá trị fallback qua biến môi trường).
+  - Nếu người dùng đặt `threshold == 0.0`: Đối tượng được giữ lại nhưng trường `"confidence"` hoàn toàn được bỏ qua trong dictionary của shape trả về CVAT.
+
+### 1.4 Giải Quyết Mô Hình Thị Giác Động (Dynamic Model Resolution)
+- Hệ thống không giả định cứng nhắc rằng model `ag/gemini-3.8-flash-high` luôn luôn tồn tại.
+- Nếu người dùng truyền biến môi trường `VISION_MODEL` hợp lệ và tồn tại trên 9Router: hệ thống sử dụng model đó.
+- Nếu không truyền: hệ thống gửi truy vấn tới 9Router (`/v1/models` và `/v1/models/image-to-text`), lọc các model có khả năng thị giác (`capabilities.vision == true` hoặc tên chứa vision/vl/gemini/claude/gpt-4o), và tự động chọn model đầu tiên khả dụng thực tế.
+- Script preflight (`phase2_preflight.ps1`) và script deploy (`phase2_deploy.ps1`) dùng chung một logic giải quyết nhất quán. Nếu model yêu cầu không có trên 9Router, script lập tức báo lỗi và dừng triển khai (`FAIL`), không dùng model giả lập hoặc fallback ngầm.
+
+### 1.5 Bảo Mật API Key & Kiểm Soát Tương Thích Phiên Bản
+- **Bảo mật API Key hai đường (Windows native & WSL):**
+  - Không bao giờ ghi `NINEROUTER_KEY` dưới dạng văn bản thuần (plaintext) ra file `.sh` tạm thời trên đĩa.
+  - Không bao giờ in key ra màn hình console hay commit vào git.
+  - Trên WSL: Sử dụng cơ chế truyền biến môi trường an toàn trong bộ nhớ qua `WSLENV="NINEROUTER_KEY"` kết hợp pipe Base64 (`echo '$b64' | base64 -d | bash`). Ngay sau khi lệnh kết thúc, biến môi trường của tiến trình được dọn dẹp trong khối `finally`.
+  - Trên Windows native: Tự động che dấu API key (`--env NINEROUTER_KEY=***`) trong mọi dòng lệnh in ra log.
+- **Tương thích phiên bản Nuclio:**
+  - Script kiểm tra tự động phát hiện phiên bản container Nuclio Dashboard đang chạy trong stack CVAT (`docker inspect nuclio --format '{{.Config.Image}}'`).
+  - Đối chiếu với phiên bản của `nuctl` CLI ở cấp độ `major.minor`.
+  - Không bao giờ ngầm mặc định phiên bản thành 1.16.3 nếu việc phân tích thất bại.
+
 ---
 
 ## 2. Hợp Đồng Nhãn (Label Contract: 13 Nhãn Bbox vs 31 Nhãn Toàn Dự Án)
@@ -105,12 +129,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\phase2_preflight.ps1
 Script sẽ kiểm tra tự động 8 tiêu chí:
 - Trạng thái Docker Desktop daemon
 - Docker Compose CLI v2
-- Đường dẫn cài đặt CVAT (`D:\cvat`)
+- Đường dẫn cài đặt CVAT (`D:\cvat` hoặc `$env:CVAT_ROOT`)
 - File compose serverless của CVAT
 - Sức khỏe 9Router trên host (`http://127.0.0.1:20128/api/health`)
-- Kết nối container vào host (`http://host.docker.internal:20128`)
-- Khả năng sẵn sàng của mô hình thị giác (`ag/gemini-3.8-flash-high`)
-- Công cụ dòng lệnh `nuctl`
+- Kết nối container vào host (`http://host.docker.internal:20128/api/health`)
+- Khám phá mô hình thị giác động (Dynamic Model Resolution): truy vấn danh sách mô hình thực tế từ 9Router, kiểm tra mô hình được yêu cầu hoặc tự động chọn mô hình thị giác sẵn sàng đầu tiên; dừng ngay lập tức nếu mô hình yêu cầu không tồn tại (không dùng model giả lập hoặc fallback ngầm)
+- Kiểm tra tương thích phiên bản Nuclio CLI (`nuctl`) và CVAT Nuclio dashboard thực tế (đối chiếu major.minor động, không mặc định ngầm)
 
 Khi kết quả trả về `PASS: 8, WARN: 0, FAIL: 0`, môi trường của bạn đã sẵn sàng 100%!
 
@@ -122,8 +146,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\phase2_deploy.ps1
 Script sẽ tự động:
 1. Đảm bảo stack CVAT Serverless đang hoạt động (`docker compose -f docker-compose.yml -f components/serverless/docker-compose.serverless.yml up -d`).
 2. Đồng bộ mã nguồn nhẹ vào context build.
-3. Sử dụng `nuctl deploy` để build image nhẹ `cvat.custom.ninerouter.vision` và kết nối vào mạng `cvat_cvat`.
-4. Cấu hình biến môi trường `NINEROUTER_URL=http://host.docker.internal:20128` và `VISION_MODEL=ag/gemini-3.8-flash-high`.
+3. Giải quyết mô hình thị giác khả dụng thực tế từ 9Router (đồng nhất với bước preflight).
+4. Bảo mật API Key: Sử dụng cơ chế truyền biến môi trường trong bộ nhớ qua `WSLENV` và pipe Base64 cho WSL (không tạo file `.sh` tạm trên đĩa, không ghi log plaintext), hoặc mặt nạ `--env NINEROUTER_KEY=***` cho Windows native.
+5. Sử dụng `nuctl deploy` để build image nhẹ `cvat.custom.ninerouter.vision` và kết nối vào mạng `cvat_cvat`.
+6. Cấu hình biến môi trường `NINEROUTER_URL=http://host.docker.internal:20128` và `VISION_MODEL` đã được giải quyết.
 
 > **Cam kết an toàn:** Script **KHÔNG BAO GIỜ** thực hiện `docker compose down -v` và không bao giờ xóa dữ liệu database, volume hay các task đã tạo trong CVAT!
 

@@ -362,5 +362,49 @@ def test_deploy_script_masks_key_in_logs():
     script_path = Path(__file__).resolve().parent.parent / "scripts" / "phase2_deploy.ps1"
     content = script_path.read_text(encoding="utf-8")
 
-    assert '$displayArgs += "--env NINEROUTER_KEY=***"' in content
+    assert '$displayArgs += "NINEROUTER_KEY=***"' in content
     assert 'Write-Host "Executing: nuctl $($displayArgs -join \' \')"' in content
+
+
+def test_deploy_script_wsl_in_memory_security():
+    """Verify scripts/phase2_deploy.ps1 executes securely inside WSL without writing secrets to disk."""
+    script_path = Path(__file__).resolve().parent.parent / "scripts" / "phase2_deploy.ps1"
+    content = script_path.read_text(encoding="utf-8")
+
+    # 1. Must NOT create temporary .sh files on disk
+    assert ".sh" not in content.lower() or "function.yaml" in content
+    assert "Out-File" not in content
+    assert "Set-Content" not in content
+
+    # 2. Must use WSLENV for in-memory secret passing
+    assert "WSLENV" in content
+    assert "$env:WSLENV = if ($env:WSLENV) { \"$($env:WSLENV):NINEROUTER_KEY\" } else { \"NINEROUTER_KEY\" }" in content
+
+    # 3. Must use Base64 decode pipe to execute in memory
+    assert "base64 -d | bash" in content
+
+    # 4. Must clean up environment variables in finally block
+    assert "finally {" in content
+    assert "$env:NINEROUTER_KEY = $null" in content
+    assert "$env:WSLENV = $env:WSLENV_BACKUP" in content
+
+
+def test_preflight_and_deploy_dynamic_model_selection():
+    """Verify both preflight and deploy scripts dynamically query models and fail if requested model is unavailable."""
+    preflight_path = Path(__file__).resolve().parent.parent / "scripts" / "phase2_preflight.ps1"
+    deploy_path = Path(__file__).resolve().parent.parent / "scripts" / "phase2_deploy.ps1"
+
+    preflight_code = preflight_path.read_text(encoding="utf-8")
+    deploy_code = deploy_path.read_text(encoding="utf-8")
+
+    # Both must query /v1/models
+    assert "/v1/models" in preflight_code
+    assert "/v1/models" in deploy_code
+
+    # Both must stop/fail when requested model is not found (no soft default)
+    assert "Requested vision model not found" in preflight_code
+    assert "Requested vision model '$VisionModel' is not available" in deploy_code
+
+    # Both must resolve dynamically when VisionModel is empty
+    assert "$visionModels[0].id" in preflight_code
+    assert "$visionModels[0].id" in deploy_code

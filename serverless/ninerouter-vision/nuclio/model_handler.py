@@ -75,7 +75,7 @@ class ModelHandler:
     ):
         self.base_url = base_url or os.getenv("NINEROUTER_URL", DEFAULT_NINEROUTER_URL_CONTAINER)
         self.api_key = api_key or os.getenv("NINEROUTER_KEY")
-        self.requested_model = model or os.getenv("VISION_MODEL", DEFAULT_VISION_MODEL)
+        self.requested_model = model or os.getenv("VISION_MODEL")
 
         timeout_env = os.getenv("NINEROUTER_TIMEOUT")
         try:
@@ -104,10 +104,19 @@ class ModelHandler:
             timeout=self.timeout,
         )
 
-        self.active_model: str = self.requested_model
+        # Dynamic model resolution:
+        # - Remove assumption that ag/gemini-3.8-flash-high always exists
+        # - Use supplied VISION_MODEL if valid, else resolve first available vision model
+        # - Never fabricate model IDs; fail if requested model is unavailable (no soft warning)
+        try:
+            self.active_model: str = self.client.resolve_vision_model(self.requested_model)
+        except Exception as e:
+            logger.error(f"Failed to resolve vision model {self.requested_model!r} from 9Router: {e}")
+            raise
+
         logger.info(
             f"Initialized ModelHandler: base_url={self.base_url!r}, "
-            f"key={mask_api_key(self.api_key)}, model={self.requested_model!r}, "
+            f"key={mask_api_key(self.api_key)}, model={self.active_model!r}, "
             f"timeout={self.timeout}s, labels_count={len(self.candidate_labels)}"
         )
 

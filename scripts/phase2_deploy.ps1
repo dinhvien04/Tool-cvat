@@ -24,7 +24,7 @@ param (
     [string]$NineRouterUrl = "http://host.docker.internal:20128",
 
     [Parameter(Mandatory = $false)]
-    [string]$VisionModel = "ag/gemini-3.8-flash-high",
+    [string]$VisionModel = $env:VISION_MODEL,
 
     [Parameter(Mandatory = $false)]
     [string]$NineRouterKey = $env:NINEROUTER_KEY,
@@ -47,7 +47,13 @@ $NuclioDir = Join-Path $RepoRoot "serverless\ninerouter-vision\nuclio"
 if (-not $SkipPreflight) {
     Write-Host "`n[Step 1/5] Running pre-flight checks..." -ForegroundColor Yellow
     $preflightScript = Join-Path $ScriptDir "phase2_preflight.ps1"
-    & powershell -ExecutionPolicy Bypass -File $preflightScript
+    $preflightHostUrl = if ($NineRouterUrl -match "host\.docker\.internal") { "http://127.0.0.1:20128" } else { $NineRouterUrl }
+    $preflightArgs = @("-ExecutionPolicy", "Bypass", "-File", $preflightScript)
+    if ($CvatRoot) { $preflightArgs += @("-CvatRoot", $CvatRoot) }
+    if ($preflightHostUrl) { $preflightArgs += @("-NineRouterUrl", $preflightHostUrl) }
+    if ($VisionModel) { $preflightArgs += @("-VisionModel", $VisionModel) }
+    if ($NineRouterKey) { $preflightArgs += @("-NineRouterKey", $NineRouterKey) }
+    & powershell @preflightArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Pre-flight checks failed. Please resolve reported issues before deploying."
         exit 1
@@ -145,39 +151,92 @@ if (-not $checkNet) {
 }
 Write-Host "Attaching to Docker network: $networkName" -ForegroundColor Gray
 
+# Resolve vision model: ensure target model is genuinely available on 9Router
+$hostUrl = "http://127.0.0.1:20128"
+if ($NineRouterUrl -match "host\.docker\.internal") {
+    $modelsCheckUrl = "$hostUrl/v1/models"
+} else {
+    $modelsCheckUrl = "$NineRouterUrl/v1/models"
+}
+
+Write-Host "Resolving active vision model from 9Router ($modelsCheckUrl)..." -ForegroundColor Gray
+$resolvedVisionModel = $null
+try {
+    $authHeaders = @{}
+    if ($NineRouterKey -and $NineRouterKey.Trim() -ne "") {
+        $authHeaders["Authorization"] = "Bearer $NineRouterKey"
+    }
+    $modelsResp = Invoke-RestMethod -Uri $modelsCheckUrl -Headers $authHeaders -Method Get -TimeoutSec 5 -ErrorAction Stop
+    $models = $modelsResp.data
+    $visionModels = @($models | Where-Object {
+        $_.capabilities.vision -eq $true -or
+        ($_.id -match "(vision|vl|gemini|claude|gpt-4o|4o-mini|qwen-vl)" -and $_.capabilities.vision -ne $false)
+    })
+
+    if ($visionModels.Count -eq 0) {
+        Write-Error "No vision-capable models found on 9Router. Cannot deploy detector without an available vision model."
+        exit 1
+    }
+
+    if ($VisionModel -and $VisionModel.Trim() -ne "") {
+        $modelFound = $visionModels | Where-Object { $_.id -eq $VisionModel }
+        if ($modelFound) {
+            $resolvedVisionModel = $modelFound.id
+        } else {
+            $avail = ($visionModels | ForEach-Object { $_.id }) -join ", "
+            Write-Error "Requested vision model '$VisionModel' is not available on 9Router. Available models: $avail"
+            exit 1
+        }
+    } else {
+        $resolvedVisionModel = $visionModels[0].id
+    }
+} catch {
+    Write-Error "Failed to query 9Router models at $($modelsCheckUrl): $_"
+    exit 1
+}
+
+Write-Host "Resolved active vision model: $resolvedVisionModel" -ForegroundColor Green
+
 # Build nuctl deploy arguments
 if ($useWsl) {
     # Convert Windows paths to WSL paths
     $wslNuclioDir = (wsl -d Ubuntu wslpath -u ($NuclioDir -replace '\\', '/')).Trim()
     $wslFunctionYaml = "$wslNuclioDir/function.yaml"
 
-    $extraEnv = ""
+    # In-memory secure environment passing via WSLENV without writing plaintext secrets to disk
+    $env:WSLENV_BACKUP = $env:WSLENV
     if ($NineRouterKey) {
-        $extraEnv = " \`n    --env `"NINEROUTER_KEY=$NineRouterKey`""
+        $env:NINEROUTER_KEY = $NineRouterKey
+        $env:WSLENV = if ($env:WSLENV) { "$($env:WSLENV):NINEROUTER_KEY" } else { "NINEROUTER_KEY" }
     }
 
     $bashScript = @"
-#!/usr/bin/env bash
 set -e
+extraArgs=()
+if [ -n "`$NINEROUTER_KEY" ]; then
+    extraArgs+=(--env "NINEROUTER_KEY=`$NINEROUTER_KEY")
+fi
 nuctl deploy ninerouter-vision \
     --project-name cvat \
     --path "$wslNuclioDir" \
     --file "$wslFunctionYaml" \
     --platform local \
-    --platform-config "{\"attributes\": {\"network\": \"$networkName\"}}" \
+    --platform-config '{"attributes": {"network": "$networkName"}}' \
     --env "NINEROUTER_URL=$NineRouterUrl" \
-    --env "VISION_MODEL=$VisionModel"$extraEnv
+    --env "VISION_MODEL=$resolvedVisionModel" \
+    "`${extraArgs[@]}"
 "@
 
-    $tempSh = [System.IO.Path]::Combine($env:TEMP, "deploy_nuclio_tmp.sh")
-    [System.IO.File]::WriteAllText($tempSh, ($bashScript -replace "`r`n", "`n"), [System.Text.Encoding]::ASCII)
-    $wslTempSh = (wsl -d Ubuntu wslpath -u ($tempSh -replace '\\', '/')).Trim()
+    $b64Script = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($bashScript))
 
     try {
-        Write-Host "Invoking nuctl deploy inside WSL..." -ForegroundColor Gray
-        & wsl -d Ubuntu bash $wslTempSh
+        Write-Host "Invoking nuctl deploy inside WSL (in-memory secure execution)..." -ForegroundColor Gray
+        & wsl -d Ubuntu bash -c "echo '$b64Script' | base64 -d | bash"
     } finally {
-        if (Test-Path $tempSh) { Remove-Item -Force $tempSh -ErrorAction SilentlyContinue }
+        # Immediately sanitize process environment and restore WSLENV
+        $env:NINEROUTER_KEY = $null
+        $env:WSLENV = $env:WSLENV_BACKUP
+        $env:WSLENV_BACKUP = $null
     }
 } else {
     $deployArgs = @(
@@ -187,7 +246,7 @@ nuctl deploy ninerouter-vision \
         "--file", $functionYaml,
         "--platform", "local",
         "--env", "NINEROUTER_URL=$NineRouterUrl",
-        "--env", "VISION_MODEL=$VisionModel",
+        "--env", "VISION_MODEL=$resolvedVisionModel",
         "--platform-config", "{`"attributes`": {`"network`": `"$networkName`"}}"
     )
     if ($NineRouterKey) {
@@ -198,7 +257,7 @@ nuctl deploy ninerouter-vision \
     $displayArgs = @()
     foreach ($arg in $deployArgs) {
         if ($arg -like "*NINEROUTER_KEY=*") {
-            $displayArgs += "--env NINEROUTER_KEY=***"
+            $displayArgs += "NINEROUTER_KEY=***"
         } else {
             $displayArgs += $arg
         }

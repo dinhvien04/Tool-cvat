@@ -46,34 +46,37 @@ class AnnotationResult:
 def annotate_image(
     image_source: Union[bytes, str, Path, Image.Image],
     client: NineRouterClient,
-    model: str = DEFAULT_VISION_MODEL,
+    model: Optional[str] = None,
     candidate_labels: Optional[List[str]] = None,
     threshold: float = 0.0,
     max_size: int = DEFAULT_MAX_IMAGE_SIZE,
     strict: bool = False,
     temperature: float = 0.0,
     max_tokens: int = 4096,
-    fallback_confidence: float = 1.0,
+    fallback_confidence: Optional[float] = None,
 ) -> AnnotationResult:
     """Run end-to-end in-memory detection on an image.
 
     Args:
         image_source: Raw image bytes, file path, or PIL.Image.Image.
         client: Configured NineRouterClient instance.
-        model: Vision model identifier (e.g. 'ag/gemini-3.8-flash-high').
+        model: Vision model identifier (e.g. 'ag/gemini-3.8-flash-high'). If None, resolved dynamically.
         candidate_labels: Allowed labels for detection (defaults to 13 bbox labels).
         threshold: Minimum confidence threshold [0.0, 1.0] for filtering detections.
         max_size: Maximum dimension for the API-transmitted copy.
         strict: If True, raises on invalid model outputs; if False, skips invalid boxes.
         temperature: Sampling temperature for model completion.
         max_tokens: Maximum completion tokens.
-        fallback_confidence: Default confidence to assign when model omits confidence.
+        fallback_confidence: Default confidence to assign when model omits confidence (defaults to None; never fake 1.0).
 
     Returns:
         AnnotationResult containing CVAT rectangle shapes and parsed objects.
     """
     total_start = time.perf_counter()
     warnings: List[str] = []
+
+    # 1. Resolve model dynamically if not explicitly specified
+    active_model = model or client.resolve_vision_model()
 
     # 1. Resolve candidate labels
     labels = list(candidate_labels) if candidate_labels else list(DEFAULT_BBOX_LABELS)
@@ -93,7 +96,7 @@ def annotate_image(
 
     # 5. Send multimodal request to 9Router
     vision_resp = client.send_vision_request(
-        model=model,
+        model=active_model,
         image_bytes_or_b64=data_url,
         prompt=prompt,
         temperature=temperature,
@@ -112,22 +115,42 @@ def annotate_image(
     )
     warnings.extend(parse_result.warnings)
 
-    # 7. Apply confidence threshold filtering and format CVAT shapes
+    # 7. Apply confidence policy and format CVAT shapes
+    # Policy:
+    # - Model-reported confidence: validated in [0.0, 1.0] and filtered against threshold.
+    # - Missing confidence: NEVER represented as fake 100% certainty (no "1.0").
+    #   When threshold > 0.0, unrated detections cannot satisfy the threshold (unless fallback is set).
+    #   When threshold == 0.0, unrated detections are retained without a fake confidence score.
     filtered_objects: List[ParsedObject] = []
     cvat_shapes: List[Dict[str, Any]] = []
 
     for obj in parse_result.objects:
-        conf = obj.confidence if obj.confidence is not None else fallback_confidence
-        if conf >= threshold:
+        pts = obj.pixel_box if obj.pixel_box is not None else [0.0, 0.0, 0.0, 0.0]
+        shape_dict: Dict[str, Any] = {
+            "label": obj.label,
+            "points": [round(float(p), 2) for p in pts],
+            "type": "rectangle",
+        }
+
+        if obj.confidence is not None:
+            # Real model-reported confidence
+            if threshold > 0.0 and obj.confidence < threshold:
+                continue
+            shape_dict["confidence"] = str(round(float(obj.confidence), 2))
             filtered_objects.append(obj)
-            # Ensure points are [xtl, ytl, xbr, ybr]
-            pts = obj.pixel_box if obj.pixel_box is not None else [0.0, 0.0, 0.0, 0.0]
-            shape_dict: Dict[str, Any] = {
-                "confidence": str(round(float(conf), 2)),
-                "label": obj.label,
-                "points": [round(float(p), 2) for p in pts],
-                "type": "rectangle",
-            }
+            cvat_shapes.append(shape_dict)
+        elif fallback_confidence is not None:
+            # Explicitly configured fallback
+            if threshold > 0.0 and fallback_confidence < threshold:
+                continue
+            shape_dict["confidence"] = str(round(float(fallback_confidence), 2))
+            filtered_objects.append(obj)
+            cvat_shapes.append(shape_dict)
+        else:
+            # Omitted confidence: do NOT assign fake 1.0!
+            if threshold > 0.0:
+                continue
+            filtered_objects.append(obj)
             cvat_shapes.append(shape_dict)
 
     total_duration = time.perf_counter() - total_start
@@ -141,6 +164,6 @@ def annotate_image(
         was_resized=was_resized,
         api_duration_seconds=vision_resp.duration_seconds,
         total_duration_seconds=round(total_duration, 3),
-        model_used=model,
+        model_used=active_model,
         warnings=warnings,
     )
