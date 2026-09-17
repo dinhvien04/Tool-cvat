@@ -209,13 +209,18 @@ def annotate_image(
     prompt = build_user_prompt(allowed_labels=labels, mode=active_mode)
 
     # 5b. Compute image fingerprint and inject correction memory rules
-    from app.feedback import FeedbackDatabase, compute_image_hash
+    from app.feedback import FeedbackDatabase, compute_image_hash, compute_perceptual_hash
     from app.retrieval import CorrectionRetrievalEngine
 
     try:
         image_hash = compute_image_hash(pil_image)
     except Exception:
         image_hash = None
+
+    try:
+        perceptual_hash = compute_perceptual_hash(pil_image)
+    except Exception:
+        perceptual_hash = None
 
     rules_injected: List[str] = []
     visual_examples: List[Dict[str, Any]] = []
@@ -517,6 +522,7 @@ def annotate_image(
                 task_id=task_id,
                 job_id=job_id,
                 frame_index=frame_index,
+                perceptual_hash=perceptual_hash,
             )
         except Exception as e:
             warnings.append(f"feedback_baseline_warning: {e}")

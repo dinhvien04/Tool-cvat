@@ -10,6 +10,8 @@ and returns CVAT shapes routed according to the 31-label autonomous driving taxo
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -46,9 +48,16 @@ def handler(context, event):
     """Handle incoming detector event from CVAT."""
     context.logger.info("Handling CVAT 31-Label detector request...")
 
-    # Guard against excessively large request bodies (DoS / memory exhaustion prevention)
+    # Retain raw request bytes before JSON parsing (bytes, bytearray, or str)
     raw_body = event.body
-    if isinstance(raw_body, (bytes, bytearray, str)) and len(raw_body) > MAX_REQUEST_BODY_SIZE:
+    raw_bytes: Optional[bytes] = None
+    if isinstance(raw_body, (bytes, bytearray)):
+        raw_bytes = bytes(raw_body)
+    elif isinstance(raw_body, str):
+        raw_bytes = raw_body.encode("utf-8")
+
+    # Guard against excessively large request bodies (DoS / memory exhaustion prevention)
+    if raw_bytes is not None and len(raw_bytes) > MAX_REQUEST_BODY_SIZE:
         return context.Response(
             body=json.dumps({"error": f"Request body exceeds maximum allowed size of {MAX_REQUEST_BODY_SIZE} bytes (32MB)"}),
             headers={},
@@ -57,10 +66,10 @@ def handler(context, event):
         )
 
     # Parse request payload
-    data = event.body
-    if isinstance(data, (bytes, bytearray)):
+    data = None
+    if raw_bytes is not None:
         try:
-            data = json.loads(data.decode("utf-8"))
+            data = json.loads(raw_bytes.decode("utf-8"))
         except Exception as e:
             return context.Response(
                 body=json.dumps({"error": f"Invalid JSON body: {str(e)}"}),
@@ -68,16 +77,15 @@ def handler(context, event):
                 content_type="application/json",
                 status_code=400,
             )
-    elif isinstance(data, str):
-        try:
-            data = json.loads(data)
-        except Exception as e:
-            return context.Response(
-                body=json.dumps({"error": f"Invalid JSON body: {str(e)}"}),
-                headers={},
-                content_type="application/json",
-                status_code=400,
-            )
+    elif isinstance(raw_body, dict):
+        data = raw_body
+    else:
+        return context.Response(
+            body=json.dumps({"error": "Expected JSON object or raw bytes in request body"}),
+            headers={},
+            content_type="application/json",
+            status_code=400,
+        )
 
     if not isinstance(data, dict):
         return context.Response(
@@ -104,9 +112,30 @@ def handler(context, event):
         sig_header = extract_cvat_signature_header(headers)
 
         if webhook_secret:
-            raw_bytes = raw_body if isinstance(raw_body, (bytes, bytearray)) else str(raw_body).encode("utf-8")
-            if not sig_header or not verify_cvat_webhook_signature(raw_bytes, sig_header, webhook_secret):
-                context.logger.warning("CVAT Webhook signature verification failed or signature missing.")
+            # Strictly verify HMAC-SHA256 directly on the exact raw body bytes:
+            # - Disallow fallback to str(parsed_dict).encode('utf-8')
+            # - Support case-insensitive headers: X-Signature-256, x-signature-256, X-CVAT-Signature, x-cvat-signature, X-Hub-Signature-256
+            if raw_bytes is None or not sig_header:
+                context.logger.warning("CVAT Webhook signature verification failed: missing signature or raw bytes.")
+                return context.Response(
+                    body=json.dumps({"error": "Invalid webhook signature"}),
+                    headers={},
+                    content_type="application/json",
+                    status_code=401,
+                )
+
+            sig = sig_header.strip()
+            if sig.startswith("sha256="):
+                sig = sig[7:].strip()
+
+            expected_sig = hmac.new(
+                webhook_secret.encode("utf-8"),
+                raw_bytes,
+                hashlib.sha256,
+            ).hexdigest()
+
+            if not hmac.compare_digest(expected_sig.lower(), sig.lower()):
+                context.logger.warning("CVAT Webhook signature verification failed: signature mismatch.")
                 return context.Response(
                     body=json.dumps({"error": "Invalid webhook signature"}),
                     headers={},

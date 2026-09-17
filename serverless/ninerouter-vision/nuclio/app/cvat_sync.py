@@ -50,10 +50,13 @@ def verify_cvat_webhook_signature(
     if not signature_header or not secret:
         return False
 
-    if isinstance(payload_bytes, str):
+    if isinstance(payload_bytes, (bytes, bytearray)):
+        raw_bytes = bytes(payload_bytes)
+    elif isinstance(payload_bytes, str):
         raw_bytes = payload_bytes.encode("utf-8")
     else:
-        raw_bytes = bytes(payload_bytes)
+        # Strictly disallow fallback to str(parsed_dict).encode('utf-8')
+        return False
 
     sig = signature_header.strip()
     if sig.startswith("sha256="):
@@ -192,11 +195,14 @@ class CVATSyncClient:
             logger.debug("Failed GET %s: %s", url, e)
         return None
 
-    def list_webhooks(self) -> List[Dict[str, Any]]:
-        """Fetch all webhooks registered in CVAT."""
+    def list_webhooks(self, project_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Fetch all webhooks registered in CVAT, optionally filtered by project_id."""
         url = f"{self.base_url}/api/webhooks"
+        params: Dict[str, Any] = {}
+        if project_id is not None:
+            params["project_id"] = int(project_id)
         try:
-            resp = self.session.get(url, timeout=self.timeout)
+            resp = self.session.get(url, params=params, timeout=self.timeout)
             if resp.status_code == 200:
                 data = resp.json()
                 return data.get("results", data if isinstance(data, list) else [])
@@ -210,6 +216,7 @@ class CVATSyncClient:
         events: Optional[List[str]] = None,
         secret: Optional[str] = None,
         description: str = "tool-cvat-feedback",
+        project_id: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """Register a new webhook in CVAT."""
         url = f"{self.base_url}/api/webhooks"
@@ -221,6 +228,9 @@ class CVATSyncClient:
         }
         if secret:
             payload["secret"] = secret
+        if project_id is not None:
+            payload["project_id"] = int(project_id)
+            payload["type"] = "project"
         try:
             resp = self.session.post(url, json=payload, timeout=self.timeout)
             if resp.status_code in (200, 201):
@@ -237,6 +247,7 @@ class CVATSyncClient:
         events: Optional[List[str]] = None,
         secret: Optional[str] = None,
         description: Optional[str] = None,
+        project_id: Optional[int] = None,
         is_active: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """Update an existing CVAT webhook."""
@@ -250,6 +261,9 @@ class CVATSyncClient:
             payload["secret"] = secret
         if description:
             payload["description"] = description
+        if project_id is not None:
+            payload["project_id"] = int(project_id)
+            payload["type"] = "project"
         try:
             resp = self.session.patch(url, json=payload, timeout=self.timeout)
             if resp.status_code == 200:
@@ -262,17 +276,54 @@ class CVATSyncClient:
     def setup_webhook(
         self,
         target_url: str,
+        project_id: Optional[int] = None,
         secret: Optional[str] = None,
         description: str = "tool-cvat-feedback",
         events: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Safely inspect, create, or update the feedback webhook."""
+        """Safely inspect, create, or update the feedback webhook.
+
+        Idempotent: matches by project_id, target_url, or description to update
+        existing webhooks rather than creating duplicates.
+        """
+        # Guard against positional secret if passed as second argument
+        if isinstance(project_id, str) and not project_id.isdigit():
+            secret = project_id
+            project_id = None
+        elif project_id is not None:
+            try:
+                project_id = int(project_id)
+            except (ValueError, TypeError):
+                pass
+
         existing = self.list_webhooks()
         matching = None
-        for wh in existing:
-            if wh.get("description") == description or wh.get("target_url") == target_url:
-                matching = wh
-                break
+
+        # Priority 1: Match project_id (if project_id provided)
+        if project_id is not None:
+            for wh in existing:
+                wh_proj = wh.get("project_id")
+                if wh_proj is not None:
+                    try:
+                        if int(wh_proj) == int(project_id):
+                            matching = wh
+                            break
+                    except (ValueError, TypeError):
+                        pass
+
+        # Priority 2: Match target_url
+        if matching is None and target_url:
+            for wh in existing:
+                if wh.get("target_url") == target_url:
+                    matching = wh
+                    break
+
+        # Priority 3: Match description
+        if matching is None and description:
+            for wh in existing:
+                if wh.get("description") == description:
+                    matching = wh
+                    break
 
         if matching:
             wh_id = matching["id"]
@@ -282,6 +333,7 @@ class CVATSyncClient:
                 events=events or ["update:job", "create:job"],
                 secret=secret,
                 description=description,
+                project_id=project_id,
             )
             return {"action": "updated", "webhook": updated or matching, "id": wh_id}
         else:
@@ -290,6 +342,7 @@ class CVATSyncClient:
                 events=events or ["update:job", "create:job"],
                 secret=secret,
                 description=description,
+                project_id=project_id,
             )
             return {"action": "created", "webhook": created, "id": created.get("id") if created else None}
 
@@ -459,18 +512,24 @@ if __name__ == "__main__":
     parser.add_argument("--setup-webhook", action="store_true", help="Inspect or register CVAT feedback webhook")
     parser.add_argument("--target-url", type=str, default="http://nuclio-nuclio-ninerouter-vision-31:8080", help="Webhook destination URL")
     parser.add_argument("--webhook-secret", type=str, default=os.getenv("CVAT_WEBHOOK_SECRET"), help="Webhook HMAC shared secret")
+    parser.add_argument("--project-id", type=int, default=None, help="CVAT project ID to scope webhook to")
     parser.add_argument("--list-webhooks", action="store_true", help="List registered webhooks")
 
     args = parser.parse_args()
     sync_client = CVATSyncClient(base_url=args.cvat_url, token=args.token)
 
     if args.list_webhooks:
-        hooks = sync_client.list_webhooks()
+        hooks = sync_client.list_webhooks(project_id=args.project_id)
         print(f"Registered Webhooks ({len(hooks)}):")
         for h in hooks:
-            print(f"  ID: {h.get('id')} | URL: {h.get('target_url')} | Desc: {h.get('description')}")
+            proj_str = f" | Project: {h.get('project_id')}" if h.get('project_id') is not None else ""
+            print(f"  ID: {h.get('id')} | URL: {h.get('target_url')} | Desc: {h.get('description')}{proj_str}")
     elif args.setup_webhook:
-        res = sync_client.setup_webhook(target_url=args.target_url, secret=args.webhook_secret)
+        res = sync_client.setup_webhook(
+            target_url=args.target_url,
+            project_id=args.project_id,
+            secret=args.webhook_secret,
+        )
         print(f"Webhook setup result: {res['action']} (ID: {res.get('id')})")
     elif args.job_id:
         sync_report = sync_job_feedback(job_id=args.job_id, cvat_client=sync_client)

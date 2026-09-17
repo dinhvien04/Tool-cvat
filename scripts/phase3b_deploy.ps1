@@ -238,6 +238,15 @@ foreach ($fn in $functionsToDeploy) {
     Write-Host "Syncing canonical app, core, and config to $nuclioDir..." -ForegroundColor Gray
     python (Join-Path $ScriptDir "sync_serverless_modules.py")
 
+    # Pre-deployment specification validation to protect CVAT Lambda Manager
+    Write-Host "Validating Nuclio function specification to prevent CVAT UI poisoning..." -ForegroundColor Gray
+    $specValidator = Join-Path $ScriptDir "validate_function_spec.py"
+    & python $specValidator --yaml-path $functionYaml
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Specification validation FAILED for $functionYaml. Aborting deployment to protect CVAT Lambda Manager."
+        exit 1
+    }
+
     $forwardHostFeedbackDir = $hostFeedbackDir -replace '\\', '/'
     $yamlContent = Get-Content $functionYaml -Raw
     if ($yamlContent -notmatch "volumes:") {
@@ -345,6 +354,27 @@ nuctl deploy $fnName \
     } else {
         Write-Host "Container $containerName status: $containerStatus" -ForegroundColor Yellow
     }
+}
+
+# Post-deployment discovery check against CVAT Lambda Manager
+Write-Host "`n[Post-Deploy] Verifying detector registration in CVAT Lambda Manager (GET /api/lambda/functions)..." -ForegroundColor Yellow
+$cvatCheckUrl = "http://localhost:18080/api/lambda/functions"
+try {
+    $fnList = Invoke-RestMethod -Uri $cvatCheckUrl -Method Get -TimeoutSec 10
+    $deployedNames = $functionsToDeploy | ForEach-Object { $_.Name }
+    $foundInCvat = @()
+    foreach ($f in $fnList) {
+        if ($deployedNames -contains $f.id) {
+            $foundInCvat += $f.id
+        }
+    }
+    if ($foundInCvat.Count -ge $deployedNames.Count) {
+        Write-Host "Post-deploy discovery check PASSED: All deployed functions ($($foundInCvat -join ', ')) returned 200 OK from CVAT Lambda Manager." -ForegroundColor Green
+    } else {
+        Write-Host "Warning: Expected $($deployedNames -join ', ') in CVAT Lambda Manager, but found ($($foundInCvat -join ', ')). Check Nuclio project assignment." -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "Warning: Could not query CVAT Lambda Manager at $cvatCheckUrl: $_" -ForegroundColor Yellow
 }
 
 Write-Host "`n======================================================================" -ForegroundColor Cyan

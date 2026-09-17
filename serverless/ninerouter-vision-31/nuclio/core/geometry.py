@@ -848,7 +848,13 @@ def extract_shape_bbox(shape: Dict[str, Any]) -> Optional[List[float]]:
         xs = [float(pts[i]) for i in range(0, len(pts), 2)]
         ys = [float(pts[i]) for i in range(1, len(pts), 2)]
         if xs and ys:
-            return [min(xs), min(ys), max(xs), max(ys)]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            if max_x == min_x:
+                max_x = min_x + 1.0
+            if max_y == min_y:
+                max_y = min_y + 1.0
+            return [min_x, min_y, max_x, max_y]
 
     # 4. Fallback to pixel_box if present
     if "pixel_box" in shape and isinstance(shape["pixel_box"], (list, tuple)) and len(shape["pixel_box"]) >= 4:

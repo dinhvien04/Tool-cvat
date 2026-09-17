@@ -397,21 +397,28 @@ def handle_feedback_webhook_setup(argv: List[str]) -> int:
     parser.add_argument("--token", type=str, default=os.getenv("CVAT_TOKEN"), help="CVAT authentication token")
     parser.add_argument("--target-url", type=str, default="http://nuclio-nuclio-ninerouter-vision-31:8080", help="Webhook destination URL")
     parser.add_argument("--secret", type=str, default=os.getenv("CVAT_WEBHOOK_SECRET"), help="Webhook HMAC shared secret")
+    parser.add_argument("--project-id", type=int, default=None, help="CVAT project ID to scope webhook to")
     parser.add_argument("--list", action="store_true", help="List existing webhooks only")
     args = parser.parse_args(argv)
 
     client = CVATSyncClient(base_url=args.url, token=args.token)
 
     if args.list:
-        hooks = client.list_webhooks()
+        hooks = client.list_webhooks(project_id=args.project_id)
         print(f"\nRegistered CVAT Webhooks ({len(hooks)}):")
         for h in hooks:
-            print(f"  ID: {h.get('id')} | URL: {h.get('target_url')} | Desc: {h.get('description')}")
+            proj_info = f" | Project: {h.get('project_id')}" if h.get('project_id') is not None else ""
+            print(f"  ID: {h.get('id')} | URL: {h.get('target_url')} | Desc: {h.get('description')}{proj_info}")
         print()
         return 0
 
-    res = client.setup_webhook(target_url=args.target_url, secret=args.secret)
-    print(f"\n[Tool-cvat] Webhook setup result: {res['action']} (Webhook ID: {res.get('id')})\n")
+    res = client.setup_webhook(
+        target_url=args.target_url,
+        project_id=args.project_id,
+        secret=args.secret,
+    )
+    proj_str = f" for Project #{args.project_id}" if args.project_id is not None else ""
+    print(f"\n[Tool-cvat] Webhook setup result{proj_str}: {res['action']} (Webhook ID: {res.get('id')})\n")
     return 0
 
 

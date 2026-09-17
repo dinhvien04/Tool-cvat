@@ -38,6 +38,19 @@ spec:
       value: '60.0'
     - name: MAX_IMAGE_SIZE
       value: '1600'
+    - name: FEEDBACK_DATA_DIR
+      value: '/opt/nuclio/feedback'
+    - name: FEEDBACK_DB_PATH
+      value: '/opt/nuclio/feedback/feedback.sqlite3'
+
+  volumes:
+    - volume:
+        name: feedback-data
+        hostPath:
+          path: 'D:/tool-cvat/.tool-cvat'
+      volumeMount:
+        name: feedback-data
+        mountPath: '/opt/nuclio/feedback'
 
   triggers:
     myHttpTrigger:

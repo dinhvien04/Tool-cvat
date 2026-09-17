@@ -32,6 +32,7 @@ from app.feedback import (
     CORRECTION_RELABEL,
     FeedbackDatabase,
 )
+from core.taxonomy import GROUP_INSTANCE, GROUP_LANE, GROUP_REGION, Taxonomy
 
 logger = logging.getLogger(__name__)
 
@@ -214,68 +215,115 @@ class CorrectionRetrievalEngine:
                 except Exception:
                     human_shape = {}
 
-            # Construct expected structured annotation
+            # Construct expected structured annotation aligned with 3-tier vision contract
             target_label = human_lbl or ai_lbl or "object"
             crop_coords = details.get("crop_coords")  # [cx1, cy1, cx2, cy2] in original image pixels
 
+            taxonomy = Taxonomy()
+            deleted_label = ai_lbl or target_label
+            deleted_group = taxonomy.get_group(deleted_label)
+            target_group = taxonomy.get_group(target_label)
+
             if ctype == CORRECTION_DELETE_FALSE_POSITIVE:
-                # Reviewer deleted false positive; expected output has no object
-                expected_output = {"objects": []}
-                description = f"False positive '{ai_lbl}' deleted by human reviewer (negative example)"
+                # Reviewer deleted false positive; emit the full 3-array contract with empty arrays
+                expected_output = {
+                    "objects": [],
+                    "regions": [],
+                    "lanes": [],
+                }
+                if deleted_group == GROUP_REGION:
+                    description = f"False positive semantic region '{deleted_label}' deleted by human reviewer (negative example)"
+                elif deleted_group == GROUP_LANE:
+                    description = f"False positive lane marking '{deleted_label}' deleted by human reviewer (negative example)"
+                else:
+                    description = f"False positive instance '{deleted_label}' deleted by human reviewer (negative example)"
             else:
-                # Bounding box calculation relative to crop in [0, 1000]
-                box_2d = [100, 100, 900, 900]  # Centered default fallback
+                # Compute normalized polygon contour if present
+                norm_poly = []
                 if crop_coords and len(crop_coords) == 4:
                     cx1, cy1, cx2, cy2 = [float(c) for c in crop_coords]
                     cw = max(cx2 - cx1, 1.0)
                     ch = max(cy2 - cy1, 1.0)
+                    poly_pts = human_shape.get("points") or []
+                    if len(poly_pts) >= 6:
+                        for i in range(0, len(poly_pts) - 1, 2):
+                            px = int(round(max(0.0, min(1000.0, (poly_pts[i] - cx1) / cw * 1000.0))))
+                            py = int(round(max(0.0, min(1000.0, (poly_pts[i + 1] - cy1) / ch * 1000.0))))
+                            norm_poly.append([px, py])
 
-                    pts = human_shape.get("points") or []
-                    if human_shape.get("type") == "rectangle" and len(pts) >= 4:
-                        xtl, ytl, xbr, ybr = pts[:4]
-                        rx1 = int(round(max(0.0, min(1000.0, (xtl - cx1) / cw * 1000.0))))
-                        ry1 = int(round(max(0.0, min(1000.0, (ytl - cy1) / ch * 1000.0))))
-                        rx2 = int(round(max(0.0, min(1000.0, (xbr - cx1) / cw * 1000.0))))
-                        ry2 = int(round(max(0.0, min(1000.0, (ybr - cy1) / ch * 1000.0))))
-                        ymin, ymax = min(ry1, ry2), max(ry1, ry2)
-                        xmin, xmax = min(rx1, rx2), max(rx1, rx2)
-                        if ymax - ymin < 10:
-                            ymax = min(1000, ymin + 10)
-                            ymin = max(0, ymax - 10)
-                        if xmax - xmin < 10:
-                            xmax = min(1000, xmin + 10)
-                            xmin = max(0, xmax - 10)
-                        box_2d = [ymin, xmin, ymax, xmax]
+                # Route into objects[], regions[], or lanes[] according to 31-label taxonomy
+                if target_group == GROUP_REGION or "area/" in target_label:
+                    # Semantic Region: mask only, NO box_2d
+                    reg_mask = norm_poly if len(norm_poly) >= 3 else [[100, 100], [900, 100], [900, 900], [100, 900]]
+                    expected_output = {
+                        "objects": [],
+                        "regions": [
+                            {
+                                "label": target_label,
+                                "mask": reg_mask,
+                            }
+                        ],
+                        "lanes": [],
+                    }
+                elif target_group == GROUP_LANE or target_label.startswith("lane/"):
+                    # Lane Marking: mask only, NO box_2d
+                    lane_mask = norm_poly if len(norm_poly) >= 3 else [[100, 900], [450, 500], [550, 500], [900, 900]]
+                    expected_output = {
+                        "objects": [],
+                        "regions": [],
+                        "lanes": [
+                            {
+                                "label": target_label,
+                                "mask": lane_mask,
+                            }
+                        ],
+                    }
+                else:
+                    # Instance Object: box_2d + optional mask
+                    box_2d = [100, 100, 900, 900]  # Centered default fallback
+                    if crop_coords and len(crop_coords) == 4:
+                        cx1, cy1, cx2, cy2 = [float(c) for c in crop_coords]
+                        cw = max(cx2 - cx1, 1.0)
+                        ch = max(cy2 - cy1, 1.0)
 
-                target_obj: Dict[str, Any] = {
-                    "label": target_label,
-                    "box_2d": box_2d,
-                }
+                        pts = human_shape.get("points") or []
+                        if human_shape.get("type") == "rectangle" and len(pts) >= 4:
+                            xtl, ytl, xbr, ybr = pts[:4]
+                            rx1 = int(round(max(0.0, min(1000.0, (xtl - cx1) / cw * 1000.0))))
+                            ry1 = int(round(max(0.0, min(1000.0, (ytl - cy1) / ch * 1000.0))))
+                            rx2 = int(round(max(0.0, min(1000.0, (xbr - cx1) / cw * 1000.0))))
+                            ry2 = int(round(max(0.0, min(1000.0, (ybr - cy1) / ch * 1000.0))))
+                            ymin, ymax = min(ry1, ry2), max(ry1, ry2)
+                            xmin, xmax = min(rx1, rx2), max(rx1, rx2)
+                            if ymax - ymin < 10:
+                                ymax = min(1000, ymin + 10)
+                                ymin = max(0, ymax - 10)
+                            if xmax - xmin < 10:
+                                xmax = min(1000, xmin + 10)
+                                xmin = max(0, xmax - 10)
+                            box_2d = [ymin, xmin, ymax, xmax]
 
-                # If polygon / contour points exist, compute relative mask
-                poly_pts = human_shape.get("points") or []
-                if human_shape.get("type") in ("polygon", "mask") and len(poly_pts) >= 6 and crop_coords:
-                    cx1, cy1, cx2, cy2 = [float(c) for c in crop_coords]
-                    cw = max(cx2 - cx1, 1.0)
-                    ch = max(cy2 - cy1, 1.0)
-                    norm_poly = []
-                    for i in range(0, len(poly_pts), 2):
-                        px = int(round(max(0.0, min(1000.0, (poly_pts[i] - cx1) / cw * 1000.0))))
-                        py = int(round(max(0.0, min(1000.0, (poly_pts[i + 1] - cy1) / ch * 1000.0))))
-                        norm_poly.append([px, py])
+                    inst_obj: Dict[str, Any] = {
+                        "label": target_label,
+                        "box_2d": box_2d,
+                    }
                     if len(norm_poly) >= 3:
-                        target_obj["mask"] = norm_poly
+                        inst_obj["mask"] = norm_poly
 
-                expected_output = {"objects": [target_obj]}
+                    expected_output = {
+                        "objects": [inst_obj],
+                        "regions": [],
+                        "lanes": [],
+                    }
 
                 if ctype == CORRECTION_RELABEL:
                     description = f"Relabeled: '{ai_lbl}' corrected to human label '{human_lbl}'"
                 elif ctype == CORRECTION_ADD_MISSING:
-                    description = f"Missed object: human added omitted '{human_lbl}'"
+                    description = f"Missed {target_group}: human added omitted '{human_lbl}'"
                 elif ctype in (CORRECTION_BOX_MOVE, CORRECTION_BOX_RESIZE):
                     description = f"Box alignment: human adjusted bounding box for '{target_label}'"
                 elif ctype in (CORRECTION_MASK_EDIT, CORRECTION_REGION_EDIT):
-                    description = f"Mask refinement: human refined segmentation contour for '{target_label}'"
+                    description = f"Contour refinement: human refined segmentation contour for '{target_label}'"
                 elif ctype == CORRECTION_LANE_EDIT:
                     description = f"Lane alignment: human refined lane marking for '{target_label}'"
                 else:
@@ -315,7 +363,8 @@ class CorrectionRetrievalEngine:
                 ctype = ex["correction_type"]
                 ai_lbl = ex.get("ai_label")
                 human_lbl = ex.get("human_label")
-                iou = ex.get("iou", 0.0)
+                raw_iou = ex.get("iou")
+                iou = float(raw_iou) if raw_iou is not None else 0.0
 
                 if ctype == CORRECTION_RELABEL:
                     example_lines.append(

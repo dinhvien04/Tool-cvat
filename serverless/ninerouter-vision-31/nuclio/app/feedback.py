@@ -26,9 +26,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw
 
-from core.geometry import calculate_box_iou, extract_shape_bbox
+from core.geometry import calculate_box_iou, cvat_mask_to_binary_image, extract_shape_bbox
 from core.taxonomy import (
     GROUP_INSTANCE,
     GROUP_LANE,
@@ -125,6 +125,157 @@ def compute_image_hash(image_source: Union[bytes, bytearray, str, Path, Image.Im
 
 # Alias for explicit visual identity contract
 compute_visual_fingerprint = compute_image_hash
+
+
+def compute_perceptual_hash(image_source: Union[bytes, bytearray, str, Path, Image.Image]) -> str:
+    """Compute 64-bit perceptual difference hash (dHash) using pure Pillow.
+
+    Secondary image identity fallback for lossily re-encoded or compressed frames.
+    Returns 16-character lowercase hexadecimal hash.
+    """
+    if isinstance(image_source, Image.Image):
+        im = image_source.convert("RGB")
+    elif isinstance(image_source, (bytes, bytearray)):
+        try:
+            im = Image.open(io.BytesIO(image_source)).convert("RGB")
+        except Exception:
+            return ""
+    elif isinstance(image_source, (str, Path)):
+        p = Path(image_source)
+        if not p.exists() or not p.is_file():
+            return ""
+        try:
+            im = Image.open(p).convert("RGB")
+        except Exception:
+            return ""
+    else:
+        return ""
+
+    gray = im.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+    raw = gray.tobytes()
+    diff = []
+    for r in range(8):
+        row_offset = r * 9
+        for c in range(8):
+            diff.append(1 if raw[row_offset + c] > raw[row_offset + c + 1] else 0)
+
+    hash_int = 0
+    for bit in diff:
+        hash_int = (hash_int << 1) | bit
+    return f"{hash_int:016x}"
+
+
+def hamming_distance(hex1: str, hex2: str) -> int:
+    """Compute Hamming distance between two 16-character hex hash strings."""
+    if not hex1 or not hex2 or len(hex1) != 16 or len(hex2) != 16:
+        return 64
+    try:
+        v1 = int(hex1, 16)
+        v2 = int(hex2, 16)
+        return bin(v1 ^ v2).count("1")
+    except ValueError:
+        return 64
+
+
+def _rasterize_shape(
+    shape: Dict[str, Any],
+    width: int,
+    height: int,
+    line_width: int = 4,
+    fill_value: int = 1,
+) -> Optional[Image.Image]:
+    """Render a CVAT shape (mask, polygon, polyline, or rectangle) to a binary PIL image."""
+    if width <= 0 or height <= 0:
+        return None
+
+    # 1. Native CVAT mask with flat list
+    if "mask" in shape and isinstance(shape["mask"], (list, tuple)) and len(shape["mask"]) >= 5:
+        try:
+            mask_img = cvat_mask_to_binary_image(shape["mask"], width=width, height=height)
+            if fill_value != 1:
+                mask_img = mask_img.point(lambda p: fill_value if p else 0)
+            return mask_img
+        except Exception:
+            pass
+
+    stype = shape.get("type")
+    pts = shape.get("points") or []
+
+    # 2. Polyline / line geometry (strokes rasterized with line_width)
+    if stype in ("polyline", "line") and len(pts) >= 4:
+        try:
+            pts_tuples = [(float(pts[i]), float(pts[i + 1])) for i in range(0, len(pts) - 1, 2)]
+            img = Image.new("L", (width, height), 0)
+            ImageDraw.Draw(img).line(pts_tuples, fill=fill_value, width=line_width)
+            return img
+        except Exception:
+            pass
+
+    # 3. Polygon geometry
+    if (stype in ("polygon", "mask") or len(pts) >= 6) and len(pts) >= 6:
+        try:
+            pts_tuples = [(float(pts[i]), float(pts[i + 1])) for i in range(0, len(pts) - 1, 2)]
+            if len(pts_tuples) >= 3:
+                img = Image.new("L", (width, height), 0)
+                ImageDraw.Draw(img).polygon(pts_tuples, fill=fill_value)
+                return img
+        except Exception:
+            pass
+
+    # 4. Rectangle
+    bbox = extract_shape_bbox(shape)
+    if bbox is not None:
+        try:
+            img = Image.new("L", (width, height), 0)
+            bx1, by1, bx2, by2 = [int(round(b)) for b in bbox]
+            ImageDraw.Draw(img).rectangle([bx1, by1, bx2, by2], fill=fill_value)
+            return img
+        except Exception:
+            pass
+
+    return None
+
+
+def _compute_shape_iou(
+    shape_a: Dict[str, Any],
+    shape_b: Dict[str, Any],
+    width: int,
+    height: int,
+    line_width: int = 4,
+) -> float:
+    """Compute true raster IoU (Intersection over Union) using pure Pillow geometry.
+
+    Renders masks, polygons, polylines, or rectangles onto binary canvases and computes
+    pixel overlap via Pillow ImageChops and histogram. Falls back to bounding-box IoU
+    only if rasterization fails.
+    """
+    bbox_a = extract_shape_bbox(shape_a)
+    bbox_b = extract_shape_bbox(shape_b)
+    if bbox_a is None or bbox_b is None:
+        return 0.0
+
+    mask_a = _rasterize_shape(shape_a, width, height, line_width=line_width, fill_value=1)
+    mask_b = _rasterize_shape(shape_b, width, height, line_width=line_width, fill_value=2)
+    if mask_a is None or mask_b is None:
+        return calculate_box_iou(bbox_a, bbox_b)
+
+    ux1 = max(0, int(math.floor(min(bbox_a[0], bbox_b[0]))))
+    uy1 = max(0, int(math.floor(min(bbox_a[1], bbox_b[1]))))
+    ux2 = min(width - 1, int(math.ceil(max(bbox_a[2], bbox_b[2]))))
+    uy2 = min(height - 1, int(math.ceil(max(bbox_a[3], bbox_b[3]))))
+
+    if ux1 <= ux2 and uy1 <= uy2:
+        crop_a = mask_a.crop((ux1, uy1, ux2 + 1, uy2 + 1))
+        crop_b = mask_b.crop((ux1, uy1, ux2 + 1, uy2 + 1))
+    else:
+        crop_a = mask_a
+        crop_b = mask_b
+
+    combo = ImageChops.add(crop_a, crop_b)
+    hist = combo.histogram()
+    inter = hist[3]
+    union = hist[1] + hist[2] + hist[3]
+    return float(inter / union) if union > 0 else 0.0
 
 
 @dataclass
@@ -319,17 +470,22 @@ class CorrectionDiffEngine:
         a_bbox = a["bbox"]
         h_bbox = h["bbox"]
 
-        # 1. Semantic Regions
+        # 1. Semantic Regions (True Mask IoU)
         if group == GROUP_REGION or "area/" in lbl:
-            if iou >= 0.92:
+            true_iou = _compute_shape_iou(a["shape"], h["shape"], img_w, img_h)
+            if true_iou >= 0.92:
                 return CorrectionDiffItem(
                     correction_type=CORRECTION_NO_CHANGE,
                     ai_label=lbl,
                     human_label=lbl,
                     ai_shape=a["shape"],
                     human_shape=h["shape"],
-                    iou=round(iou, 4),
-                    details={"status": "Region accepted with negligible change"},
+                    iou=round(true_iou, 4),
+                    details={
+                        "status": "Region accepted with negligible change",
+                        "mask_iou": round(true_iou, 4),
+                        "bbox_iou": round(iou, 4),
+                    },
                 )
             return CorrectionDiffItem(
                 correction_type=CORRECTION_REGION_EDIT,
@@ -337,21 +493,30 @@ class CorrectionDiffEngine:
                 human_label=lbl,
                 ai_shape=a["shape"],
                 human_shape=h["shape"],
-                iou=round(iou, 4),
-                details={"reason": f"Semantic region '{lbl}' contour edited by annotator"},
+                iou=round(true_iou, 4),
+                details={
+                    "reason": f"Semantic region '{lbl}' contour edited by annotator (true mask IoU {true_iou:.2f})",
+                    "mask_iou": round(true_iou, 4),
+                    "bbox_iou": round(iou, 4),
+                },
             )
 
-        # 2. Lane Markings
+        # 2. Lane Markings (True Line Stroke Overlap)
         if group == GROUP_LANE or lbl.startswith("lane/"):
-            if iou >= 0.90:
+            true_iou = _compute_shape_iou(a["shape"], h["shape"], img_w, img_h, line_width=4)
+            if true_iou >= 0.90:
                 return CorrectionDiffItem(
                     correction_type=CORRECTION_NO_CHANGE,
                     ai_label=lbl,
                     human_label=lbl,
                     ai_shape=a["shape"],
                     human_shape=h["shape"],
-                    iou=round(iou, 4),
-                    details={"status": "Lane marking accepted"},
+                    iou=round(true_iou, 4),
+                    details={
+                        "status": "Lane marking accepted",
+                        "lane_iou": round(true_iou, 4),
+                        "bbox_iou": round(iou, 4),
+                    },
                 )
             return CorrectionDiffItem(
                 correction_type=CORRECTION_LANE_EDIT,
@@ -359,21 +524,30 @@ class CorrectionDiffEngine:
                 human_label=lbl,
                 ai_shape=a["shape"],
                 human_shape=h["shape"],
-                iou=round(iou, 4),
-                details={"reason": f"Lane marking '{lbl}' geometry edited by annotator"},
+                iou=round(true_iou, 4),
+                details={
+                    "reason": f"Lane marking '{lbl}' geometry edited by annotator (true lane IoU {true_iou:.2f})",
+                    "lane_iou": round(true_iou, 4),
+                    "bbox_iou": round(iou, 4),
+                },
             )
 
-        # 3. Instance Masks
+        # 3. Instance Masks (True Mask IoU)
         if stype == "mask" or a.get("type") == "mask":
-            if iou >= 0.92:
+            true_iou = _compute_shape_iou(a["shape"], h["shape"], img_w, img_h)
+            if true_iou >= 0.92:
                 return CorrectionDiffItem(
                     correction_type=CORRECTION_NO_CHANGE,
                     ai_label=lbl,
                     human_label=lbl,
                     ai_shape=a["shape"],
                     human_shape=h["shape"],
-                    iou=round(iou, 4),
-                    details={"status": "Mask accepted"},
+                    iou=round(true_iou, 4),
+                    details={
+                        "status": "Mask accepted",
+                        "mask_iou": round(true_iou, 4),
+                        "bbox_iou": round(iou, 4),
+                    },
                 )
             return CorrectionDiffItem(
                 correction_type=CORRECTION_MASK_EDIT,
@@ -381,8 +555,12 @@ class CorrectionDiffEngine:
                 human_label=lbl,
                 ai_shape=a["shape"],
                 human_shape=h["shape"],
-                iou=round(iou, 4),
-                details={"reason": f"Instance mask '{lbl}' boundary adjusted"},
+                iou=round(true_iou, 4),
+                details={
+                    "reason": f"Instance mask '{lbl}' boundary adjusted (true mask IoU {true_iou:.2f})",
+                    "mask_iou": round(true_iou, 4),
+                    "bbox_iou": round(iou, 4),
+                },
             )
 
         # 4. Rectangles / Bounding Boxes
@@ -515,11 +693,29 @@ class FeedbackDatabase:
         return None
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Create a connection with WAL mode and row factory."""
+        """Create a connection with WAL mode (or safe fallback journal mode) and row factory."""
         conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            cur = conn.execute("PRAGMA journal_mode=WAL")
+            row = cur.fetchone()
+            mode = (row[0] if row else "").upper()
+            if mode != "WAL":
+                logger.warning(
+                    "SQLite WAL mode not supported on filesystem (mode=%s); falling back to TRUNCATE",
+                    mode,
+                )
+                conn.execute("PRAGMA journal_mode=TRUNCATE")
+        except sqlite3.OperationalError as exc:
+            logger.warning(
+                "SQLite WAL mode failed (%s); falling back to TRUNCATE safe journal mode",
+                exc,
+            )
+            conn.execute("PRAGMA journal_mode=TRUNCATE")
+        try:
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.OperationalError:
+            pass
         return conn
 
     def _init_db(self) -> None:
@@ -533,6 +729,7 @@ class FeedbackDatabase:
                 CREATE TABLE IF NOT EXISTS predictions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     image_hash TEXT NOT NULL,
+                    perceptual_hash TEXT,
                     task_id INTEGER,
                     job_id INTEGER,
                     frame_index INTEGER,
@@ -545,6 +742,17 @@ class FeedbackDatabase:
             )
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pred_hash ON predictions(image_hash)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pred_job_frame ON predictions(job_id, frame_index)")
+
+            # Auto-migrate existing predictions table if perceptual_hash column is missing
+            try:
+                col_info = cursor.execute("PRAGMA table_info(predictions)").fetchall()
+                col_names = {row["name"] for row in col_info}
+                if "perceptual_hash" not in col_names:
+                    cursor.execute("ALTER TABLE predictions ADD COLUMN perceptual_hash TEXT")
+            except Exception:
+                pass
+
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pred_phash ON predictions(perceptual_hash)")
 
             # 2. Human annotations table
             cursor.execute(
@@ -631,6 +839,7 @@ class FeedbackDatabase:
         task_id: Optional[int] = None,
         job_id: Optional[int] = None,
         frame_index: Optional[int] = None,
+        perceptual_hash: Optional[str] = None,
     ) -> int:
         """Store original AI prediction as baseline (sanitized, zero secrets/base64).
 
@@ -642,6 +851,7 @@ class FeedbackDatabase:
             task_id: Optional CVAT task ID.
             job_id: Optional CVAT job ID.
             frame_index: Optional frame index.
+            perceptual_hash: Optional 64-bit dHash string for secondary fuzzy matching.
 
         Returns:
             Inserted record row id.
@@ -671,21 +881,36 @@ class FeedbackDatabase:
             cursor.execute(
                 """
                 INSERT INTO predictions
-                    (image_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (image_hash, task_id, job_id, frame_index, model, mode, shapes_str, now_iso),
+                (image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_str, now_iso),
             )
             conn.commit()
             return cursor.lastrowid
 
-    def get_prediction_baseline(self, image_hash: str) -> Optional[Dict[str, Any]]:
-        """Retrieve most recent AI prediction baseline by image hash."""
+    def get_prediction_baseline(
+        self,
+        image_hash: str,
+        perceptual_hash: Optional[str] = None,
+        job_id: Optional[int] = None,
+        frame_index: Optional[int] = None,
+        max_hamming_distance: int = 5,
+    ) -> Optional[Dict[str, Any]]:
+        """Retrieve most recent AI prediction baseline with two-level matching strategy.
+
+        Priority:
+        1. Primary: Exact decoded-RGB SHA-256 fingerprint (image_hash).
+        2. Secondary: Lightweight perceptual hash fallback (dHash with Hamming distance <= 5).
+        3. Tertiary: Exact job_id + frame_index fallback.
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
+
+            # Level 1: Exact decoded-RGB SHA-256 fingerprint
             cursor.execute(
                 """
-                SELECT id, image_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at
+                SELECT id, image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at
                 FROM predictions
                 WHERE image_hash = ?
                 ORDER BY id DESC
@@ -694,19 +919,87 @@ class FeedbackDatabase:
                 (image_hash,),
             )
             row = cursor.fetchone()
-            if not row:
-                return None
-            return {
-                "id": row["id"],
-                "image_hash": row["image_hash"],
-                "task_id": row["task_id"],
-                "job_id": row["job_id"],
-                "frame_index": row["frame_index"],
-                "model": row["model"],
-                "mode": row["mode"],
-                "shapes": json.loads(row["shapes_json"]),
-                "created_at": row["created_at"],
-            }
+            if row:
+                return {
+                    "id": row["id"],
+                    "image_hash": row["image_hash"],
+                    "perceptual_hash": row["perceptual_hash"],
+                    "task_id": row["task_id"],
+                    "job_id": row["job_id"],
+                    "frame_index": row["frame_index"],
+                    "model": row["model"],
+                    "mode": row["mode"],
+                    "shapes": json.loads(row["shapes_json"]),
+                    "created_at": row["created_at"],
+                    "match_type": "exact_fingerprint",
+                }
+
+            # Level 2: Secondary perceptual difference hash fallback
+            if perceptual_hash:
+                cursor.execute(
+                    """
+                    SELECT id, image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at
+                    FROM predictions
+                    WHERE perceptual_hash IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT 100
+                    """
+                )
+                candidates = cursor.fetchall()
+                best_row = None
+                min_dist = 65
+                for cand in candidates:
+                    c_phash = cand["perceptual_hash"]
+                    if c_phash:
+                        dist = hamming_distance(perceptual_hash, c_phash)
+                        if dist <= max_hamming_distance and dist < min_dist:
+                            min_dist = dist
+                            best_row = cand
+                if best_row:
+                    return {
+                        "id": best_row["id"],
+                        "image_hash": best_row["image_hash"],
+                        "perceptual_hash": best_row["perceptual_hash"],
+                        "task_id": best_row["task_id"],
+                        "job_id": best_row["job_id"],
+                        "frame_index": best_row["frame_index"],
+                        "model": best_row["model"],
+                        "mode": best_row["mode"],
+                        "shapes": json.loads(best_row["shapes_json"]),
+                        "created_at": best_row["created_at"],
+                        "match_type": "perceptual_hash",
+                        "hamming_distance": min_dist,
+                    }
+
+            # Level 3: Tertiary job_id + frame_index fallback
+            if job_id is not None and frame_index is not None:
+                cursor.execute(
+                    """
+                    SELECT id, image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at
+                    FROM predictions
+                    WHERE job_id = ? AND frame_index = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (job_id, frame_index),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "id": row["id"],
+                        "image_hash": row["image_hash"],
+                        "perceptual_hash": row["perceptual_hash"],
+                        "task_id": row["task_id"],
+                        "job_id": row["job_id"],
+                        "frame_index": row["frame_index"],
+                        "model": row["model"],
+                        "mode": row["mode"],
+                        "shapes": json.loads(row["shapes_json"]),
+                        "created_at": row["created_at"],
+                        "match_type": "job_frame_fallback",
+                    }
+
+            return None
 
     # -------------------------------------------------------------------------
     # Human Annotations Persistence
