@@ -241,3 +241,126 @@ def test_label_config_from_yaml_missing_or_corrupted(tmp_path):
     corrupt_file.write_text(":\n  - invalid : yaml ::", encoding="utf-8")
     cfg2 = LabelConfig.from_yaml(corrupt_file)
     assert cfg2.all_labels == []
+
+
+# =========================================================================
+# 3. Phase 2 Serverless & Container Security Tests
+# =========================================================================
+
+def _get_nuclio_modules():
+    import importlib.util
+    import sys
+    serverless_dir = Path(__file__).resolve().parent.parent / "serverless" / "ninerouter-vision" / "nuclio"
+    if str(serverless_dir) not in sys.path:
+        sys.path.insert(0, str(serverless_dir))
+
+    spec_mh = importlib.util.spec_from_file_location("model_handler", str(serverless_dir / "model_handler.py"))
+    mh_module = importlib.util.module_from_spec(spec_mh)
+    sys.modules["model_handler"] = mh_module
+    spec_mh.loader.exec_module(mh_module)
+
+    spec_main = importlib.util.spec_from_file_location("nuclio_main", str(serverless_dir / "main.py"))
+    nuclio_main = importlib.util.module_from_spec(spec_main)
+    sys.modules["nuclio_main"] = nuclio_main
+    spec_main.loader.exec_module(nuclio_main)
+
+    return mh_module, nuclio_main
+
+
+class _MockNuclioResponse:
+    def __init__(self, body, headers=None, content_type="application/json", status_code=200):
+        self.body = body
+        self.headers = headers or {}
+        self.content_type = content_type
+        self.status_code = status_code
+
+
+class _MockNuclioContext:
+    def __init__(self):
+        from types import SimpleNamespace
+        self.logger = MagicMock()
+        self.user_data = SimpleNamespace()
+        self.Response = _MockNuclioResponse
+
+
+class _MockNuclioEvent:
+    def __init__(self, body):
+        self.body = body
+
+
+def test_nuclio_handler_max_body_size_rejection():
+    """Verify Nuclio handler rejects request bodies exceeding 32MB with HTTP 413."""
+    _, nuclio_main = _get_nuclio_modules()
+    ctx = _MockNuclioContext()
+
+    # Create oversized payload > 32MB
+    oversized_body = "x" * (33554432 + 10)
+    event = _MockNuclioEvent(body=oversized_body)
+    resp = nuclio_main.handler(ctx, event)
+
+    assert resp.status_code == 413
+    assert "exceeds maximum allowed size" in resp.body
+
+
+def test_nuclio_handler_invalid_image_type_rejection():
+    """Verify Nuclio handler rejects non-string image fields with HTTP 400."""
+    _, nuclio_main = _get_nuclio_modules()
+    ctx = _MockNuclioContext()
+
+    event = _MockNuclioEvent(body=json.dumps({"image": 123456}))
+    resp = nuclio_main.handler(ctx, event)
+
+    assert resp.status_code == 400
+    assert "must be a Base64 string" in resp.body
+
+
+def test_nuclio_handler_sanitizes_upstream_error_secrets():
+    """Verify Nuclio handler sanitizes secrets if an unexpected upstream exception leaks them."""
+    _, nuclio_main = _get_nuclio_modules()
+    ctx = _MockNuclioContext()
+
+    mock_handler = MagicMock()
+    mock_handler.api_key = "sk-super-secret-key-to-mask"
+    mock_handler.infer.side_effect = RuntimeError("Failed calling 9Router with bearer sk-super-secret-key-to-mask")
+    ctx.user_data.model_handler = mock_handler
+
+    event = _MockNuclioEvent(body=json.dumps({"image": "aGVsbG8="}))
+    resp = nuclio_main.handler(ctx, event)
+
+    assert resp.status_code == 502
+    assert "sk-super-secret-key-to-mask" not in resp.body
+    assert "***" in resp.body
+
+
+def test_model_handler_repr_masks_key():
+    """Verify ModelHandler.__repr__ NEVER reveals the raw API key."""
+    mh_module, _ = _get_nuclio_modules()
+    secret = "sk-nuclio-handler-secret-key-777"
+    with patch("model_handler.NineRouterClient"):
+        handler_inst = mh_module.ModelHandler(api_key=secret)
+        repr_str = repr(handler_inst)
+
+    assert secret not in repr_str
+    assert "sk-...777" in repr_str or "***" in repr_str
+
+
+def test_model_handler_corrupted_env_resilience(monkeypatch):
+    """Verify ModelHandler handles invalid/corrupted environment variables gracefully."""
+    mh_module, _ = _get_nuclio_modules()
+    monkeypatch.setenv("NINEROUTER_TIMEOUT", "NOT_A_NUMBER")
+    monkeypatch.setenv("MAX_IMAGE_SIZE", "-500")
+
+    with patch("model_handler.NineRouterClient"):
+        handler_inst = mh_module.ModelHandler()
+
+    assert handler_inst.timeout == 60.0
+    assert handler_inst.max_image_size == 1600
+
+
+def test_deploy_script_masks_key_in_logs():
+    """Verify scripts/phase2_deploy.ps1 masks NINEROUTER_KEY when displaying command to console."""
+    script_path = Path(__file__).resolve().parent.parent / "scripts" / "phase2_deploy.ps1"
+    content = script_path.read_text(encoding="utf-8")
+
+    assert '$displayArgs += "--env NINEROUTER_KEY=***"' in content
+    assert 'Write-Host "Executing: nuctl $($displayArgs -join \' \')"' in content

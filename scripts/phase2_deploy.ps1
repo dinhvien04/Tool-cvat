@@ -194,7 +194,16 @@ nuctl deploy ninerouter-vision \
         $deployArgs += @("--env", "NINEROUTER_KEY=$NineRouterKey")
     }
 
-    Write-Host "Executing: nuctl $($deployArgs -join ' ')" -ForegroundColor Gray
+    # Mask any secrets before logging the command line to prevent console/CI leak
+    $displayArgs = @()
+    foreach ($arg in $deployArgs) {
+        if ($arg -like "*NINEROUTER_KEY=*") {
+            $displayArgs += "--env NINEROUTER_KEY=***"
+        } else {
+            $displayArgs += $arg
+        }
+    }
+    Write-Host "Executing: nuctl $($displayArgs -join ' ')" -ForegroundColor Gray
     & nuctl @deployArgs
 }
 

@@ -78,10 +78,22 @@ class ModelHandler:
         self.requested_model = model or os.getenv("VISION_MODEL", DEFAULT_VISION_MODEL)
 
         timeout_env = os.getenv("NINEROUTER_TIMEOUT")
-        self.timeout = float(timeout if timeout is not None else (timeout_env or DEFAULT_NINEROUTER_TIMEOUT))
+        try:
+            val_timeout = timeout if timeout is not None else (timeout_env or DEFAULT_NINEROUTER_TIMEOUT)
+            self.timeout = float(val_timeout)
+            if self.timeout <= 0:
+                self.timeout = DEFAULT_NINEROUTER_TIMEOUT
+        except (ValueError, TypeError):
+            self.timeout = DEFAULT_NINEROUTER_TIMEOUT
 
         max_size_env = os.getenv("MAX_IMAGE_SIZE")
-        self.max_image_size = int(max_image_size if max_image_size is not None else (max_size_env or DEFAULT_MAX_IMAGE_SIZE))
+        try:
+            val_size = max_image_size if max_image_size is not None else (max_size_env or DEFAULT_MAX_IMAGE_SIZE)
+            self.max_image_size = int(val_size)
+            if self.max_image_size <= 0:
+                self.max_image_size = DEFAULT_MAX_IMAGE_SIZE
+        except (ValueError, TypeError):
+            self.max_image_size = DEFAULT_MAX_IMAGE_SIZE
 
         self.candidate_labels = candidate_labels or load_spec_labels_from_function_yaml()
 
@@ -97,6 +109,15 @@ class ModelHandler:
             f"Initialized ModelHandler: base_url={self.base_url!r}, "
             f"key={mask_api_key(self.api_key)}, model={self.requested_model!r}, "
             f"timeout={self.timeout}s, labels_count={len(self.candidate_labels)}"
+        )
+
+    def __repr__(self) -> str:
+        """Safe string representation masking API keys."""
+        return (
+            f"ModelHandler(base_url={self.base_url!r}, "
+            f"key={mask_api_key(self.api_key)!r}, "
+            f"model={self.active_model!r}, "
+            f"timeout={self.timeout})"
         )
 
     def verify_readiness(self) -> Dict[str, Any]:

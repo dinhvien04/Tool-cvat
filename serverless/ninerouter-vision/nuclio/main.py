@@ -15,6 +15,9 @@ from model_handler import ModelHandler
 
 logger = logging.getLogger("cvat.nuclio.ninerouter")
 
+# 32MB maximum request body size limit (matches Nuclio function.yaml maxRequestBodySize)
+MAX_REQUEST_BODY_SIZE = 33554432  # 32 * 1024 * 1024 bytes
+
 
 def init_context(context):
     """Initialize function context when container starts."""
@@ -31,6 +34,16 @@ def init_context(context):
 def handler(context, event):
     """Handle incoming detector event from CVAT."""
     context.logger.info("Handling CVAT detector request...")
+
+    # Guard against excessively large request bodies (DoS / memory exhaustion prevention)
+    raw_body = event.body
+    if isinstance(raw_body, (bytes, bytearray, str)) and len(raw_body) > MAX_REQUEST_BODY_SIZE:
+        return context.Response(
+            body=json.dumps({"error": f"Request body exceeds maximum allowed size of {MAX_REQUEST_BODY_SIZE} bytes (32MB)"}),
+            headers={},
+            content_type="application/json",
+            status_code=413,
+        )
 
     # Parse request payload
     data = event.body
@@ -73,9 +86,25 @@ def handler(context, event):
             status_code=400,
         )
 
+    if not isinstance(image_b64, str):
+        return context.Response(
+            body=json.dumps({"error": f"Field 'image' must be a Base64 string, got {type(image_b64).__name__}"}),
+            headers={},
+            content_type="application/json",
+            status_code=400,
+        )
+
+    if len(image_b64) > MAX_REQUEST_BODY_SIZE:
+        return context.Response(
+            body=json.dumps({"error": f"Image payload exceeds maximum allowed size of {MAX_REQUEST_BODY_SIZE} bytes (32MB)"}),
+            headers={},
+            content_type="application/json",
+            status_code=413,
+        )
+
     # Decode base64 image (stripping data: URL prefix if present)
     try:
-        if isinstance(image_b64, str) and "," in image_b64 and "data:" in image_b64[:30]:
+        if "," in image_b64 and "data:" in image_b64[:30]:
             image_b64 = image_b64.split(",", 1)[1]
         image_bytes = base64.b64decode(image_b64)
     except Exception as e:
@@ -84,6 +113,14 @@ def handler(context, event):
             headers={},
             content_type="application/json",
             status_code=400,
+        )
+
+    if len(image_bytes) > MAX_REQUEST_BODY_SIZE:
+        return context.Response(
+            body=json.dumps({"error": f"Decoded image exceeds maximum allowed size of {MAX_REQUEST_BODY_SIZE} bytes (32MB)"}),
+            headers={},
+            content_type="application/json",
+            status_code=413,
         )
 
     # Extract threshold (defaults to 0.5)
@@ -116,6 +153,10 @@ def handler(context, event):
         )
     except Exception as e:
         err_msg = str(e)
+        handler_inst = getattr(getattr(context, "user_data", None), "model_handler", None)
+        key = getattr(handler_inst, "api_key", None)
+        if isinstance(key, str) and key and key in err_msg:
+            err_msg = err_msg.replace(key, "***")
         context.logger.error(f"Error during 9Router vision inference: {err_msg}")
         return context.Response(
             body=json.dumps({"error": f"Inference failed: {err_msg}"}),
