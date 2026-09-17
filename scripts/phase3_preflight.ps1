@@ -227,6 +227,27 @@ try {
 }
 
 # ---------------------------------------------------------------------
+# Check 7B: Instance Segmentation Capability Probe (Phase 3 Mask/Box-Mask)
+# ---------------------------------------------------------------------
+if ($Target -in @("mask", "box-mask", "both", "all")) {
+    try {
+        $repoPath = ($RepoRoot -replace '\\', '/')
+        if ($NineRouterKey) { $env:NINEROUTER_KEY = $NineRouterKey }
+        if ($VisionModel) { $env:VISION_MODEL = $VisionModel }
+        $probeCmd = "import os, sys; sys.path.insert(0, '$repoPath'); from app.client import NineRouterClient; c = NineRouterClient(base_url='$NineRouterUrl', api_key=os.getenv('NINEROUTER_KEY')); m = c.resolve_segmentation_model(preferred_model=os.getenv('VISION_MODEL'), probe=True); print('OK:' + m)"
+        $probeOut = python -c "$probeCmd" 2>&1
+        if ($probeOut -match "OK:(.+)") {
+            $segModel = $Matches[1].Trim()
+            Print-Result -Status "PASS" -CheckName "Instance segmentation capability verified" -Details "Model '$segModel' validated with label, box_2d, and polygon mask."
+        } else {
+            Print-Result -Status "FAIL" -CheckName "Segmentation capability probe failed" -Details "$probeOut"
+        }
+    } catch {
+        Print-Result -Status "FAIL" -CheckName "Segmentation capability probe execution error" -Details "$_"
+    }
+}
+
+# ---------------------------------------------------------------------
 # Check 8: Nuclio CLI (nuctl) & CVAT Dashboard Version Compatibility
 # ---------------------------------------------------------------------
 $nuclioDashboardVersion = $null

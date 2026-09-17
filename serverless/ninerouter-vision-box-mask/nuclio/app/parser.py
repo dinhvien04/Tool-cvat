@@ -83,6 +83,8 @@ class ParsedObject:
             "label": self.label,
             "mask": self.cvat_mask,
         }
+        if self.pixel_polygon:
+            res["points"] = [round(float(c), 2) for pt in self.pixel_polygon for c in pt]
         if self.confidence is not None:
             res["confidence"] = str(round(float(self.confidence), 2))
         if self.group_id is not None:

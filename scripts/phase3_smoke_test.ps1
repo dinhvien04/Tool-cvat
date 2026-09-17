@@ -77,12 +77,9 @@ foreach ($fnName in $targetsToTest) {
     $targetUrl = $FunctionUrl
     if (-not $targetUrl) {
         try {
-            $portStr = docker ps --filter "name=$fnName" --format "{{.Ports}}"
-            if ($portStr -match "0\.0\.0\.0:(\d+)->8080") {
-                $mappedPort = $Matches[1]
-                $targetUrl = "http://localhost:$mappedPort"
-                Write-Host "Found direct HTTP port: $targetUrl" -ForegroundColor Green
-            } elseif ($portStr -match ":::(\d+)->8080") {
+            $containers = docker ps --format "{{.Names}} {{.Ports}}"
+            $matching = ($containers -split "`n") | Where-Object { $_ -match "nuclio-nuclio-$fnName\s+" }
+            if ($matching -match "0\.0\.0\.0:(\d+)->8080" -or $matching -match ":::(\d+)->8080") {
                 $mappedPort = $Matches[1]
                 $targetUrl = "http://localhost:$mappedPort"
                 Write-Host "Found direct HTTP port: $targetUrl" -ForegroundColor Green
@@ -172,11 +169,15 @@ foreach ($fnName in $targetsToTest) {
                 Write-Error "Mask detector shape must contain 'mask' array with at least 5 elements ([crop_pixels..., xmin, ymin, xmax, ymax]). Got: $($det.mask.Count)"
                 exit 1
             }
+            if (-not $det.points -or $det.points.Count -lt 6) {
+                Write-Error "Mask detector shape must contain 'points' array with at least 6 elements ([x1, y1, x2, y2, ...]) for CVAT polygon conversion. Got: $($det.points.Count)"
+                exit 1
+            }
             $xmin = $det.mask[$det.mask.Count - 4]
             $ymin = $det.mask[$det.mask.Count - 3]
             $xmax = $det.mask[$det.mask.Count - 2]
             $ymax = $det.mask[$det.mask.Count - 1]
-            Write-Host "  -> [MASK] [$($det.label)] conf=$($det.confidence) bbox=[$xmin, $ymin, $xmax, $ymax] crop_pixels=$($det.mask.Count - 4)" -ForegroundColor Gray
+            Write-Host "  -> [MASK] [$($det.label)] conf=$($det.confidence) bbox=[$xmin, $ymin, $xmax, $ymax] crop_pixels=$($det.mask.Count - 4) points_count=$($det.points.Count)" -ForegroundColor Gray
         } elseif ($fnName -eq "ninerouter-vision") {
             if ($det.type -ne "rectangle") {
                 Write-Error "Expected type='rectangle' for box detector, got '$($det.type)'"
@@ -191,6 +192,12 @@ foreach ($fnName in $targetsToTest) {
             if ($det.type -notin @("rectangle", "mask")) {
                 Write-Error "Expected type 'rectangle' or 'mask' for Box+Mask detector, got '$($det.type)'"
                 exit 1
+            }
+            if ($det.type -eq "mask") {
+                if (-not $det.points -or $det.points.Count -lt 6) {
+                    Write-Error "Mask detector shape in box-mask must contain 'points' array with at least 6 elements for CVAT polygon conversion. Got: $($det.points.Count)"
+                    exit 1
+                }
             }
             Write-Host "  -> [$($det.type.ToUpper())] [$($det.label)] conf=$($det.confidence) group_id=$($det.group_id)" -ForegroundColor Gray
         }

@@ -2,7 +2,7 @@
 
 import io
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
@@ -114,8 +114,9 @@ def test_annotate_image_output_mode_mask(sample_pil_image, mock_client):
     assert shape["label"] == "car"
     assert shape["confidence"] == "0.95"
     assert "mask" in shape
-    if "points" in shape:
-        assert isinstance(shape["points"], list)
+    assert "points" in shape
+    assert isinstance(shape["points"], list)
+    assert len(shape["points"]) >= 6  # Flattened polygon vertices [x1, y1, x2, y2, ...]
 
     mask_list = shape["mask"]
     assert isinstance(mask_list, list)
@@ -220,12 +221,12 @@ def test_annotate_image_mode_alias_support(sample_pil_image, mock_client):
 
 
 # ============================================================================
-# 5. Mask Fallback When Model Omits Contour
+# 5. Non-Fabrication of Masks from Bounding Boxes (Issue 1 & 2 Regressions)
 # ============================================================================
 
 
-def test_annotate_image_mask_fallback_when_contour_omitted(sample_pil_image, mock_client):
-    """Verify bounding box is rasterized as rectangular mask when model omits contour."""
+def test_annotate_image_mask_mode_rejects_missing_contour_without_fabrication(sample_pil_image, mock_client):
+    """Verify mask mode rejects detection and adds warning when model omits contour (no box-to-mask fallback)."""
     fake_resp = make_vision_response([
         {
             "label": "bicycle",
@@ -242,19 +243,138 @@ def test_annotate_image_mask_fallback_when_contour_omitted(sample_pil_image, moc
         output_mode="mask",
     )
 
+    # In mask mode, missing contour must reject annotation completely
+    assert len(result.shapes) == 0
+    assert any("mask_missing" in w and "bicycle" in w for w in result.warnings)
+
+
+def test_annotate_image_box_and_mask_mode_emits_box_only_when_contour_missing(sample_pil_image, mock_client):
+    """Verify box_and_mask mode emits rectangle only with warning when model omits contour."""
+    fake_resp = make_vision_response([
+        {
+            "label": "truck",
+            "box_2d": [100, 100, 400, 500],
+            "confidence": 0.91,
+            # 'mask' is omitted
+        }
+    ])
+    mock_client.send_vision_request.return_value = fake_resp
+
+    result = annotate_image(
+        image_source=sample_pil_image,
+        client=mock_client,
+        output_mode="box_and_mask",
+    )
+
+    # Emits rectangle ONLY; does NOT invent rectangular mask
     assert len(result.shapes) == 1
-    shape = result.shapes[0]
-    assert shape["type"] == "mask"
-    assert shape["label"] == "bicycle"
-    assert "mask" in shape
-    # Trailing bbox should correspond to pixel coordinates of box_2d
-    xmin, ymin, xmax, ymax = shape["mask"][-4:]
-    # xmin = 200/1000 * 800 = 160
-    # ymin = 150/1000 * 600 = 90
-    # xmax = 500/1000 * 800 = 400 -> clamped to 399
-    # ymax = 450/1000 * 600 = 270 -> clamped to 269
-    assert abs(xmin - 160) <= 2
-    assert abs(ymin - 90) <= 2
+    rect = result.shapes[0]
+    assert rect["type"] == "rectangle"
+    assert rect["label"] == "truck"
+    assert "mask" not in rect
+    assert len(result.to_cvat_masks()) == 0
+    assert any("mask_missing" in w and "truck" in w for w in result.warnings)
+
+
+def test_cvat_detection_result_converter_dual_path_contract(sample_pil_image, mock_client):
+    """Verify emitted mask shape satisfies both paths of CVAT DetectionResultConverter:
+    1. conv_mask_to_poly=True  -> uses anno['points'] to produce polygon
+    2. conv_mask_to_poly=False -> uses anno['mask'] to produce native mask
+    """
+    fake_resp = make_vision_response([
+        {
+            "label": "car",
+            "box_2d": [100, 200, 400, 600],
+            "confidence": 0.95,
+            "mask": [
+                [200, 100],
+                [600, 100],
+                [600, 400],
+                [200, 400],
+            ],
+        }
+    ])
+    mock_client.send_vision_request.return_value = fake_resp
+
+    result = annotate_image(
+        image_source=sample_pil_image,
+        client=mock_client,
+        output_mode="mask",
+    )
+
+    assert len(result.shapes) == 1
+    anno = result.shapes[0]
+
+    # Both keys must be present in detector annotation
+    assert anno["type"] == "mask"
+    assert "mask" in anno
+    assert "points" in anno
+
+    # Simulate CVAT DetectionResultConverter (views.py:893-911)
+    # Path A: conv_mask_to_poly = True
+    shape_a = {
+        "type": anno["type"],
+        "points": (anno.get("mask", []) if anno["type"] == "mask" else anno.get("points", [])),
+    }
+    if anno["type"] == "mask" and "points" in anno and True:  # conv_mask_to_poly = True
+        shape_a["type"] = "polygon"
+        shape_a["points"] = anno["points"]
+
+    assert shape_a["type"] == "polygon"
+    assert len(shape_a["points"]) >= 6
+    assert isinstance(shape_a["points"][0], (int, float))
+
+    # Path B: conv_mask_to_poly = False
+    shape_b = {
+        "type": anno["type"],
+        "points": (anno.get("mask", []) if anno["type"] == "mask" else anno.get("points", [])),
+    }
+    if anno["type"] == "mask" and "points" in anno and False:  # conv_mask_to_poly = False
+        shape_b["type"] = "polygon"
+        shape_b["points"] = anno["points"]
+    elif anno["type"] == "mask":
+        [xtl, ytl, xbr, ybr] = shape_b["points"][-4:]
+        cut_points = shape_b["points"][:-4]
+        # Verify cut_points is valid crop mask and coordinates form valid bounding box
+        assert len(cut_points) > 0
+        assert xtl <= xbr
+        assert ytl <= ybr
+
+    assert shape_b["type"] == "mask"
+
+
+def test_annotate_image_box_and_mask_invalid_box_emits_mask_only(sample_pil_image, mock_client):
+    """Verify that in box_and_mask mode, an object with an invalid box but valid mask emits mask ONLY."""
+    from app.parser import ParsedObject, ParseResult
+
+    # Simulate an object with no valid pixel_box but a valid cvat_mask and pixel_polygon
+    mock_obj = ParsedObject(
+        label="car",
+        box_2d=[0, 0, 0, 0],
+        pixel_box=None,  # No valid box
+        confidence=0.90,
+        cvat_mask=[1, 1, 1, 1, 10, 20, 30, 40],
+        pixel_polygon=[(10.0, 20.0), (30.0, 20.0), (30.0, 40.0), (10.0, 40.0)],
+        group_id=1,
+    )
+
+    with patch("app.service.parse_and_validate") as mock_parse:
+        mock_parse.return_value = ParseResult(objects=[mock_obj], raw_text="{}", warnings=[])
+        fake_resp = make_vision_response([])
+        mock_client.send_vision_request.return_value = fake_resp
+
+        result = annotate_image(
+            image_source=sample_pil_image,
+            client=mock_client,
+            output_mode="box_and_mask",
+        )
+
+        assert len(result.shapes) == 1
+        shape = result.shapes[0]
+        assert shape["type"] == "mask"
+        assert shape["label"] == "car"
+        assert "points" in shape
+        assert any("box_missing" in w and "car" in w for w in result.warnings)
 
 
 # ============================================================================

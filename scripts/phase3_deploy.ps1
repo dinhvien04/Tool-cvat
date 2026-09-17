@@ -183,7 +183,16 @@ try {
             exit 1
         }
     } else {
-        $resolvedVisionModel = $visionModels[0].id
+        # Prioritize segmentation-capable model using NineRouterClient
+        $repoPath = ($RepoRoot -replace '\\', '/')
+        if ($NineRouterKey) { $env:NINEROUTER_KEY = $NineRouterKey }
+        $probeCmd = "import os, sys; sys.path.insert(0, '$repoPath'); from app.client import NineRouterClient; c = NineRouterClient(base_url='$hostUrl', api_key=os.getenv('NINEROUTER_KEY')); m = c.resolve_segmentation_model(probe=True); print('OK:' + m)"
+        $segOut = python -c "$probeCmd" 2>$null
+        if ($segOut -match "OK:(.+)") {
+            $resolvedVisionModel = $Matches[1].Trim()
+        } else {
+            $resolvedVisionModel = $visionModels[0].id
+        }
     }
 } catch {
     Write-Error "Failed to query 9Router models at $($modelsCheckUrl): $_"
@@ -271,7 +280,8 @@ nuctl deploy $fnName \
     "`${extraArgs[@]}"
 "@
 
-        $b64Script = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($bashScript))
+        $bashScriptUnix = $bashScript -replace "`r`n", "`n"
+        $b64Script = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($bashScriptUnix))
 
         try {
             Write-Host "Invoking nuctl deploy $fnName inside WSL (in-memory secure execution)..." -ForegroundColor Gray

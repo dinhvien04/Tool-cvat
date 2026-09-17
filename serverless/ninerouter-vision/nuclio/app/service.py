@@ -86,7 +86,10 @@ def annotate_image(
     active_mode = output_mode or mode or MODE_BOX
 
     # 1. Resolve model dynamically if not explicitly specified
-    active_model = model or client.resolve_vision_model()
+    if active_mode in (MODE_MASK, MODE_BOX_AND_MASK):
+        active_model = model or client.resolve_segmentation_model()
+    else:
+        active_model = model or client.resolve_vision_model()
 
     # 2. Resolve candidate labels
     labels = list(candidate_labels) if candidate_labels else list(DEFAULT_BBOX_LABELS)
@@ -146,52 +149,85 @@ def annotate_image(
         filtered_objects.append(obj)
         conf_str = str(round(float(effective_conf), 2)) if effective_conf is not None else None
 
-        # Format shapes based on requested mode
-        if active_mode in (MODE_BOX, MODE_BOX_AND_MASK):
-            pts = obj.pixel_box if obj.pixel_box is not None else [0.0, 0.0, 0.0, 0.0]
-            box_shape: Dict[str, Any] = {
-                "label": obj.label,
-                "points": [round(float(p), 2) for p in pts],
-                "type": "rectangle",
-            }
-            if conf_str is not None:
-                box_shape["confidence"] = conf_str
-            if active_mode == MODE_BOX_AND_MASK and obj.group_id is not None:
-                box_shape["group_id"] = obj.group_id
-            cvat_shapes.append(box_shape)
+        # Format shapes based on requested mode (Never fabricate mask from bbox)
+        has_valid_box = (
+            obj.pixel_box is not None
+            and len(obj.pixel_box) == 4
+            and (obj.pixel_box[2] > obj.pixel_box[0])
+            and (obj.pixel_box[3] > obj.pixel_box[1])
+        )
+        has_valid_mask = obj.cvat_mask is not None and len(obj.cvat_mask) > 4
 
-        if active_mode in (MODE_MASK, MODE_BOX_AND_MASK):
-            mask_shape: Optional[Dict[str, Any]] = None
-            if obj.cvat_mask is not None:
+        if active_mode == MODE_BOX:
+            if has_valid_box:
+                box_shape: Dict[str, Any] = {
+                    "label": obj.label,
+                    "points": [round(float(p), 2) for p in obj.pixel_box],
+                    "type": "rectangle",
+                }
+                if conf_str is not None:
+                    box_shape["confidence"] = conf_str
+                cvat_shapes.append(box_shape)
+
+        elif active_mode == MODE_MASK:
+            if has_valid_mask:
+                mask_shape: Dict[str, Any] = {
+                    "label": obj.label,
+                    "type": "mask",
+                    "mask": obj.cvat_mask,
+                }
+                if obj.pixel_polygon:
+                    mask_shape["points"] = [round(float(c), 2) for pt in obj.pixel_polygon for c in pt]
+                elif obj.mask:
+                    from core.geometry import denormalize_contour
+                    pts_px = denormalize_contour(obj.mask, width=orig_w, height=orig_h)
+                    mask_shape["points"] = [round(float(c), 2) for pt in pts_px for c in pt]
+                if conf_str is not None:
+                    mask_shape["confidence"] = conf_str
+                cvat_shapes.append(mask_shape)
+            else:
+                warnings.append(
+                    f"mask_missing: Detection '{obj.label}' has missing or invalid mask; annotation rejected in mask mode"
+                )
+
+        elif active_mode == MODE_BOX_AND_MASK:
+            if has_valid_box:
+                box_shape = {
+                    "label": obj.label,
+                    "points": [round(float(p), 2) for p in obj.pixel_box],
+                    "type": "rectangle",
+                }
+                if conf_str is not None:
+                    box_shape["confidence"] = conf_str
+                if obj.group_id is not None:
+                    box_shape["group_id"] = obj.group_id
+                cvat_shapes.append(box_shape)
+            else:
+                warnings.append(
+                    f"box_missing: Detection '{obj.label}' has missing or invalid bounding box; emitted mask only in box_and_mask mode"
+                )
+
+            if has_valid_mask:
                 mask_shape = {
                     "label": obj.label,
                     "type": "mask",
                     "mask": obj.cvat_mask,
                 }
-            elif obj.pixel_box is not None:
-                # Fallback: if model omitted contour, rasterize the bounding box as rectangular mask
-                from core.geometry import polygon_to_cvat_mask
-                x1, y1, x2, y2 = obj.pixel_box
-                box_contour = [
-                    [(x1 / orig_w) * 1000.0, (y1 / orig_h) * 1000.0],
-                    [(x2 / orig_w) * 1000.0, (y1 / orig_h) * 1000.0],
-                    [(x2 / orig_w) * 1000.0, (y2 / orig_h) * 1000.0],
-                    [(x1 / orig_w) * 1000.0, (y2 / orig_h) * 1000.0],
-                ]
-                geo_fallback = polygon_to_cvat_mask(box_contour, width=orig_w, height=orig_h)
-                if geo_fallback:
-                    mask_shape = {
-                        "label": obj.label,
-                        "type": "mask",
-                        "mask": geo_fallback["mask"],
-                    }
-
-            if mask_shape is not None:
+                if obj.pixel_polygon:
+                    mask_shape["points"] = [round(float(c), 2) for pt in obj.pixel_polygon for c in pt]
+                elif obj.mask:
+                    from core.geometry import denormalize_contour
+                    pts_px = denormalize_contour(obj.mask, width=orig_w, height=orig_h)
+                    mask_shape["points"] = [round(float(c), 2) for pt in pts_px for c in pt]
                 if conf_str is not None:
                     mask_shape["confidence"] = conf_str
-                if active_mode == MODE_BOX_AND_MASK and obj.group_id is not None:
+                if obj.group_id is not None:
                     mask_shape["group_id"] = obj.group_id
                 cvat_shapes.append(mask_shape)
+            else:
+                warnings.append(
+                    f"mask_missing: Detection '{obj.label}' has missing or invalid mask; emitted rectangle only in box_and_mask mode"
+                )
 
     total_duration = time.perf_counter() - total_start
 

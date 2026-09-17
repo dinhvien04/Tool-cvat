@@ -174,6 +174,8 @@ class DetectedObject:
             "label": self.label,
             "mask": geo["mask"],
         }
+        if geo.get("pixel_polygon"):
+            res["points"] = [round(float(c), 2) for pt in geo["pixel_polygon"] for c in pt]
         if self.confidence is not None:
             res["confidence"] = str(round(float(self.confidence), 2))
         return res

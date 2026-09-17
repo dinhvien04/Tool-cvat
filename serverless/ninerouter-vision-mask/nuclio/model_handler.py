@@ -109,11 +109,11 @@ class ModelHandler:
             timeout=self.timeout,
         )
 
-        # Dynamic model resolution
+        # Dynamic segmentation model resolution
         try:
-            self.active_model: str = self.client.resolve_vision_model(self.requested_model)
+            self.active_model: str = self.client.resolve_segmentation_model(self.requested_model)
         except Exception as e:
-            logger.error(f"Failed to resolve vision model {self.requested_model!r} from 9Router: {e}")
+            logger.error(f"Failed to resolve segmentation model {self.requested_model!r} from 9Router: {e}")
             raise
 
         logger.info(

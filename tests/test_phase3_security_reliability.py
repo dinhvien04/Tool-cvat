@@ -440,29 +440,27 @@ class TestFaultToleranceAndGracefulDegradation:
 
         test_img = Image.new("RGB", (800, 600), color="gray")
 
-        # Test in MODE_MASK: should produce a mask shape via box fallback
+        # Test in MODE_MASK: missing mask must reject annotation (never fabricate mask from bbox)
         res_mask = annotate_image(
             image_source=test_img,
             client=mock_client,
             candidate_labels=["car"],
             mode=MODE_MASK,
         )
-        assert len(res_mask.shapes) == 1
-        shape = res_mask.shapes[0]
-        assert shape["type"] == "mask"
-        assert shape["label"] == "car"
-        assert len(shape["mask"]) >= 5
+        assert len(res_mask.shapes) == 0
+        assert any("mask_missing" in w and "car" in w for w in res_mask.warnings)
 
-        # Test in MODE_BOX_AND_MASK: should produce both box and mask shapes
+        # Test in MODE_BOX_AND_MASK: missing mask emits rectangle ONLY (never fabricate mask)
         res_both = annotate_image(
             image_source=test_img,
             client=mock_client,
             candidate_labels=["car"],
             mode=MODE_BOX_AND_MASK,
         )
-        assert len(res_both.shapes) == 2
-        types = {s["type"] for s in res_both.shapes}
-        assert types == {"rectangle", "mask"}
+        assert len(res_both.shapes) == 1
+        assert res_both.shapes[0]["type"] == "rectangle"
+        assert res_both.shapes[0]["label"] == "car"
+        assert any("mask_missing" in w and "car" in w for w in res_both.warnings)
 
     def test_degenerate_polygons_handled_cleanly_without_crash(self):
         """Verify degenerate polygons (< 3 points, collinear, zero area) fail cleanly."""

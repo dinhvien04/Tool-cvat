@@ -508,11 +508,13 @@ def polygon_to_cvat_mask(
         return None
 
     tight_bbox = flat_mask[-4:]
+    flat_points = [round(float(c), 2) for pt in pixel_points for c in pt]
 
     res: Dict[str, Any] = {
         "mask": flat_mask,
         "bbox": [int(b) for b in tight_bbox],
         "pixel_polygon": pixel_points,
+        "points": flat_points,
     }
 
     if label is not None:

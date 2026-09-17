@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import requests
@@ -18,12 +19,32 @@ import requests
 from core.vision_contract import (
     DEFAULT_BBOX_LABELS,
     MODE_BOX,
+    MODE_BOX_AND_MASK,
+    MODE_MASK,
     SYSTEM_PROMPT,
     build_openai_vision_payload,
     build_user_prompt,
 )
 
 logger = logging.getLogger(__name__)
+
+# Prioritized segmentation-capable models available via 9Router
+PREFERRED_SEGMENTATION_MODELS: Tuple[str, ...] = (
+    "ag/gemini-3.8-flash-high",
+    "ag/gemini-3.8-flash",
+    "ag/gemini-3.8-flash-medium",
+    "ag/gemini-3.8-flash-low",
+    "ag/gemini-3.7-flash-high",
+    "ag/gemini-3.7-flash",
+    "ag/gemini-3.7-flash-medium",
+    "ag/gemini-3.7-flash-low",
+    "ag/gemini-3.6-flash-high",
+    "ag/gemini-3.5-flash-high",
+    "ag/claude-sonnet-4-6",
+)
+
+# In-memory capability cache to prevent redundant API calls during runtime inference
+_SEGMENTATION_CAPABILITY_CACHE: Dict[str, bool] = {}
 
 
 class NineRouterError(Exception):
@@ -244,6 +265,239 @@ class NineRouterClient:
             )
 
         return available_ids[0]
+
+    def probe_segmentation_capability(
+        self,
+        model: str,
+        timeout: Optional[float] = None,
+    ) -> Tuple[bool, str]:
+        """Probe model for actual instance segmentation capability using ONE minimal request.
+
+        Validates that the model returns valid JSON with:
+        1. 'label' (string matching allowed labels)
+        2. 'box_2d' ([ymin, xmin, ymax, xmax] in [0, 1000])
+        3. 'mask' (polygon contour with at least 3 vertices [[x, y], ...] in [0, 1000])
+
+        Args:
+            model: Model identifier to probe.
+            timeout: Optional request timeout in seconds (defaults to 15.0s).
+
+        Returns:
+            Tuple of (is_capable: bool, details: str).
+        """
+        if model in _SEGMENTATION_CAPABILITY_CACHE:
+            cached_val = _SEGMENTATION_CAPABILITY_CACHE[model]
+            return cached_val, f"Cached segmentation capability: {cached_val}"
+
+        # 1. Verify model is available in 9Router
+        available_ids = self.get_vision_model_ids()
+        if model not in available_ids:
+            msg = f"Model '{model}' is not in available vision models ({available_ids})"
+            _SEGMENTATION_CAPABILITY_CACHE[model] = False
+            return False, msg
+
+        # 2. Prepare minimal probe image (< 10KB)
+        import io
+        from PIL import Image, ImageDraw
+
+        repo_root = Path(__file__).resolve().parent.parent
+        test_img_path = repo_root / "test.jpg"
+        if not test_img_path.exists():
+            test_img_path = Path("test.jpg")
+
+        probe_labels = ["car", "truck", "bus", "pedestrian"]
+        if test_img_path.exists():
+            try:
+                with Image.open(test_img_path) as im:
+                    thumb = im.copy()
+                    thumb.thumbnail((256, 256))
+                    buf = io.BytesIO()
+                    thumb.save(buf, format="JPEG", quality=80)
+                    img_bytes = buf.getvalue()
+            except Exception:
+                test_img_path = None
+
+        if not test_img_path or not test_img_path.exists():
+            # Draw synthetic car silhouette
+            img = Image.new("RGB", (256, 256), color=(240, 240, 240))
+            draw = ImageDraw.Draw(img)
+            # Body
+            draw.rectangle([30, 100, 226, 170], fill=(20, 20, 20))
+            # Cabin
+            draw.polygon([(60, 100), (90, 50), (160, 50), (190, 100)], fill=(20, 20, 20))
+            # Wheels
+            draw.ellipse([50, 150, 90, 190], fill=(50, 50, 50))
+            draw.ellipse([160, 150, 200, 190], fill=(50, 50, 50))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80)
+            img_bytes = buf.getvalue()
+            probe_labels = ["car", "truck", "bus", "pedestrian"]
+
+        # 3. Construct minimal probe prompt for car / vehicle / object
+        prompt = build_user_prompt(allowed_labels=probe_labels, mode=MODE_BOX_AND_MASK)
+
+        # 4. Send probe request
+        probe_timeout = timeout or 15.0
+        try:
+            resp = self.send_vision_request(
+                model=model,
+                image_bytes_or_b64=img_bytes,
+                prompt=prompt,
+                timeout=probe_timeout,
+                mode=MODE_BOX_AND_MASK,
+            )
+        except Exception as e:
+            msg = f"Probe request failed: {e}"
+            _SEGMENTATION_CAPABILITY_CACHE[model] = False
+            return False, msg
+
+        # 5. Parse and validate segmentation outputs
+        from app.parser import clean_json_string
+        try:
+            cleaned = clean_json_string(resp.content)
+            data = json.loads(cleaned)
+        except Exception as e:
+            msg = f"Probe failed to parse JSON response: {e}. Raw: {resp.content[:150]!r}"
+            _SEGMENTATION_CAPABILITY_CACHE[model] = False
+            return False, msg
+
+        raw_objects = data.get("objects", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        if not raw_objects:
+            msg = f"Model '{model}' returned empty objects list on probe image"
+            _SEGMENTATION_CAPABILITY_CACHE[model] = False
+            return False, msg
+
+        # Inspect first detection for valid label, box_2d, and polygon mask
+        has_valid_seg = False
+        reasons = []
+        for obj in raw_objects:
+            if not isinstance(obj, dict):
+                continue
+            lbl = obj.get("label")
+            box = obj.get("box_2d")
+            msk = obj.get("mask") or obj.get("polygon")
+
+            if not lbl or not isinstance(lbl, str):
+                reasons.append(f"missing or invalid label: {lbl!r}")
+                continue
+
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                reasons.append(f"invalid box_2d: {box!r}")
+                continue
+
+            try:
+                ymin, xmin, ymax, xmax = [int(round(float(c))) for c in box]
+                if not (0 <= ymin < ymax <= 1000 and 0 <= xmin < xmax <= 1000):
+                    reasons.append(f"out of bounds box_2d: {box!r}")
+                    continue
+            except (ValueError, TypeError):
+                reasons.append(f"non-numeric box_2d: {box!r}")
+                continue
+
+            if not isinstance(msk, (list, tuple)) or len(msk) < 3:
+                reasons.append(f"missing or degenerate mask contour: len={len(msk) if isinstance(msk, list) else 0}")
+                continue
+
+            valid_pts = True
+            for pt in msk:
+                if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                    valid_pts = False
+                    break
+                try:
+                    px, py = float(pt[0]), float(pt[1])
+                    if not (0 <= px <= 1000 and 0 <= py <= 1000):
+                        valid_pts = False
+                        break
+                except (ValueError, TypeError):
+                    valid_pts = False
+                    break
+
+            if not valid_pts:
+                reasons.append("invalid vertex coordinates in mask contour")
+                continue
+
+            has_valid_seg = True
+            break
+
+        if has_valid_seg:
+            _SEGMENTATION_CAPABILITY_CACHE[model] = True
+            return True, f"Model '{model}' successfully verified: returned label, box_2d, and polygon mask"
+
+        msg = f"Model '{model}' did not return valid segmentation: {'; '.join(reasons)}"
+        _SEGMENTATION_CAPABILITY_CACHE[model] = False
+        return False, msg
+
+    def resolve_segmentation_model(
+        self,
+        preferred_model: Optional[str] = None,
+        probe: bool = False,
+    ) -> str:
+        """Resolve a model capable of instance segmentation (polygon masks) from 9Router.
+
+        - Respects explicit preferred_model / VISION_MODEL if supplied (verifies existence).
+        - If probe=True (e.g. during preflight / deployment / smoke test), actively verifies
+          that the model returns label, box_2d, and mask polygon.
+        - If probe=False (e.g. during runtime image inference), uses cached or prioritized
+          segmentation models without consuming extra API quota.
+        - Never fabricates model IDs.
+        - Fails clearly if no segmentation-capable model is available.
+
+        Args:
+            preferred_model: Optional explicit model ID.
+            probe: If True, executes a real minimal capability probe against the candidate.
+
+        Returns:
+            Resolved valid model ID string.
+        """
+        available_ids = self.get_vision_model_ids()
+        if not available_ids:
+            raise NineRouterError(
+                f"No vision models found in 9Router at {self.base_url}."
+            )
+
+        if preferred_model and preferred_model.strip():
+            target = preferred_model.strip()
+            if target not in available_ids:
+                available_str = ", ".join(available_ids)
+                raise NineRouterError(
+                    f"Requested segmentation model '{target}' is not available in 9Router. "
+                    f"Available vision models: {available_str}"
+                )
+            if probe:
+                ok, reason = self.probe_segmentation_capability(target)
+                if not ok:
+                    raise NineRouterError(
+                        f"Requested model '{target}' failed segmentation capability validation: {reason}"
+                    )
+            return target
+
+        # Candidate selection: prioritize PREFERRED_SEGMENTATION_MODELS
+        candidates: List[str] = []
+        for pref in PREFERRED_SEGMENTATION_MODELS:
+            if pref in available_ids and pref not in candidates:
+                candidates.append(pref)
+
+        # Append remaining vision models (excluding explicit thinking models)
+        for mid in available_ids:
+            if mid not in candidates and "thinking" not in mid.lower():
+                candidates.append(mid)
+
+        if not candidates:
+            raise NineRouterError(
+                f"No suitable segmentation vision models found in 9Router at {self.base_url}."
+            )
+
+        if probe:
+            for cand in candidates:
+                ok, reason = self.probe_segmentation_capability(cand)
+                if ok:
+                    return cand
+            raise NineRouterError(
+                f"None of the available vision models ({candidates}) passed segmentation capability validation."
+            )
+
+        # In non-probing runtime mode: return top prioritized candidate
+        return candidates[0]
 
     def send_vision_request(
         self,

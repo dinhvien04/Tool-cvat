@@ -91,6 +91,7 @@ def test_mask_model_handler_infer(sample_image_b64):
     with patch.object(mask_mh_mod, "NineRouterClient") as MockClient, \
          patch.object(mask_mh_mod, "annotate_image") as mock_annotate:
         client_inst = MockClient.return_value
+        client_inst.resolve_segmentation_model.return_value = "ag/gemini-3.8-flash-high"
         client_inst.resolve_vision_model.return_value = "ag/gemini-3.8-flash-high"
 
         # Mock annotation result with native CVAT mask shape
@@ -182,6 +183,7 @@ def test_box_mask_model_handler_infer(sample_image_b64):
     with patch.object(boxmask_mh_mod, "NineRouterClient") as MockClient, \
          patch.object(boxmask_mh_mod, "annotate_image") as mock_annotate:
         client_inst = MockClient.return_value
+        client_inst.resolve_segmentation_model.return_value = "ag/gemini-3.8-flash-high"
         client_inst.resolve_vision_model.return_value = "ag/gemini-3.8-flash-high"
 
         mock_result = MagicMock()
