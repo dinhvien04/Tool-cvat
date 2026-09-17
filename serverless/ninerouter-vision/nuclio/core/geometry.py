@@ -382,6 +382,63 @@ def rasterize_polygon_to_mask(
     return mask_img
 
 
+def rasterize_polygons_to_mask(
+    polygons: Sequence[Sequence[Tuple[float, float]]],
+    width: int,
+    height: int,
+) -> Image.Image:
+    """Render multiple polygons onto an 8-bit mode 'L' PIL Image (0 for background, 1 for foreground).
+
+    Draws all provided polygons onto a single canvas, enabling representation of multi-component
+    or disconnected regions (e.g. road split by obstacles, tree foliage, distributed regions).
+
+    Args:
+        polygons: Sequence of polygon vertex lists, each containing (x, y) coordinates.
+        width: Image width in pixels (> 0).
+        height: Image height in pixels (> 0).
+
+    Returns:
+        PIL.Image.Image of mode 'L' and size (width, height).
+
+    Raises:
+        ValueError: If dimensions <= 0 or no valid non-degenerate polygons exist.
+        TypeError: If polygons is not a sequence.
+    """
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        raise ValueError(
+            f"Invalid image dimensions: width={width}, height={height} (both must be positive integers)"
+        )
+
+    if width * height > SAFE_MAX_IMAGE_PIXELS:
+        raise ValueError(
+            f"Image dimensions {width}x{height} ({width * height} pixels) exceed safe limit of {SAFE_MAX_IMAGE_PIXELS} pixels"
+        )
+
+    if not isinstance(polygons, (list, tuple)):
+        raise TypeError(f"Polygons must be a sequence of polygon point lists, got {type(polygons).__name__}")
+
+    mask_img = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(mask_img)
+
+    drawn_count = 0
+    for poly in polygons:
+        if not isinstance(poly, (list, tuple)) or len(poly) < 3:
+            continue
+        if len(poly) > MAX_CONTOUR_VERTICES:
+            continue
+        area = calculate_polygon_area(poly)
+        if area < 1e-5:
+            continue
+        pts_tuples = [(float(pt[0]), float(pt[1])) for pt in poly]
+        draw.polygon(pts_tuples, fill=1)
+        drawn_count += 1
+
+    if drawn_count == 0:
+        raise ValueError("No valid non-degenerate polygons to rasterize")
+
+    return mask_img
+
+
 def mask_to_cvat_flat_list(
     mask_image: Image.Image,
     bbox: Optional[Tuple[int, int, int, int]] = None,
@@ -450,8 +507,83 @@ def mask_to_cvat_flat_list(
     return pixels + [int(xmin), int(ymin), int(xmax), int(ymax)]
 
 
+def multi_polygon_to_cvat_mask(
+    contours: Sequence[Sequence[Sequence[Union[int, float]]]],
+    width: int,
+    height: int,
+    label: Optional[str] = None,
+    confidence: Optional[Union[float, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Convert multiple normalized [0, 1000] polygon contours into a single CVAT native mask.
+
+    Handles disconnected regions (e.g. road, vegetation, buildings segmented across multiple
+    islands) by rasterizing all valid component contours onto a unified binary mask canvas
+    and computing the overall tight enclosing bounding box.
+
+    Args:
+        contours: Sequence of polygon contours, each being a list of [x, y] coordinates in [0, 1000].
+        width: Target image width in pixels (> 0).
+        height: Target image height in pixels (> 0).
+        label: Optional CVAT class label string.
+        confidence: Optional confidence score.
+
+    Returns:
+        Dictionary with CVAT mask format and common bounding box, or None if invalid.
+    """
+    if width <= 0 or height <= 0:
+        return None
+
+    if not isinstance(contours, (list, tuple)) or len(contours) == 0:
+        return None
+
+    valid_pixel_polys: List[List[Tuple[float, float]]] = []
+    for contour in contours:
+        if not isinstance(contour, (list, tuple)) or len(contour) < 3:
+            continue
+        try:
+            pts = denormalize_contour(contour, width=width, height=height)
+            if calculate_polygon_area(pts) >= 0.5:
+                valid_pixel_polys.append(pts)
+        except (ValueError, TypeError):
+            continue
+
+    if not valid_pixel_polys:
+        return None
+
+    try:
+        mask_img = rasterize_polygons_to_mask(valid_pixel_polys, width=width, height=height)
+    except (ValueError, TypeError):
+        return None
+
+    flat_mask = mask_to_cvat_flat_list(mask_img, bbox=None)
+    if flat_mask is None:
+        return None
+
+    tight_bbox = flat_mask[-4:]
+    first_flat_points = [round(float(c), 2) for pt in valid_pixel_polys[0] for c in pt]
+
+    res: Dict[str, Any] = {
+        "mask": flat_mask,
+        "bbox": [int(b) for b in tight_bbox],
+        "pixel_polygons": valid_pixel_polys,
+        "points": first_flat_points,
+    }
+
+    if label is not None:
+        res["label"] = str(label)
+        res["type"] = "mask"
+
+    if confidence is not None:
+        if isinstance(confidence, (int, float)):
+            res["confidence"] = str(round(float(confidence), 2))
+        else:
+            res["confidence"] = str(confidence)
+
+    return res
+
+
 def polygon_to_cvat_mask(
-    contour: List[List[Union[int, float]]],
+    contour: Union[List[List[Union[int, float]]], Sequence[Sequence[Sequence[Union[int, float]]]]],
     width: int,
     height: int,
     label: Optional[str] = None,
@@ -459,11 +591,13 @@ def polygon_to_cvat_mask(
 ) -> Optional[Dict[str, Any]]:
     """Full pipeline: denormalize contour -> rasterize -> crop & flatten -> CVAT shape dict.
 
-    Gracefully handles edge cases (empty contour, < 3 points, collinear vertices,
-    zero-area bounding box, out-of-bounds coordinates) by returning None.
+    Supports both single polygon contours [[x, y], ...] and multi-component disconnected
+    contours [[[x, y], ...], [[x, y], ...]]. Gracefully handles edge cases (empty contour,
+    < 3 points, collinear vertices, zero-area bounding box, out-of-bounds coordinates)
+    by returning None.
 
     Args:
-        contour: Normalized [0, 1000] polygon coordinates in [x, y] format.
+        contour: Normalized [0, 1000] polygon coordinates in [x, y] format, or list of contours.
         width: Image width in pixels (> 0).
         height: Image height in pixels (> 0).
         label: Optional CVAT class label string.
@@ -485,7 +619,24 @@ def polygon_to_cvat_mask(
     if width <= 0 or height <= 0:
         return None
 
-    if not isinstance(contour, (list, tuple)) or len(contour) < 3:
+    if not isinstance(contour, (list, tuple)) or len(contour) == 0:
+        return None
+
+    # Check if contour is a multi-polygon: list of polygon contours
+    if (
+        isinstance(contour[0], (list, tuple))
+        and len(contour[0]) > 0
+        and isinstance(contour[0][0], (list, tuple))
+    ):
+        return multi_polygon_to_cvat_mask(
+            contour,  # type: ignore
+            width=width,
+            height=height,
+            label=label,
+            confidence=confidence,
+        )
+
+    if len(contour) < 3:
         return None
 
     try:

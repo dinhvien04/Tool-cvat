@@ -1,0 +1,156 @@
+# 31-Label Semantic Ambiguity and Task Adaptation Policy
+# Phase 3B - Master Taxonomy Schema
+#
+# Rules:
+# - Master schema preserves all 31 labels without renaming or merging.
+# - Unresolved semantic variations are intentional and maintained across different dataset standards.
+# - Strict isolation is enforced when both variations are present in a task schema.
+# - Dynamic task adaptation (fallback mapping) is permitted ONLY when a CVAT task schema
+#   defines exactly one variation of an ambiguous pair.
+
+version: "1.0.0"
+
+general_policy:
+  strict_master_schema: true
+  allow_master_alias_merging: false
+  logging_level_on_fallback: "WARNING"
+
+ambiguity_pairs:
+  # --------------------------------------------------------------------------
+  # 1. pedestrian vs person
+  # --------------------------------------------------------------------------
+  pedestrian_vs_person:
+    labels:
+      - "pedestrian"
+      - "person"
+    semantic_definition:
+      pedestrian:
+        ontology: "Autonomous Driving / BDD100K / Cityscapes"
+        definition: >
+          A human being on foot (walking, standing, running, sitting on curb) located within
+          or immediately adjacent to the roadway traffic corridor. Crucially disjoint from 'rider'
+          (a human actively riding a bicycle, motorcycle, or horse) and vehicle occupants.
+      person:
+        ontology: "Generic Computer Vision / MS COCO / Pascal VOC"
+        definition: >
+          Any human being regardless of activity, context, pose, or location (e.g., pedestrian on
+          street, rider on bike, passenger in convertible, person behind glass window, swimmer).
+    unresolved_differences_rationale: >
+      In autonomous driving perception, classifying a human as 'pedestrian' triggers specific
+      kinematic collision avoidance models, whereas a 'rider' moves with the bicycle/motorcycle's
+      kinematics. Merging 'pedestrian' into 'person' corrupts safety-critical domain ontologies,
+      while converting 'person' into 'pedestrian' in non-automotive scenes creates false pedestrian alarms.
+    task_schema_behavior:
+      when_task_has_both:
+        action: "STRICT_EXACT_MATCH"
+        mapping: null
+        notes: "Preserve model prediction exactly. Never cross-map between pedestrian and person."
+      when_task_has_only_pedestrian:
+        action: "FALLBACK_MAP"
+        mapping:
+          person: "pedestrian"
+        notes: "Target CVAT task only defines 'pedestrian'. Generic 'person' detections are mapped to 'pedestrian' with an audit warning."
+      when_task_has_only_person:
+        action: "FALLBACK_MAP"
+        mapping:
+          pedestrian: "person"
+        notes: "Target CVAT task only defines 'person'. Specialized 'pedestrian' detections are mapped to generic 'person' with an audit warning."
+
+  # --------------------------------------------------------------------------
+  # 2. traffic light vs traffic_light
+  # --------------------------------------------------------------------------
+  traffic_light_syntax:
+    labels:
+      - "traffic light"
+      - "traffic_light"
+    semantic_definition:
+      "traffic light":
+        ontology: "Space-separated delimiter (BDD100K, Cityscapes, CVAT standard preset)"
+        definition: "Traffic signal control device with signaling lamps for road traffic management."
+      "traffic_light":
+        ontology: "Underscore-separated delimiter (MS COCO, YOLO, snake_case programmatic preset)"
+        definition: "Traffic signal control device with signaling lamps for road traffic management."
+    unresolved_differences_rationale: >
+      The semantic meaning is identical (physical traffic signal device), but the syntax differs
+      due to conflicting dataset naming traditions. CVAT label configurations are strictly case-
+      and character-sensitive. Attempting to force one format causes silent annotation drops or
+      schema rejection in projects configured with the other format.
+    task_schema_behavior:
+      when_task_has_both:
+        action: "STRICT_EXACT_MATCH"
+        mapping: null
+        notes: "Preserve model prediction verbatim without syntax alteration."
+      when_task_has_only_space_variant:
+        action: "FALLBACK_MAP"
+        target_variant: "traffic light"
+        mapping:
+          traffic_light: "traffic light"
+        notes: "CVAT task only recognizes 'traffic light' (space). Convert underscore variant to space variant."
+      when_task_has_only_underscore_variant:
+        action: "FALLBACK_MAP"
+        target_variant: "traffic_light"
+        mapping:
+          "traffic light": "traffic_light"
+        notes: "CVAT task only recognizes 'traffic_light' (underscore). Convert space variant to underscore variant."
+
+  # --------------------------------------------------------------------------
+  # 3. traffic sign vs traffic_sign
+  # --------------------------------------------------------------------------
+  traffic_sign_syntax:
+    labels:
+      - "traffic sign"
+      - "traffic_sign"
+    semantic_definition:
+      "traffic sign":
+        ontology: "Space-separated delimiter (BDD100K, CVAT UI default label schema)"
+        definition: "Physical road sign board conveying regulatory, warning, or navigational info."
+      "traffic_sign":
+        ontology: "Underscore-separated delimiter (COCO / Pascal / snake_case programmatic schema)"
+        definition: "Physical road sign board conveying regulatory, warning, or navigational info."
+    unresolved_differences_rationale: >
+      Syntactic delimiter divergence between human-facing UI annotations (space) and programmatic
+      ML pipelines (underscore). Retained as separate entries to maintain binary compatibility
+      with both CVAT task profiles.
+    task_schema_behavior:
+      when_task_has_both:
+        action: "STRICT_EXACT_MATCH"
+        mapping: null
+        notes: "Preserve model prediction verbatim without syntax alteration."
+      when_task_has_only_space_variant:
+        action: "FALLBACK_MAP"
+        target_variant: "traffic sign"
+        mapping:
+          traffic_sign: "traffic sign"
+        notes: "CVAT task only recognizes 'traffic sign' (space). Convert underscore variant to space variant."
+      when_task_has_only_underscore_variant:
+        action: "FALLBACK_MAP"
+        target_variant: "traffic_sign"
+        mapping:
+          "traffic sign": "traffic_sign"
+        notes: "CVAT task only recognizes 'traffic_sign' (underscore). Convert space variant to underscore variant."
+
+related_semantic_boundaries:
+  # Additional domain ontologies preventing accidental conflation
+  rider_vs_vehicles:
+    labels: ["rider", "bicycle", "motorcycle"]
+    notes: >
+      'rider' is the human agent seated atop the cycle or motorbike. 'bicycle' and 'motorcycle'
+      refer to the vehicular machinery. In tight instance segmentation, the human and the vehicle
+      must be separated into their respective classes.
+  drivable_vs_road:
+    labels: ["area/drivable", "area/alternative", "road"]
+    notes: >
+      'road' denotes all paved road infrastructure regardless of traffic flow. 'area/drivable'
+      is strictly the legal travel lane currently available to the ego-vehicle. 'area/alternative'
+      includes opposing lanes, parking bays, or merge corridors.
+  crosswalk_vs_sidewalk:
+    labels: ["lane/crosswalk", "sidewalk"]
+    notes: >
+      'lane/crosswalk' is a marked pedestrian crossing zone painted on the roadway surface.
+      'sidewalk' is the raised pedestrian walkway adjacent to the street. Crosswalk is area-like
+      within the lane hierarchy, but distinct from sidewalks.
+  pole_vs_signs:
+    labels: ["pole", "traffic sign", "traffic_sign", "traffic light", "traffic_light"]
+    notes: >
+      'pole' refers to the slender vertical post, utility pole, or mast. The sign face or signal
+      housing mounted on the pole belongs to traffic sign / traffic light.

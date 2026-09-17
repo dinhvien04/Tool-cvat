@@ -543,3 +543,57 @@ def test_overlay_mask_on_image():
     # Green channel should be boosted
     assert fg_pixel[1] > fg_pixel[0]
     assert fg_pixel[1] > fg_pixel[2]
+
+
+# ---------------------------------------------------------------------------
+# Multi-Component / Disconnected Polygon Tests
+# ---------------------------------------------------------------------------
+
+def test_rasterize_polygons_to_mask_disconnected():
+    """Verify rasterizing multiple disconnected polygons onto a single canvas."""
+    from core.geometry import rasterize_polygons_to_mask
+    poly1 = [(10.0, 10.0), (30.0, 10.0), (30.0, 30.0), (10.0, 30.0)]
+    poly2 = [(60.0, 60.0), (80.0, 60.0), (80.0, 80.0), (60.0, 80.0)]
+
+    mask_img = rasterize_polygons_to_mask([poly1, poly2], width=100, height=100)
+    assert mask_img.size == (100, 100)
+
+    # Both squares should be foreground 1
+    assert mask_img.getpixel((20, 20)) == 1
+    assert mask_img.getpixel((70, 70)) == 1
+
+    # In-between region should be background 0
+    assert mask_img.getpixel((45, 45)) == 0
+
+
+def test_multi_polygon_to_cvat_mask_disconnected():
+    """Verify multi_polygon_to_cvat_mask produces single mask enclosing disconnected islands."""
+    from core.geometry import multi_polygon_to_cvat_mask
+    poly1 = [[100, 100], [200, 100], [200, 200], [100, 200]]
+    poly2 = [[500, 500], [700, 500], [700, 700], [500, 700]]
+
+    res = multi_polygon_to_cvat_mask([poly1, poly2], width=1001, height=1001, label="road")
+    assert res is not None
+    assert res["label"] == "road"
+    assert res["type"] == "mask"
+
+    # Enclosing bbox should span from xmin=100 to xmax=700, ymin=100 to ymax=700
+    xmin, ymin, xmax, ymax = res["bbox"]
+    assert xmin == 100
+    assert ymin == 100
+    assert xmax == 700
+    assert ymax == 700
+
+
+def test_polygon_to_cvat_mask_handles_multi_contour():
+    """Verify polygon_to_cvat_mask automatically delegates 3D multi-contour lists."""
+    from core.geometry import polygon_to_cvat_mask
+    poly1 = [[100, 100], [200, 100], [200, 200], [100, 200]]
+    poly2 = [[500, 500], [700, 500], [700, 700], [500, 700]]
+
+    res = polygon_to_cvat_mask([poly1, poly2], width=1001, height=1001, label="vegetation")
+    assert res is not None
+    assert res["label"] == "vegetation"
+    assert res["type"] == "mask"
+    assert res["bbox"] == [100, 100, 700, 700]
+
