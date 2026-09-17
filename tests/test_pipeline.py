@@ -94,7 +94,7 @@ def test_run_pipeline_end_to_end(tmp_path):
         model="ag/gemini-3.8-flash-high",
         output_dir=output_dir,
         max_image_size=1600,
-        labels_config=Path("D:/tool-cvat/config/labels.yaml"),
+        labels_config=Path(__file__).resolve().parent.parent / "config" / "labels.yaml",
         strict=False,
     )
 

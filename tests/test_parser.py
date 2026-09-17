@@ -473,3 +473,56 @@ def test_non_bbox_labels_rejected_against_default():
     res_road = parse_and_validate(raw_road, allowed_labels=["road", "car"], strict=True)
     assert len(res_road.objects) == 1
     assert res_road.objects[0].label == "road"
+
+
+# =====================================================================
+# 4. Confidence Score Validation & Fallback Policy
+# =====================================================================
+
+def test_parse_confidence_explicit_float():
+    """Verify parsing explicit float confidence."""
+    raw = json.dumps({
+        "objects": [
+            {"label": "car", "box_2d": [100, 200, 300, 400], "confidence": 0.92}
+        ]
+    })
+    res = parse_and_validate(raw, allowed_labels=SAMPLE_ALLOWED_LABELS)
+    assert len(res.objects) == 1
+    assert res.objects[0].confidence == 0.92
+    assert res.objects[0].to_dict()["confidence"] == 0.92
+
+
+def test_parse_confidence_percentage_and_scaling():
+    """Verify normalizing percentage values (e.g. 95 or '95%') to [0.0, 1.0]."""
+    raw_scaled = json.dumps({
+        "objects": [
+            {"label": "car", "box_2d": [100, 200, 300, 400], "confidence": 95},
+            {"label": "pedestrian", "box_2d": [200, 100, 400, 200], "confidence": "88%"}
+        ]
+    })
+    res = parse_and_validate(raw_scaled, allowed_labels=SAMPLE_ALLOWED_LABELS)
+    assert len(res.objects) == 2
+    assert res.objects[0].confidence == 0.95
+    assert res.objects[1].confidence == 0.88
+
+
+def test_parse_confidence_fallback_policy():
+    """Verify fallback confidence policy when model does not return confidence."""
+    raw_missing = json.dumps({
+        "objects": [
+            {"label": "car", "box_2d": [100, 200, 300, 400]}
+        ]
+    })
+    # Default fallback None when not specified
+    res_none = parse_and_validate(raw_missing, allowed_labels=SAMPLE_ALLOWED_LABELS)
+    assert res_none.objects[0].confidence is None
+
+    # Configured fallback (e.g. 1.0)
+    res_fallback = parse_and_validate(
+        raw_missing,
+        allowed_labels=SAMPLE_ALLOWED_LABELS,
+        fallback_confidence=1.0,
+    )
+    assert res_fallback.objects[0].confidence == 1.0
+    cvat_shape = res_fallback.objects[0].to_cvat_shape()
+    assert cvat_shape["confidence"] == 1.0

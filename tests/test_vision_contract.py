@@ -53,7 +53,7 @@ def test_labels_count_and_content():
 
 def test_labels_yaml_file():
     """Verify labels.yaml matches specifications exactly."""
-    yaml_path = Path("D:/tool-cvat/config/labels.yaml")
+    yaml_path = Path(__file__).resolve().parent.parent / "config" / "labels.yaml"
     assert yaml_path.exists()
 
     with open(yaml_path, "r", encoding="utf-8") as f:

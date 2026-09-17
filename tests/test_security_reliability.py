@@ -79,7 +79,7 @@ def test_pipeline_output_reports_contain_no_secrets_or_base64(tmp_path):
     img.save(img_path)
 
     out_dir = tmp_path / "output"
-    labels_file = Path("D:/tool-cvat/config/labels.yaml")
+    labels_file = Path(__file__).resolve().parent.parent / "config" / "labels.yaml"
 
     opts = PipelineOptions(
         image_path=img_path,
@@ -124,7 +124,7 @@ def test_pipeline_output_reports_contain_no_secrets_or_base64(tmp_path):
 
 def test_gitignore_covers_required_entries():
     """Verify .gitignore ignores .env, output/, *.pyc, __pycache__/, .pytest_cache/."""
-    gitignore_path = Path("D:/tool-cvat/.gitignore")
+    gitignore_path = Path(__file__).resolve().parent.parent / ".gitignore"
     assert gitignore_path.exists()
 
     content = gitignore_path.read_text(encoding="utf-8")
@@ -139,7 +139,7 @@ def test_gitignore_covers_required_entries():
 
 def test_env_example_has_no_secrets():
     """Verify .env.example contains only placeholder values and no real keys."""
-    env_ex = Path("D:/tool-cvat/.env.example")
+    env_ex = Path(__file__).resolve().parent.parent / ".env.example"
     assert env_ex.exists()
 
     content = env_ex.read_text(encoding="utf-8")

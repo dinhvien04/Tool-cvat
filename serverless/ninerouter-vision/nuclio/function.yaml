@@ -1,0 +1,61 @@
+metadata:
+  name: ninerouter-vision
+  namespace: cvat
+  annotations:
+    name: 9Router Vision
+    type: detector
+    spec: |
+      [
+        { "id": 1, "name": "pedestrian", "type": "rectangle" },
+        { "id": 2, "name": "rider", "type": "rectangle" },
+        { "id": 3, "name": "car", "type": "rectangle" },
+        { "id": 4, "name": "truck", "type": "rectangle" },
+        { "id": 5, "name": "bus", "type": "rectangle" },
+        { "id": 6, "name": "train", "type": "rectangle" },
+        { "id": 7, "name": "motorcycle", "type": "rectangle" },
+        { "id": 8, "name": "bicycle", "type": "rectangle" },
+        { "id": 9, "name": "traffic light", "type": "rectangle" },
+        { "id": 10, "name": "traffic sign", "type": "rectangle" },
+        { "id": 11, "name": "person", "type": "rectangle" },
+        { "id": 12, "name": "traffic_light", "type": "rectangle" },
+        { "id": 13, "name": "traffic_sign", "type": "rectangle" }
+      ]
+
+spec:
+  description: 9Router Vision AI Detector (Gemini/Claude via local 9Router)
+  runtime: 'python:3.11'
+  handler: main:handler
+  eventTimeout: 120s
+
+  env:
+    - name: NINEROUTER_URL
+      value: 'http://host.docker.internal:20128'
+    - name: VISION_MODEL
+      value: 'ag/gemini-3.8-flash-high'
+    - name: NINEROUTER_TIMEOUT
+      value: '60.0'
+    - name: MAX_IMAGE_SIZE
+      value: '1600'
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 2
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432 # 32MB
+
+  build:
+    image: cvat.custom.ninerouter.vision
+    baseImage: python:3.11-slim
+    directives:
+      preCopy:
+        - kind: RUN
+          value: pip install --no-cache-dir requests pillow pyyaml
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume
