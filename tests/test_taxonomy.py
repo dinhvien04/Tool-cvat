@@ -275,53 +275,53 @@ def test_resolve_label_strict_when_both_exist(tax: Taxonomy):
 
 
 def test_route_shapes_instances(tax: Taxonomy):
-    """Verify shape routing for standard instances in various modes."""
-    # box mode: rectangle
-    assert tax.route_shapes("car", requested_mode="box", has_box=True, has_mask=True) == [SHAPE_RECTANGLE]
-
-    # mask mode: mask
-    assert tax.route_shapes("car", requested_mode="mask", has_box=True, has_mask=True) == [SHAPE_MASK]
-
-    # box_and_mask mode: both
+    """Verify shape routing for Policy A instances strictly requires both box and mask."""
+    # When both box and mask are present: emits both rectangle and mask
     assert tax.route_shapes("car", requested_mode="box_and_mask", has_box=True, has_mask=True) == [
         SHAPE_RECTANGLE,
         SHAPE_MASK,
     ]
 
+    # If mask is missing: dropped
+    assert tax.route_shapes("car", requested_mode="box_and_mask", has_box=True, has_mask=False) == []
+
+    # If box is missing: dropped
+    assert tax.route_shapes("car", requested_mode="box_and_mask", has_box=False, has_mask=True) == []
+
 
 def test_route_shapes_pole(tax: Taxonomy):
-    """Verify special pole routing: mask preferred, supports rectangle."""
-    # box mode
-    assert tax.route_shapes("pole", requested_mode="box", has_box=True) == [SHAPE_RECTANGLE]
-
-    # mask mode with mask available
-    assert tax.route_shapes("pole", requested_mode="mask", has_box=True, has_mask=True) == [SHAPE_MASK]
-
-    # box_and_mask mode
+    """Verify pole is treated strictly under Policy A (Rectangle + Mask) with zero divergence."""
     assert tax.route_shapes("pole", requested_mode="box_and_mask", has_box=True, has_mask=True) == [
-        SHAPE_MASK,
         SHAPE_RECTANGLE,
+        SHAPE_MASK,
     ]
+    assert tax.route_shapes("pole", requested_mode="box_and_mask", has_box=True, has_mask=False) == []
 
 
 def test_route_shapes_regions(tax: Taxonomy):
-    """Verify regions never route rectangle even if has_box=True."""
-    # Box mode: regions cannot output rectangle
-    assert tax.route_shapes("road", requested_mode="box", has_box=True, has_mask=False) == []
+    """Verify regions emit polygon + mask and never route rectangle even if has_box=True."""
+    # When mask/contour is missing: dropped
+    assert tax.route_shapes("road", requested_mode="box_and_mask", has_box=True, has_mask=False) == []
 
-    # Mask mode: returns mask
-    assert tax.route_shapes("road", requested_mode="mask", has_box=True, has_mask=True) == [SHAPE_MASK]
-    assert tax.route_shapes("sky", requested_mode="box_and_mask", has_box=True, has_mask=True) == [SHAPE_MASK]
+    # When mask/contour is present: emits polygon + mask (never rectangle)
+    assert tax.route_shapes("road", requested_mode="box_and_mask", has_box=True, has_mask=True) == [
+        SHAPE_POLYGON,
+        SHAPE_MASK,
+    ]
+    assert tax.route_shapes("sky", requested_mode="box_and_mask", has_box=False, has_mask=True) == [
+        SHAPE_POLYGON,
+        SHAPE_MASK,
+    ]
 
 
 def test_route_shapes_lanes(tax: Taxonomy):
-    """Verify lane markings routing."""
+    """Verify lane markings emit polyline only and never rectangle, polygon, or mask."""
     # Linear lane line: polyline
-    assert tax.route_shapes("lane/single white", requested_mode="mask", has_mask=True) == [SHAPE_POLYLINE]
+    assert tax.route_shapes("lane/single white", requested_mode="box_and_mask", has_mask=True) == [SHAPE_POLYLINE]
 
     # Crosswalk (Policy C): strictly polyline, never rectangle or polygon
-    assert tax.route_shapes("lane/crosswalk", requested_mode="box", has_box=True) == []
-    assert tax.route_shapes("lane/crosswalk", requested_mode="mask", has_mask=True) == [SHAPE_POLYLINE]
+    assert tax.route_shapes("lane/crosswalk", requested_mode="box_and_mask", has_box=True, has_mask=False) == []
+    assert tax.route_shapes("lane/crosswalk", requested_mode="box_and_mask", has_mask=True) == [SHAPE_POLYLINE]
 
 
 # ============================================================================

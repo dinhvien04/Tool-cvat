@@ -238,77 +238,121 @@ class CorrectionRetrievalEngine:
                 else:
                     description = f"False positive instance '{deleted_label}' deleted by human reviewer (negative example)"
             else:
-                # Compute normalized polygon contour if present
-                norm_poly = []
-                if crop_coords and len(crop_coords) == 4:
-                    cx1, cy1, cx2, cy2 = [float(c) for c in crop_coords]
-                    cw = max(cx2 - cx1, 1.0)
-                    ch = max(cy2 - cy1, 1.0)
-                    poly_pts = human_shape.get("points") or []
-                    if len(poly_pts) >= 6:
-                        for i in range(0, len(poly_pts) - 1, 2):
-                            px = int(round(max(0.0, min(1000.0, (poly_pts[i] - cx1) / cw * 1000.0))))
-                            py = int(round(max(0.0, min(1000.0, (poly_pts[i + 1] - cy1) / ch * 1000.0))))
-                            norm_poly.append([px, py])
+                # Strictly require valid crop bounding coordinates; NEVER fabricate geometry
+                if not crop_coords or len(crop_coords) != 4:
+                    continue
+                cx1, cy1, cx2, cy2 = [float(c) for c in crop_coords]
+                cw = max(cx2 - cx1, 1.0)
+                ch = max(cy2 - cy1, 1.0)
 
                 # Route into objects[], regions[], or lanes[] according to 31-label taxonomy
                 if target_group == GROUP_REGION or "area/" in target_label:
-                    # Semantic Region: mask only, NO box_2d
-                    reg_mask = norm_poly if len(norm_poly) >= 3 else [[100, 100], [900, 100], [900, 900], [100, 900]]
+                    # Semantic Region: POLICY B -> "polygon" key (NEVER mask-only, NEVER box)
+                    poly_pts = None
+                    if details.get("human_poly") and details["human_poly"].get("points"):
+                        poly_pts = details["human_poly"]["points"]
+                    elif human_shape.get("type") == "polygon" and human_shape.get("points"):
+                        poly_pts = human_shape["points"]
+                    elif human_shape.get("points") and len(human_shape["points"]) >= 6:
+                        poly_pts = human_shape["points"]
+
+                    if not poly_pts or len(poly_pts) < 6:
+                        # Cannot safely reconstruct region polygon without fabricating; skip example
+                        continue
+
+                    norm_poly = []
+                    for i in range(0, len(poly_pts) - 1, 2):
+                        px = int(round(max(0.0, min(1000.0, (poly_pts[i] - cx1) / cw * 1000.0))))
+                        py = int(round(max(0.0, min(1000.0, (poly_pts[i + 1] - cy1) / ch * 1000.0))))
+                        norm_poly.append([px, py])
+
+                    if len(norm_poly) < 3:
+                        continue
+
                     expected_output = {
                         "objects": [],
                         "regions": [
                             {
                                 "label": target_label,
-                                "mask": reg_mask,
+                                "polygon": norm_poly,
                             }
                         ],
                         "lanes": [],
                     }
                 elif target_group == GROUP_LANE or target_label.startswith("lane/"):
-                    # Lane Marking: mask only, NO box_2d
-                    lane_mask = norm_poly if len(norm_poly) >= 3 else [[100, 900], [450, 500], [550, 500], [900, 900]]
+                    # Lane Marking: POLICY C -> "polyline" key (NEVER mask, NEVER polygon)
+                    line_pts = human_shape.get("points")
+                    if not line_pts or len(line_pts) < 4:
+                        # Cannot safely reconstruct lane polyline without fabricating; skip example
+                        continue
+
+                    norm_line = []
+                    for i in range(0, len(line_pts) - 1, 2):
+                        px = int(round(max(0.0, min(1000.0, (line_pts[i] - cx1) / cw * 1000.0))))
+                        py = int(round(max(0.0, min(1000.0, (line_pts[i + 1] - cy1) / ch * 1000.0))))
+                        norm_line.append([px, py])
+
+                    if len(norm_line) < 2:
+                        continue
+
                     expected_output = {
                         "objects": [],
                         "regions": [],
                         "lanes": [
                             {
                                 "label": target_label,
-                                "mask": lane_mask,
+                                "polyline": norm_line,
                             }
                         ],
                     }
                 else:
-                    # Instance Object: box_2d + optional mask
-                    box_2d = [100, 100, 900, 900]  # Centered default fallback
-                    if crop_coords and len(crop_coords) == 4:
-                        cx1, cy1, cx2, cy2 = [float(c) for c in crop_coords]
-                        cw = max(cx2 - cx1, 1.0)
-                        ch = max(cy2 - cy1, 1.0)
+                    # Instance Object: POLICY A -> BOTH box_2d AND mask (NEVER box-only, NEVER fabricate)
+                    rect_pts = None
+                    if details.get("human_rect") and details["human_rect"].get("points"):
+                        rect_pts = details["human_rect"]["points"]
+                    elif human_shape.get("type") == "rectangle" and human_shape.get("points"):
+                        rect_pts = human_shape["points"]
+                    elif details.get("human_bbox"):
+                        rect_pts = details["human_bbox"]
+                    elif human_shape.get("points") and len(human_shape["points"]) == 4:
+                        rect_pts = human_shape["points"]
 
-                        pts = human_shape.get("points") or []
-                        if human_shape.get("type") == "rectangle" and len(pts) >= 4:
-                            xtl, ytl, xbr, ybr = pts[:4]
-                            rx1 = int(round(max(0.0, min(1000.0, (xtl - cx1) / cw * 1000.0))))
-                            ry1 = int(round(max(0.0, min(1000.0, (ytl - cy1) / ch * 1000.0))))
-                            rx2 = int(round(max(0.0, min(1000.0, (xbr - cx1) / cw * 1000.0))))
-                            ry2 = int(round(max(0.0, min(1000.0, (ybr - cy1) / ch * 1000.0))))
-                            ymin, ymax = min(ry1, ry2), max(ry1, ry2)
-                            xmin, xmax = min(rx1, rx2), max(rx1, rx2)
-                            if ymax - ymin < 10:
-                                ymax = min(1000, ymin + 10)
-                                ymin = max(0, ymax - 10)
-                            if xmax - xmin < 10:
-                                xmax = min(1000, xmin + 10)
-                                xmin = max(0, xmax - 10)
-                            box_2d = [ymin, xmin, ymax, xmax]
+                    if not rect_pts or len(rect_pts) < 4:
+                        continue
+
+                    xtl, ytl, xbr, ybr = rect_pts[:4]
+                    rx1 = int(round(max(0.0, min(1000.0, (xtl - cx1) / cw * 1000.0))))
+                    ry1 = int(round(max(0.0, min(1000.0, (ytl - cy1) / ch * 1000.0))))
+                    rx2 = int(round(max(0.0, min(1000.0, (xbr - cx1) / cw * 1000.0))))
+                    ry2 = int(round(max(0.0, min(1000.0, (ybr - cy1) / ch * 1000.0))))
+                    ymin, ymax = min(ry1, ry2), max(ry1, ry2)
+                    xmin, xmax = min(rx1, rx2), max(rx1, rx2)
+                    if ymax <= ymin or xmax <= xmin:
+                        continue
+                    box_2d = [ymin, xmin, ymax, xmax]
+
+                    # Extract mask contour points
+                    mask_pts = None
+                    if details.get("human_mask") and details["human_mask"].get("points"):
+                        mask_pts = details["human_mask"]["points"]
+                    elif human_shape.get("type") in ("mask", "polygon") and human_shape.get("points"):
+                        mask_pts = human_shape["points"]
+                    elif human_shape.get("points") and len(human_shape["points"]) >= 6:
+                        mask_pts = human_shape["points"]
+
+                    norm_mask = []
+                    if mask_pts and len(mask_pts) >= 6:
+                        for i in range(0, len(mask_pts) - 1, 2):
+                            px = int(round(max(0.0, min(1000.0, (mask_pts[i] - cx1) / cw * 1000.0))))
+                            py = int(round(max(0.0, min(1000.0, (mask_pts[i + 1] - cy1) / ch * 1000.0))))
+                            norm_mask.append([px, py])
 
                     inst_obj: Dict[str, Any] = {
                         "label": target_label,
                         "box_2d": box_2d,
                     }
-                    if len(norm_poly) >= 3:
-                        inst_obj["mask"] = norm_poly
+                    if len(norm_mask) >= 3:
+                        inst_obj["mask"] = norm_mask
 
                     expected_output = {
                         "objects": [inst_obj],

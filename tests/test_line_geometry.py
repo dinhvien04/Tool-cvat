@@ -263,8 +263,8 @@ class TestLaneShapePipeline:
         )
         assert shape is None  # Dropped per Policy C; caller logs lane_polyline_failed
 
-    def test_legacy_fallback_when_explicitly_requested(self):
-        """Legacy allow_fallback=True returns polygon when polyline extraction fails."""
+    def test_no_polygon_fallback_under_policy_c(self):
+        """Under strict Policy C, lane_shape_pipeline returns None and emits no polygon/mask fallback."""
         fat_patch = [[100, 100], [250, 100], [250, 200], [100, 200]]
         shape = lane_shape_pipeline(
             label=LANE_ROAD_CURB,
@@ -274,9 +274,7 @@ class TestLaneShapePipeline:
             confidence=0.75,
             allow_fallback=True,
         )
-        assert shape is not None
-        assert shape["type"] == "polygon"
-        assert shape["label"] == LANE_ROAD_CURB
+        assert shape is None  # Strictly returns None; no polygon or mask fallback permitted under Policy C
 
     def test_open_polyline_2_points_emits_polyline(self):
         """Verify 2-point line segments from models emit valid polylines directly."""

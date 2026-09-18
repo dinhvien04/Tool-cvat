@@ -1,18 +1,19 @@
 """Lane and Linear Feature Geometry Module for CVAT x 9Router AI Annotation.
 
-This module provides specialized algorithms for processing lane markings and linear road features:
-1. `lane/crosswalk`: 2D surface area -> polygon / mask
-2. `lane/double white`, `lane/double yellow`: dual linear boundaries -> polyline or ribbon polygon
-3. `lane/single white`, `lane/single yellow`, `lane/single other`: linear lane markings -> polyline or ribbon polygon
-4. `lane/road curb`: linear boundary / narrow curb strip -> polyline or ribbon polygon
+This module provides specialized algorithms for processing lane markings and linear road features
+strictly under Policy C (POLYLINE ONLY):
+1. `lane/crosswalk`: pedestrian crosswalk -> polyline traversal centerline
+2. `lane/double white`, `lane/double yellow`: dual linear boundaries -> polyline
+3. `lane/single white`, `lane/single yellow`, `lane/single other`: linear lane markings -> polyline
+4. `lane/road curb`: linear boundary / narrow curb strip -> polyline
 
 Strict Architectural Constraints:
 - ZERO HEAVY ML & ZERO HEAVY LIBRARIES: Relies strictly on Python standard library (`math`, `typing`, `collections`)
   and Pillow. NO scipy, NO scikit-image, NO OpenCV (cv2), NO PyTorch/TensorFlow.
 - Deterministic, O(N) execution time: Centerline approximation completes in < 0.2 ms per lane instance.
-- Graceful degradation / Fallback: If centerline extraction is geometrically unsafe or ill-defined
-  (e.g., low aspect-ratio patches, complex intersections, non-ribbon blobs), gracefully falls back
-  to high-fidelity polygon/mask representation without dropping annotations.
+- Policy C Strictness: ALL 7 lane demarcations must emit polyline only. Zero fallback to polygon or mask.
+  If polyline extraction fails or contour cannot be safely reduced to a centerline, returns None so the
+  calling service drops the annotation cleanly.
 """
 
 from __future__ import annotations
@@ -451,7 +452,7 @@ def lane_shape_pipeline(
     - ALL 7 lane labels (`lane/crosswalk`, `lane/double white`, `lane/double yellow`,
       `lane/road curb`, `lane/single other`, `lane/single white`, `lane/single yellow`):
       Must emit POLYLINE ONLY.
-    - Automatic polygon and mask fallbacks are strictly removed (allow_fallback=False).
+    - Automatic and legacy polygon and mask fallbacks are strictly removed.
     - If polyline extraction fails or contour cannot be reduced to a centerline, returns None.
       The calling service drops the annotation and emits warning 'lane_polyline_failed'.
 
@@ -465,7 +466,7 @@ def lane_shape_pipeline(
         num_samples: Number of sample stations for centerline extraction.
         simplify_epsilon: Epsilon tolerance for polyline simplification.
         min_aspect_ratio: Minimum aspect ratio for polyline eligibility.
-        allow_fallback: Default False. If False, never falls back to polygon or mask.
+        allow_fallback: Deprecated; ignored. Under Policy C, fallback is forbidden.
 
     Returns:
         Formatted CVAT polyline shape dictionary (`{"type": "polyline", ...}`),
@@ -477,8 +478,9 @@ def lane_shape_pipeline(
     if not isinstance(contour, (list, tuple)) or len(contour) < 2:
         return None
 
-    # Strict Policy C: attempt centerline polyline extraction
-    poly_shape = polygon_to_cvat_polyline(
+    # Strict Policy C: attempt centerline polyline extraction.
+    # If extraction fails or contour is not a valid line, returns None without polygon/mask fallback.
+    return polygon_to_cvat_polyline(
         contour=contour,
         width=width,
         height=height,
@@ -488,27 +490,3 @@ def lane_shape_pipeline(
         simplify_epsilon=simplify_epsilon,
         min_aspect_ratio=min_aspect_ratio,
     )
-    if poly_shape is not None:
-        return poly_shape
-
-    # Strict Policy C: No auto fallback! Return None so caller drops annotation and logs warning.
-    if not allow_fallback:
-        return None
-
-    # Legacy fallback only if explicitly requested (e.g. backward compat test with allow_fallback=True)
-    try:
-        pts_px = denormalize_contour(contour, width=width, height=height, min_points=3)
-        area = calculate_polygon_area(pts_px)
-        if area < 0.5:
-            return None
-        flat_pts = [round(float(c), 2) for pt in pts_px for c in pt]
-        shape: Dict[str, Any] = {
-            "type": "polygon",
-            "label": label,
-            "points": flat_pts,
-        }
-        if confidence is not None:
-            shape["confidence"] = str(round(float(confidence), 2)) if isinstance(confidence, (int, float)) else str(confidence)
-        return shape
-    except Exception:
-        return None

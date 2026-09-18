@@ -34,6 +34,9 @@ from core.taxonomy import (
     GROUP_LANE,
     GROUP_REGION,
     MASTER_31_LABELS,
+    POLICY_BOX_MASK,
+    POLICY_POLYGON_MASK,
+    POLICY_POLYLINE,
     Taxonomy,
 )
 
@@ -368,25 +371,34 @@ class CorrectionDiffEngine:
                 "label": lbl,
                 "shape": primary,
                 "sub_shapes": sub_shapes,
+                "rect_shape": rect_shape,
+                "poly_shape": poly_shape,
                 "mask_shape": mask_shape,
+                "polyline_shape": polyline_shape,
                 "bbox": union_bbox,
                 "type": primary.get("type", "rectangle"),
-                "group": self.taxonomy.get_group(lbl),
+                "group": self.taxonomy.get_group(lbl) if self.taxonomy.is_valid_label(lbl) else None,
+                "policy": self.taxonomy.get_policy(lbl) if self.taxonomy.is_valid_label(lbl) else None,
             })
 
         # Process standalone shapes
         for s in standalone:
             lbl = s.get("label", "")
             bbox = extract_shape_bbox(s)
+            stype = s.get("type", "rectangle")
             annotations.append({
                 "group_id": None,
                 "label": lbl,
                 "shape": s,
                 "sub_shapes": [s],
-                "mask_shape": s if s.get("type") == "mask" else None,
+                "rect_shape": s if stype == "rectangle" else None,
+                "poly_shape": s if stype == "polygon" else None,
+                "mask_shape": s if stype == "mask" else None,
+                "polyline_shape": s if stype == "polyline" else None,
                 "bbox": bbox,
-                "type": s.get("type", "rectangle"),
-                "group": self.taxonomy.get_group(lbl),
+                "type": stype,
+                "group": self.taxonomy.get_group(lbl) if self.taxonomy.is_valid_label(lbl) else None,
+                "policy": self.taxonomy.get_policy(lbl) if self.taxonomy.is_valid_label(lbl) else None,
             })
 
         return annotations
@@ -529,17 +541,142 @@ class CorrectionDiffEngine:
         img_w: int,
         img_h: int,
     ) -> CorrectionDiffItem:
-        """Classify shape difference when AI and human share the same label."""
+        """Classify shape difference when AI and human share the same label.
+
+        Strictly enforces the three policies:
+        - POLICY_BOX_MASK: Compares BOTH rectangle geometry (box_iou, shift, resize)
+          and mask geometry (mask_iou). Detects:
+            * box unchanged + mask changed -> MASK_EDIT
+            * box changed + mask unchanged -> BOX_MOVE / BOX_RESIZE
+            * box changed + mask changed -> structured details with primary type
+            * box unchanged + mask unchanged -> NO_CHANGE
+        - POLICY_POLYGON_MASK: Compares true shape overlap of polygon/mask.
+          Stores polygon/mask IoU with bbox IoU as diagnostic.
+        - POLICY_POLYLINE: Compares true line stroke overlap.
+        """
         lbl = a["label"]
-        group = a["group"]
-        stype = h.get("type", a.get("type", "rectangle"))
+        group = a.get("group")
+        policy = a.get("policy")
         a_bbox = a["bbox"]
         h_bbox = h["bbox"]
 
-        # 1. Semantic Regions (True Mask IoU)
-        if group == GROUP_REGION or "area/" in lbl:
-            true_iou = _compute_shape_iou(a["shape"], h["shape"], img_w, img_h)
+        details: Dict[str, Any] = {
+            "ai_group_id": a.get("group_id"),
+            "human_group_id": h.get("group_id"),
+            "ai_bbox": a_bbox,
+            "human_bbox": h_bbox,
+        }
+        if h.get("rect_shape"):
+            details["human_rect"] = h["rect_shape"]
+        if h.get("mask_shape"):
+            details["human_mask"] = h["mask_shape"]
+        if h.get("poly_shape"):
+            details["human_poly"] = h["poly_shape"]
+        if a.get("rect_shape"):
+            details["ai_rect"] = a["rect_shape"]
+        if a.get("mask_shape"):
+            details["ai_mask"] = a["mask_shape"]
+        if a.get("poly_shape"):
+            details["ai_poly"] = a["poly_shape"]
+
+        # ----------------------------------------------------------------------
+        # 1. POLICY_BOX_MASK (14 Instance Labels): Compare BOTH box & mask
+        # ----------------------------------------------------------------------
+        if policy == POLICY_BOX_MASK or group == GROUP_INSTANCE:
+            a_rect = a.get("rect_shape") or (a["shape"] if a["shape"].get("type") == "rectangle" else None)
+            h_rect = h.get("rect_shape") or (h["shape"] if h["shape"].get("type") == "rectangle" else None)
+            a_box = extract_shape_bbox(a_rect) if a_rect else a_bbox
+            h_box = extract_shape_bbox(h_rect) if h_rect else h_bbox
+
+            box_iou = calculate_box_iou(a_box, h_box) if (a_box and h_box) else iou
+            box_changed = False
+            box_change_type: Optional[str] = None
+            shift_x = 0.0
+            shift_y = 0.0
+            dw = 0.0
+            dh = 0.0
+
+            if a_box and h_box:
+                ax1, ay1, ax2, ay2 = a_box
+                hx1, hy1, hx2, hy2 = h_box
+                aw, ah = ax2 - ax1, ay2 - ay1
+                hw, hh = hx2 - hx1, hy2 - hy1
+                acx, acy = (ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0
+                hcx, hcy = (hx1 + hx2) / 2.0, (hy1 + hy2) / 2.0
+                shift_x = abs(acx - hcx)
+                shift_y = abs(acy - hcy)
+                dw = abs(aw - hw) / max(aw, hw, 1.0)
+                dh = abs(ah - hh) / max(ah, hh, 1.0)
+
+                if dw > 0.15 or dh > 0.15:
+                    box_changed = True
+                    box_change_type = CORRECTION_BOX_RESIZE
+                elif shift_x > 5.0 or shift_y > 5.0 or box_iou < 0.90:
+                    box_changed = True
+                    box_change_type = CORRECTION_BOX_MOVE
+
+            # Mask geometry comparison
+            a_mask = a.get("mask_shape") or (a["shape"] if a["shape"].get("type") == "mask" else None)
+            h_mask = h.get("mask_shape") or (h["shape"] if h["shape"].get("type") == "mask" else None)
+
+            if a_mask and h_mask:
+                mask_iou = _compute_shape_iou(a_mask, h_mask, img_w, img_h)
+                mask_changed = (mask_iou < 0.92)
+            elif a_mask is not None or h_mask is not None:
+                mask_changed = True
+                mask_iou = 0.0
+            else:
+                mask_changed = False
+                mask_iou = box_iou
+
+            details["box_iou"] = round(box_iou, 4)
+            details["mask_iou"] = round(mask_iou, 4)
+            details["shift"] = {"dx": round(shift_x, 2), "dy": round(shift_y, 2)}
+            details["size_diff"] = {"dw": round(dw, 3), "dh": round(dh, 3)}
+            details["box_changed"] = box_changed
+            details["mask_changed"] = mask_changed
+
+            if box_changed and not mask_changed:
+                corr_type = box_change_type or CORRECTION_BOX_MOVE
+                details["reason"] = f"Instance '{lbl}' bounding box adjusted ({corr_type})"
+            elif not box_changed and mask_changed:
+                corr_type = CORRECTION_MASK_EDIT
+                details["reason"] = f"Instance '{lbl}' mask boundary adjusted by annotator (mask IoU {mask_iou:.2f})"
+            elif box_changed and mask_changed:
+                corr_type = box_change_type or CORRECTION_BOX_MOVE
+                details["box_change_type"] = box_change_type
+                details["reason"] = f"Instance '{lbl}' both box ({box_change_type}) and mask (mask IoU {mask_iou:.2f}) adjusted"
+            else:
+                corr_type = CORRECTION_NO_CHANGE
+                details["status"] = "Instance accepted without edit"
+
+            return CorrectionDiffItem(
+                correction_type=corr_type,
+                ai_label=lbl,
+                human_label=lbl,
+                ai_shape=a["shape"],
+                human_shape=h["shape"],
+                iou=round(min(box_iou, mask_iou), 4) if (box_changed or mask_changed) else round(box_iou, 4),
+                details=details,
+            )
+
+        # ----------------------------------------------------------------------
+        # 2. POLICY_POLYGON_MASK (10 Region Labels): Compare true shape overlap
+        # ----------------------------------------------------------------------
+        if policy == POLICY_POLYGON_MASK or group == GROUP_REGION or "area/" in lbl:
+            a_poly_mask = a.get("mask_shape") or a.get("poly_shape") or a["shape"]
+            h_poly_mask = h.get("mask_shape") or h.get("poly_shape") or h["shape"]
+            true_iou = _compute_shape_iou(a_poly_mask, h_poly_mask, img_w, img_h)
+            bbox_iou = calculate_box_iou(a_bbox, h_bbox) if (a_bbox and h_bbox) else 0.0
+
+            details["polygon_mask_iou"] = round(true_iou, 4)
+            details["mask_iou"] = round(true_iou, 4)
+            details["shape_iou"] = round(true_iou, 4)
+            details["bbox_iou_diagnostic"] = round(bbox_iou, 4)
+            details["bbox_iou"] = round(bbox_iou, 4)
+
             if true_iou >= 0.92:
+                details["status"] = "Region accepted with negligible change"
                 return CorrectionDiffItem(
                     correction_type=CORRECTION_NO_CHANGE,
                     ai_label=lbl,
@@ -547,12 +684,9 @@ class CorrectionDiffEngine:
                     ai_shape=a["shape"],
                     human_shape=h["shape"],
                     iou=round(true_iou, 4),
-                    details={
-                        "status": "Region accepted with negligible change",
-                        "mask_iou": round(true_iou, 4),
-                        "bbox_iou": round(iou, 4),
-                    },
+                    details=details,
                 )
+            details["reason"] = f"Semantic region '{lbl}' contour edited by annotator (shape IoU {true_iou:.2f})"
             return CorrectionDiffItem(
                 correction_type=CORRECTION_REGION_EDIT,
                 ai_label=lbl,
@@ -560,17 +694,24 @@ class CorrectionDiffEngine:
                 ai_shape=a["shape"],
                 human_shape=h["shape"],
                 iou=round(true_iou, 4),
-                details={
-                    "reason": f"Semantic region '{lbl}' contour edited by annotator (true mask IoU {true_iou:.2f})",
-                    "mask_iou": round(true_iou, 4),
-                    "bbox_iou": round(iou, 4),
-                },
+                details=details,
             )
 
-        # 2. Lane Markings (True Line Stroke Overlap)
-        if group == GROUP_LANE or lbl.startswith("lane/"):
-            true_iou = _compute_shape_iou(a["shape"], h["shape"], img_w, img_h, line_width=4)
+        # ----------------------------------------------------------------------
+        # 3. POLICY_POLYLINE (7 Lane Labels): Compare true line stroke overlap
+        # ----------------------------------------------------------------------
+        if policy == POLICY_POLYLINE or group == GROUP_LANE or lbl.startswith("lane/"):
+            a_line = a.get("polyline_shape") or a["shape"]
+            h_line = h.get("polyline_shape") or h["shape"]
+            true_iou = _compute_shape_iou(a_line, h_line, img_w, img_h, line_width=4)
+            bbox_iou = calculate_box_iou(a_bbox, h_bbox) if (a_bbox and h_bbox) else 0.0
+
+            details["lane_iou"] = round(true_iou, 4)
+            details["bbox_iou_diagnostic"] = round(bbox_iou, 4)
+            details["bbox_iou"] = round(bbox_iou, 4)
+
             if true_iou >= 0.90:
+                details["status"] = "Lane marking accepted"
                 return CorrectionDiffItem(
                     correction_type=CORRECTION_NO_CHANGE,
                     ai_label=lbl,
@@ -578,12 +719,9 @@ class CorrectionDiffEngine:
                     ai_shape=a["shape"],
                     human_shape=h["shape"],
                     iou=round(true_iou, 4),
-                    details={
-                        "status": "Lane marking accepted",
-                        "lane_iou": round(true_iou, 4),
-                        "bbox_iou": round(iou, 4),
-                    },
+                    details=details,
                 )
+            details["reason"] = f"Lane marking '{lbl}' geometry edited by annotator (lane IoU {true_iou:.2f})"
             return CorrectionDiffItem(
                 correction_type=CORRECTION_LANE_EDIT,
                 ai_label=lbl,
@@ -591,101 +729,8 @@ class CorrectionDiffEngine:
                 ai_shape=a["shape"],
                 human_shape=h["shape"],
                 iou=round(true_iou, 4),
-                details={
-                    "reason": f"Lane marking '{lbl}' geometry edited by annotator (true lane IoU {true_iou:.2f})",
-                    "lane_iou": round(true_iou, 4),
-                    "bbox_iou": round(iou, 4),
-                },
+                details=details,
             )
-
-        # 3. Instance Masks (True Mask IoU)
-        if stype == "mask" or a.get("type") == "mask":
-            true_iou = _compute_shape_iou(a["shape"], h["shape"], img_w, img_h)
-            if true_iou >= 0.92:
-                return CorrectionDiffItem(
-                    correction_type=CORRECTION_NO_CHANGE,
-                    ai_label=lbl,
-                    human_label=lbl,
-                    ai_shape=a["shape"],
-                    human_shape=h["shape"],
-                    iou=round(true_iou, 4),
-                    details={
-                        "status": "Mask accepted",
-                        "mask_iou": round(true_iou, 4),
-                        "bbox_iou": round(iou, 4),
-                    },
-                )
-            return CorrectionDiffItem(
-                correction_type=CORRECTION_MASK_EDIT,
-                ai_label=lbl,
-                human_label=lbl,
-                ai_shape=a["shape"],
-                human_shape=h["shape"],
-                iou=round(true_iou, 4),
-                details={
-                    "reason": f"Instance mask '{lbl}' boundary adjusted (true mask IoU {true_iou:.2f})",
-                    "mask_iou": round(true_iou, 4),
-                    "bbox_iou": round(iou, 4),
-                },
-            )
-
-        # 4. Rectangles / Bounding Boxes
-        if a_bbox and h_bbox:
-            ax1, ay1, ax2, ay2 = a_bbox
-            hx1, hy1, hx2, hy2 = h_bbox
-
-            aw, ah = ax2 - ax1, ay2 - ay1
-            hw, hh = hx2 - hx1, hy2 - hy1
-
-            acx, acy = (ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0
-            hcx, hcy = (hx1 + hx2) / 2.0, (hy1 + hy2) / 2.0
-
-            shift_x = abs(acx - hcx)
-            shift_y = abs(acy - hcy)
-            dw = abs(aw - hw) / max(aw, hw, 1.0)
-            dh = abs(ah - hh) / max(ah, hh, 1.0)
-
-            # High IoU and minimal translation/size change -> Accepted
-            if iou >= 0.92 and shift_x <= 4.0 and shift_y <= 4.0 and dw <= 0.08 and dh <= 0.08:
-                return CorrectionDiffItem(
-                    correction_type=CORRECTION_NO_CHANGE,
-                    ai_label=lbl,
-                    human_label=lbl,
-                    ai_shape=a["shape"],
-                    human_shape=h["shape"],
-                    iou=round(iou, 4),
-                    details={"status": "Bounding box accepted without edit"},
-                )
-
-            # Significant dimension change
-            if dw > 0.15 or dh > 0.15:
-                return CorrectionDiffItem(
-                    correction_type=CORRECTION_BOX_RESIZE,
-                    ai_label=lbl,
-                    human_label=lbl,
-                    ai_shape=a["shape"],
-                    human_shape=h["shape"],
-                    iou=round(iou, 4),
-                    details={
-                        "reason": f"Bounding box for '{lbl}' resized (dw={dw:.2f}, dh={dh:.2f})",
-                        "size_diff": {"dw": round(dw, 3), "dh": round(dh, 3)},
-                    },
-                )
-
-            # Center position translation
-            if shift_x > 5.0 or shift_y > 5.0:
-                return CorrectionDiffItem(
-                    correction_type=CORRECTION_BOX_MOVE,
-                    ai_label=lbl,
-                    human_label=lbl,
-                    ai_shape=a["shape"],
-                    human_shape=h["shape"],
-                    iou=round(iou, 4),
-                    details={
-                        "reason": f"Bounding box for '{lbl}' shifted position (dx={shift_x:.1f}, dy={shift_y:.1f})",
-                        "shift": {"dx": round(shift_x, 2), "dy": round(shift_y, 2)},
-                    },
-                )
 
         # Default fallback if matching
         return CorrectionDiffItem(
@@ -695,7 +740,7 @@ class CorrectionDiffEngine:
             ai_shape=a["shape"],
             human_shape=h["shape"],
             iou=round(iou, 4),
-            details={"status": "Accepted"},
+            details=details,
         )
 
 
@@ -1125,6 +1170,9 @@ class FeedbackDatabase:
                     CORRECTION_RELABEL,
                     CORRECTION_BOX_MOVE,
                     CORRECTION_BOX_RESIZE,
+                    CORRECTION_MASK_EDIT,
+                    CORRECTION_REGION_EDIT,
+                    CORRECTION_LANE_EDIT,
                     CORRECTION_ADD_MISSING,
                     CORRECTION_DELETE_FALSE_POSITIVE,
                 ):
@@ -1171,9 +1219,9 @@ class FeedbackDatabase:
         """Save a bounded privacy-preserving crop around corrected object."""
         try:
             target_shape = item.human_shape or item.ai_shape
-            if not target_shape:
-                return None
-            bbox = extract_shape_bbox(target_shape)
+            bbox = extract_shape_bbox(target_shape) if target_shape else None
+            if not bbox and item.details:
+                bbox = item.details.get("human_bbox") or item.details.get("ai_bbox")
             if not bbox:
                 return None
 

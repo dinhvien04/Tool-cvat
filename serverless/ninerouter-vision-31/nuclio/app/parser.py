@@ -424,7 +424,10 @@ def parse_and_validate(
                 )
                 raw_mask = raw_mask[:MAX_CONTOUR_VERTICES]
 
-            if isinstance(raw_mask, list) and len(raw_mask) >= 3:
+            is_lane_item = (category == "lanes") or (label.startswith("lane/"))
+            min_vertices = 2 if is_lane_item else 3
+
+            if isinstance(raw_mask, list) and len(raw_mask) >= min_vertices:
                 valid_contour = True
                 norm_contour: List[List[Union[int, float]]] = []
                 for pt_idx, pt in enumerate(raw_mask):
@@ -438,9 +441,9 @@ def parse_and_validate(
                     except (ValueError, TypeError):
                         valid_contour = False
                         break
-                if valid_contour and len(norm_contour) >= 3:
+                if valid_contour and len(norm_contour) >= min_vertices:
                     parsed_mask = norm_contour
-                    if image_width is not None and image_height is not None and image_width > 0 and image_height > 0:
+                    if len(norm_contour) >= 3 and image_width is not None and image_height is not None and image_width > 0 and image_height > 0:
                         from core.geometry import polygon_to_cvat_mask
                         geo_res = polygon_to_cvat_mask(parsed_mask, width=image_width, height=image_height)
                         if geo_res:

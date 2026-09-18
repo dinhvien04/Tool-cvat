@@ -8,7 +8,7 @@
 # - Every label belongs to exactly one policy:
 #     - POLICY_BOX_MASK: 14 labels (rectangle, mask) - polygon removed!
 #     - POLICY_POLYGON_MASK: 10 labels (polygon, mask)
-#     - POLICY_POLYLINE: 7 labels (polyline, polygon, mask)
+#     - POLICY_POLYLINE: 7 labels (polyline only)
 
 version: "1.1.0"
 

@@ -8,8 +8,10 @@ Architecture:
 - Feedback Learning: CorrectionDiffEngine groups paired shapes as single semantic annotations
 """
 
+import json
 import pytest
 from typing import Any, Dict, List
+from PIL import Image
 
 from core.taxonomy import (
     Taxonomy,
@@ -32,6 +34,7 @@ from core.line_geometry import (
     LANE_CROSSWALK,
     LANE_SINGLE_WHITE,
     LANE_DOUBLE_YELLOW,
+    LANE_ROAD_CURB,
     lane_shape_pipeline,
 )
 from app.service import route_phase3b_shapes, MAX_OBJECTS, MAX_REGIONS, MAX_LANES
@@ -41,7 +44,14 @@ from app.feedback import (
     CORRECTION_ADD_MISSING,
     CORRECTION_NO_CHANGE,
     CORRECTION_RELABEL,
+    CORRECTION_MASK_EDIT,
+    CORRECTION_BOX_MOVE,
+    CORRECTION_BOX_RESIZE,
+    CORRECTION_REGION_EDIT,
+    CORRECTION_LANE_EDIT,
 )
+from app.retrieval import CorrectionRetrievalEngine
+from app.parser import ParsedObject
 
 
 @pytest.fixture
@@ -392,3 +402,271 @@ def test_diff_engine_paired_shapes_accepted_no_change():
     assert len(diffs) == 1
     assert diffs[0].correction_type == CORRECTION_NO_CHANGE
     assert diffs[0].ai_label == "bicycle"
+
+
+# ==============================================================================
+# 6. Specific 13 Regression Tests for 3 Strict Annotation Policies
+# ==============================================================================
+
+def test_policy_a_drops_incomplete_instance_atomic(tax: Taxonomy):
+    """Regression Test 1: Incomplete Policy A instance (missing box or missing mask) is dropped atomically."""
+    # Rectangle only -> dropped
+    box_only = [
+        {"label": "pedestrian", "type": "rectangle", "points": [10.0, 20.0, 30.0, 40.0], "group_id": 1}
+    ]
+    val_box, warn_box = validate_cvat_output_shapes(box_only, taxonomy=tax)
+    assert len(val_box) == 0
+    assert any("policy_a_violation" in w for w in warn_box)
+
+    routed_box, _ = route_phase3b_shapes(box_only)
+    assert len(routed_box) == 0
+
+    # Mask only -> dropped
+    mask_only = [
+        {"label": "pedestrian", "type": "mask", "points": [10.0, 20.0, 30.0, 40.0], "mask": [1, 10, 20, 30, 40], "group_id": 1}
+    ]
+    val_mask, warn_mask = validate_cvat_output_shapes(mask_only, taxonomy=tax)
+    assert len(val_mask) == 0
+    assert any("policy_a_violation" in w for w in warn_mask)
+
+    routed_mask, _ = route_phase3b_shapes(mask_only)
+    assert len(routed_mask) == 0
+
+
+def test_policy_a_emits_both_rectangle_and_mask_with_shared_group_id(tax: Taxonomy):
+    """Regression Test 2: Valid Policy A instance emits both rectangle and mask sharing exact group_id."""
+    raw = [
+        {"label": "car", "type": "rectangle", "points": [100.0, 100.0, 300.0, 300.0], "group_id": 42},
+        {"label": "car", "type": "mask", "points": [100.0, 100.0, 300.0, 300.0], "mask": [1, 100, 100, 300, 300], "group_id": 42},
+    ]
+    validated, warnings = validate_cvat_output_shapes(raw, taxonomy=tax)
+    assert len(validated) == 2
+    assert len(warnings) == 0
+    assert validated[0]["group_id"] == 42
+    assert validated[1]["group_id"] == 42
+    assert {validated[0]["type"], validated[1]["type"]} == {"rectangle", "mask"}
+
+
+def test_policy_b_drops_rectangle_and_emits_polygon_plus_mask(tax: Taxonomy):
+    """Regression Test 3: Policy B regions drop any bounding box and emit polygon + mask with shared group_id."""
+    raw = [
+        {"label": "road", "type": "rectangle", "points": [0.0, 500.0, 1000.0, 1000.0], "group_id": 7},
+        {"label": "road", "type": "polygon", "points": [0.0, 500.0, 1000.0, 500.0, 1000.0, 1000.0, 0.0, 1000.0], "group_id": 7},
+        {"label": "road", "type": "mask", "points": [0.0, 500.0, 1000.0, 1000.0], "mask": [1, 0, 500, 1000, 1000], "group_id": 7},
+    ]
+    routed, warnings = route_phase3b_shapes(raw)
+    assert len(routed) == 2
+    types = {s["type"] for s in routed}
+    assert types == {"polygon", "mask"}
+    assert all(s["group_id"] == 7 for s in routed)
+
+
+def test_policy_c_crosswalk_emits_polyline_only(tax: Taxonomy):
+    """Regression Test 4: lane/crosswalk strictly emits polyline only (never rectangle, polygon, or mask)."""
+    meta = tax.get_label_info(LANE_CROSSWALK)
+    assert meta.policy == POLICY_POLYLINE
+    assert meta.allowed_shapes == (SHAPE_POLYLINE,)
+    assert meta.supports_bounding_box is False
+    assert meta.supports_polygon is False
+    assert meta.supports_mask is False
+
+    crosswalk_contour = [[100, 200], [800, 200], [800, 400], [100, 400]]
+    shape = lane_shape_pipeline(
+        label=LANE_CROSSWALK,
+        contour=crosswalk_contour,
+        width=1000,
+        height=1000,
+        confidence=0.90,
+    )
+    assert shape is not None
+    assert shape["type"] == "polyline"
+    assert shape["label"] == LANE_CROSSWALK
+
+
+def test_policy_c_lane_drop_on_failure_no_fallback():
+    """Regression Test 5: Lane extraction failure returns None and drops without fallback."""
+    degenerate_contour = [[100, 100], [200, 100], [200, 200], [100, 200]]  # square patch (aspect ratio 1.0 < 2.5)
+    shape = lane_shape_pipeline(
+        label=LANE_SINGLE_WHITE,
+        contour=degenerate_contour,
+        width=1000,
+        height=1000,
+        confidence=0.85,
+    )
+    assert shape is None  # Strictly returns None; no fallback
+
+
+def test_route_shapes_strict_policy_a(tax: Taxonomy):
+    """Regression Test 6: tax.route_shapes requires both box and mask for Policy A instances."""
+    # When both box and mask are present: emits both
+    assert tax.route_shapes("car", requested_mode="box_and_mask", has_box=True, has_mask=True) == [
+        SHAPE_RECTANGLE,
+        SHAPE_MASK,
+    ]
+    # Incomplete instance: dropped
+    assert tax.route_shapes("car", requested_mode="box_and_mask", has_box=True, has_mask=False) == []
+    assert tax.route_shapes("car", requested_mode="box_and_mask", has_box=False, has_mask=True) == []
+    # Pole is Policy A: emits both when complete, dropped when incomplete
+    assert tax.route_shapes("pole", requested_mode="box_and_mask", has_box=True, has_mask=True) == [
+        SHAPE_RECTANGLE,
+        SHAPE_MASK,
+    ]
+    assert tax.route_shapes("pole", requested_mode="box_and_mask", has_box=True, has_mask=False) == []
+
+
+def test_route_shapes_strict_policy_b(tax: Taxonomy):
+    """Regression Test 7: tax.route_shapes emits polygon + mask and never rectangle for Policy B regions."""
+    assert tax.route_shapes("road", requested_mode="box_and_mask", has_box=True, has_mask=True) == [
+        SHAPE_POLYGON,
+        SHAPE_MASK,
+    ]
+    assert tax.route_shapes("building", requested_mode="box_and_mask", has_box=False, has_mask=True) == [
+        SHAPE_POLYGON,
+        SHAPE_MASK,
+    ]
+    assert tax.route_shapes("vegetation", requested_mode="box_and_mask", has_box=True, has_mask=False) == []
+
+
+def test_route_shapes_strict_policy_c(tax: Taxonomy):
+    """Regression Test 8: tax.route_shapes emits polyline only for Policy C lanes."""
+    assert tax.route_shapes("lane/single white", requested_mode="box_and_mask", has_mask=True) == [SHAPE_POLYLINE]
+    assert tax.route_shapes("lane/crosswalk", requested_mode="box_and_mask", has_mask=True) == [SHAPE_POLYLINE]
+    assert tax.route_shapes("lane/crosswalk", requested_mode="box_and_mask", has_box=True, has_mask=False) == []
+
+
+def test_feedback_diff_paired_shape_mask_edit():
+    """Regression Test 9: Human mask edit with unchanged box produces CORRECTION_MASK_EDIT."""
+    ai_shapes = [
+        {"label": "car", "type": "rectangle", "points": [100.0, 100.0, 200.0, 200.0], "group_id": 1},
+        {"label": "car", "type": "mask", "points": [100.0, 100.0, 200.0, 200.0], "mask": [1] * 100 + [100, 100, 200, 200], "group_id": 1},
+    ]
+    # Human modified mask contour, box identical
+    human_shapes = [
+        {"label": "car", "type": "rectangle", "points": [100.0, 100.0, 200.0, 200.0], "group_id": 1},
+        {"label": "car", "type": "mask", "points": [100.0, 100.0, 150.0, 150.0], "mask": [1] * 25 + [100, 100, 150, 150], "group_id": 1},
+    ]
+    engine = CorrectionDiffEngine()
+    diffs = engine.diff(ai_shapes, human_shapes, image_width=1000, image_height=1000)
+
+    assert len(diffs) == 1
+    assert diffs[0].correction_type == CORRECTION_MASK_EDIT
+    assert diffs[0].details.get("mask_changed") is True
+    assert diffs[0].details.get("box_changed") is False
+
+
+def test_feedback_diff_paired_shape_box_move():
+    """Regression Test 10: Human box shift with unchanged mask produces CORRECTION_BOX_MOVE."""
+    ai_shapes = [
+        {"label": "car", "type": "rectangle", "points": [100.0, 100.0, 200.0, 200.0], "group_id": 1},
+        {"label": "car", "type": "mask", "points": [100.0, 100.0, 200.0, 200.0], "mask": [1] * 100 + [100, 100, 200, 200], "group_id": 1},
+    ]
+    # Human shifted box by 20px, mask unchanged
+    human_shapes = [
+        {"label": "car", "type": "rectangle", "points": [120.0, 120.0, 220.0, 220.0], "group_id": 1},
+        {"label": "car", "type": "mask", "points": [100.0, 100.0, 200.0, 200.0], "mask": [1] * 100 + [100, 100, 200, 200], "group_id": 1},
+    ]
+    engine = CorrectionDiffEngine()
+    diffs = engine.diff(ai_shapes, human_shapes, image_width=1000, image_height=1000)
+
+    assert len(diffs) == 1
+    assert diffs[0].correction_type == CORRECTION_BOX_MOVE
+    assert diffs[0].details.get("box_changed") is True
+
+
+def test_feedback_diff_paired_shape_no_change():
+    """Regression Test 11: Identical paired shapes between AI and human produce CORRECTION_NO_CHANGE."""
+    ai_shapes = [
+        {"label": "truck", "type": "rectangle", "points": [100.0, 100.0, 300.0, 300.0], "group_id": 1},
+        {"label": "truck", "type": "mask", "points": [100.0, 100.0, 300.0, 300.0], "mask": [1, 100, 100, 300, 300], "group_id": 1},
+    ]
+    human_shapes = [
+        {"label": "truck", "type": "rectangle", "points": [100.0, 100.0, 300.0, 300.0], "group_id": 1},
+        {"label": "truck", "type": "mask", "points": [100.0, 100.0, 300.0, 300.0], "mask": [1, 100, 100, 300, 300], "group_id": 1},
+    ]
+    engine = CorrectionDiffEngine()
+    diffs = engine.diff(ai_shapes, human_shapes, image_width=1000, image_height=1000)
+
+    assert len(diffs) == 1
+    assert diffs[0].correction_type == CORRECTION_NO_CHANGE
+    assert diffs[0].ai_label == "truck"
+
+
+def test_feedback_retrieval_visual_few_shot_policy_b_polygon_schema(tmp_path):
+    """Regression Test 12: Few-shot visual retrieval uses 'polygon' key for Policy B regions."""
+    crop_file = tmp_path / "crop_test_region.jpg"
+    img = Image.new("RGB", (100, 100), color=(128, 128, 128))
+    img.save(crop_file)
+
+    class MockDb:
+        def resolve_crop_path(self, p):
+            return crop_file
+
+    retriever = CorrectionRetrievalEngine(db=MockDb())
+    examples = [
+        {
+            "id": 1,
+            "crop_path": str(crop_file),
+            "correction_type": "REGION_EDIT",
+            "ai_label": "road",
+            "human_label": "road",
+            "details_json": json.dumps({
+                "crop_coords": [100.0, 100.0, 300.0, 300.0],
+                "human_poly": {"points": [100.0, 100.0, 300.0, 100.0, 300.0, 300.0, 100.0, 300.0]},
+            }),
+            "human_shape_json": json.dumps({
+                "type": "polygon",
+                "points": [100.0, 100.0, 300.0, 100.0, 300.0, 300.0, 100.0, 300.0],
+            }),
+        }
+    ]
+
+    visual = retriever._build_visual_examples(examples)
+    assert len(visual) == 1
+    out = visual[0]["expected_output"]
+    assert "regions" in out
+    assert len(out["regions"]) == 1
+    assert out["regions"][0]["label"] == "road"
+    assert "polygon" in out["regions"][0]
+    assert "mask" not in out["regions"][0]
+    assert out["objects"] == []
+    assert out["lanes"] == []
+
+
+def test_feedback_retrieval_visual_few_shot_policy_c_polyline_schema(tmp_path):
+    """Regression Test 13: Few-shot visual retrieval uses 'polyline' key for Policy C lanes."""
+    crop_file = tmp_path / "crop_test_lane.jpg"
+    img = Image.new("RGB", (100, 100), color=(128, 128, 128))
+    img.save(crop_file)
+
+    class MockDb:
+        def resolve_crop_path(self, p):
+            return crop_file
+
+    retriever = CorrectionRetrievalEngine(db=MockDb())
+    examples = [
+        {
+            "id": 2,
+            "crop_path": str(crop_file),
+            "correction_type": "LANE_EDIT",
+            "ai_label": "lane/single white",
+            "human_label": "lane/single white",
+            "details_json": json.dumps({
+                "crop_coords": [100.0, 100.0, 300.0, 300.0],
+            }),
+            "human_shape_json": json.dumps({
+                "type": "polyline",
+                "points": [100.0, 100.0, 200.0, 200.0, 300.0, 300.0],
+            }),
+        }
+    ]
+
+    visual = retriever._build_visual_examples(examples)
+    assert len(visual) == 1
+    out = visual[0]["expected_output"]
+    assert "lanes" in out
+    assert len(out["lanes"]) == 1
+    assert out["lanes"][0]["label"] == "lane/single white"
+    assert "polyline" in out["lanes"][0]
+    assert "mask" not in out["lanes"][0]
+    assert out["objects"] == []
+    assert out["regions"] == []

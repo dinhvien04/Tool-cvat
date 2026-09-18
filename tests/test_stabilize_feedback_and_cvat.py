@@ -484,12 +484,12 @@ class TestFewShotSchemaRouting:
         assert len(res.visual_examples) == 1
         out = res.visual_examples[0]["expected_output"]
 
-        # Must route exclusively to regions[] with mask, NO box_2d!
+        # Must route exclusively to regions[] with polygon per Policy B, NO box_2d!
         assert len(out["objects"]) == 0
         assert len(out["regions"]) == 1
         assert len(out["lanes"]) == 0
         assert out["regions"][0]["label"] == "road"
-        assert "mask" in out["regions"][0]
+        assert "polygon" in out["regions"][0]
         assert "box_2d" not in out["regions"][0]
 
     def test_lane_marking_routes_to_lanes_without_box_2d(self, tmp_path: Path):
@@ -532,12 +532,12 @@ class TestFewShotSchemaRouting:
         assert len(res.visual_examples) == 1
         out = res.visual_examples[0]["expected_output"]
 
-        # Must route exclusively to lanes[] with mask, NO box_2d!
+        # Must route exclusively to lanes[] with polyline per Policy C, NO box_2d!
         assert len(out["objects"]) == 0
         assert len(out["regions"]) == 0
         assert len(out["lanes"]) == 1
         assert out["lanes"][0]["label"] == "lane/single white"
-        assert "mask" in out["lanes"][0]
+        assert "polyline" in out["lanes"][0]
         assert "box_2d" not in out["lanes"][0]
 
     def test_negative_example_full_three_array_contract(self, tmp_path: Path):

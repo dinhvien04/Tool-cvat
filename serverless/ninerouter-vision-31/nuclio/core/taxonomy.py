@@ -4,7 +4,7 @@ Phase 3B Architectural Specification:
 - Validates the exact 31-label master schema partitioned into 3 strict shape policies:
     1. POLICY_BOX_MASK ("box_mask"): 14 countable foreground instances. Allowed shapes: rectangle, mask.
     2. POLICY_POLYGON_MASK ("polygon_mask"): 10 background semantic regions. Allowed shapes: polygon, mask.
-    3. POLICY_POLYLINE ("polyline"): 7 lane markings and road geometry. Allowed shapes: polyline, polygon, mask.
+    3. POLICY_POLYLINE ("polyline"): 7 lane markings and road geometry. Allowed shape: polyline only.
 - Enforces strict rules:
     - Every label belongs to exactly one policy.
     - Polygon shape is strictly removed/forbidden from instance / box_mask label permissions.
@@ -1088,62 +1088,48 @@ class Taxonomy:
     ) -> List[str]:
         """Determine which CVAT shape types should be output for an object detection.
 
+        Strictly enforces the 3 annotation policies:
+        - Policy A (14 instance labels): strictly rectangle + mask. Must receive both box
+          and mask to emit both [rectangle, mask]; otherwise dropped (returns []).
+          Pole is treated strictly under Policy A with zero legacy divergence.
+        - Policy B (10 region labels): strictly polygon + mask. Must receive contour/mask
+          (has_mask=True) to emit both [polygon, mask]. Never emits rectangle.
+        - Policy C (7 lane labels): strictly polyline only. Emits [polyline] if has_mask=True.
+          Never emits rectangle, polygon, or mask.
+
         Args:
             label: Target label name.
-            requested_mode: Requested mode ('box', 'mask', 'box_and_mask').
+            requested_mode: Requested mode (full_31 / box_and_mask).
             has_box: Whether a bounding box is available.
-            has_mask: Whether a segmentation mask/polygon is available.
+            has_mask: Whether a segmentation mask/polygon/polyline is available.
 
         Returns:
             List of CVAT shape types ('rectangle', 'mask', 'polygon', 'polyline') to produce.
         """
         if label not in self._labels:
-            return [SHAPE_RECTANGLE] if has_box else []
-
-        meta = self._labels[label]
-        shapes: List[str] = []
-
-        # Region objects (POLICY_POLYGON_MASK): strictly polygon + mask (Policy B)
-        if meta.is_polygon_mask or meta.is_region:
-            if has_mask and SHAPE_MASK in meta.allowed_shapes:
-                return [SHAPE_MASK]
-            elif has_mask and SHAPE_POLYGON in meta.allowed_shapes:
-                return [SHAPE_POLYGON]
             return []
 
-        # Lane markings (POLICY_POLYLINE): strictly polyline only (Policy C)
+        meta = self._labels[label]
+
+        # Policy A: Foreground Instances (14 classes) -> RECTANGLE + MASK
+        if meta.is_box_mask or meta.is_instance:
+            if has_box and has_mask:
+                return [SHAPE_RECTANGLE, SHAPE_MASK]
+            return []
+
+        # Policy B: Semantic Regions (10 classes) -> POLYGON + MASK (never rectangle)
+        if meta.is_polygon_mask or meta.is_region:
+            if has_mask:
+                return [SHAPE_POLYGON, SHAPE_MASK]
+            return []
+
+        # Policy C: Lane Markings & Demarcations (7 classes) -> POLYLINE ONLY
         if meta.is_polyline or meta.is_lane:
-            if has_mask and SHAPE_POLYLINE in meta.allowed_shapes:
+            if has_mask:
                 return [SHAPE_POLYLINE]
             return []
 
-        # Instance objects (POLICY_BOX_MASK): strictly rectangle + mask (Policy A)
-        if meta.is_box_mask or meta.is_instance:
-            # Special handling for pole: mask preferred
-            if meta.name == "pole":
-                if requested_mode == "box" and has_box:
-                    return [SHAPE_RECTANGLE]
-                if has_mask:
-                    if requested_mode in ("box_and_mask", "full_31") and has_box:
-                        return [SHAPE_MASK, SHAPE_RECTANGLE]
-                    return [SHAPE_MASK]
-                return [SHAPE_RECTANGLE] if has_box else []
-
-            # Standard instances
-            if requested_mode == "box":
-                if has_box and SHAPE_RECTANGLE in meta.allowed_shapes:
-                    return [SHAPE_RECTANGLE]
-            elif requested_mode == "mask":
-                if has_mask and SHAPE_MASK in meta.allowed_shapes:
-                    return [SHAPE_MASK]
-            elif requested_mode in ("box_and_mask", "full_31"):
-                if has_box and SHAPE_RECTANGLE in meta.allowed_shapes:
-                    shapes.append(SHAPE_RECTANGLE)
-                if has_mask and SHAPE_MASK in meta.allowed_shapes:
-                    shapes.append(SHAPE_MASK)
-                return shapes
-
-        return [SHAPE_RECTANGLE] if (has_box and SHAPE_RECTANGLE in meta.allowed_shapes) else []
+        return []
 
     # --------------------------------------------------------------------------
     # Prompt Builder Helpers
@@ -1206,11 +1192,11 @@ class Taxonomy:
 
         sections: List[str] = []
         if instances:
-            sections.append("Foreground Instances (Bounding Box & Segment):\n" + "\n".join(f"- {lbl}" for lbl in instances))
+            sections.append("Foreground Instances - Policy A (Rectangle + Mask):\n" + "\n".join(f"- {lbl}" for lbl in instances))
         if regions:
-            sections.append("Background Regions & Structures (Segment/Mask only):\n" + "\n".join(f"- {lbl}" for lbl in regions))
+            sections.append("Background Regions & Semantic Surfaces - Policy B (Polygon + Mask):\n" + "\n".join(f"- {lbl}" for lbl in regions))
         if lanes:
-            sections.append("Lane Markings & Road Geometry (Polyline/Polygon):\n" + "\n".join(f"- {lbl}" for lbl in lanes))
+            sections.append("Lane Markings - Policy C (Polyline Only):\n" + "\n".join(f"- {lbl}" for lbl in lanes))
 
         return "\n\n".join(sections)
 
