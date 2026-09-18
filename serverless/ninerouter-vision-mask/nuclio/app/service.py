@@ -26,12 +26,15 @@ from core.line_geometry import (
     polyline_to_cvat_polyline,
 )
 from core.taxonomy import (
+    BOX_MASK_LABELS,
     GROUP_INSTANCE,
     GROUP_LANE,
     GROUP_REGION,
     POLICY_BOX_MASK,
     POLICY_POLYGON_MASK,
     POLICY_POLYLINE,
+    POLYGON_MASK_LABELS,
+    POLYLINE_LABELS,
     Taxonomy,
     validate_cvat_output_shapes,
 )
@@ -40,8 +43,12 @@ from core.vision_contract import (
     DEFAULT_BBOX_LABELS,
     MODE_BOX,
     MODE_BOX_AND_MASK,
+    MODE_BOX_MASK,
     MODE_FULL_31,
     MODE_MASK,
+    MODE_POLYGON_MASK,
+    MODE_POLYLINE,
+    MODE_RECTANGLE_MASK,
     build_user_prompt,
 )
 
@@ -136,6 +143,14 @@ class AnnotationResult:
         """Return pure CVAT mask response shapes."""
         return [s for s in self.shapes if s.get("type") == "mask"]
 
+    def to_cvat_polygons(self) -> List[Dict[str, Any]]:
+        """Return pure CVAT polygon response shapes."""
+        return [s for s in self.shapes if s.get("type") == "polygon"]
+
+    def to_cvat_polylines(self) -> List[Dict[str, Any]]:
+        """Return pure CVAT polyline response shapes."""
+        return [s for s in self.shapes if s.get("type") == "polyline"]
+
 
 def annotate_image(
     image_source: Union[bytes, str, Path, Image.Image],
@@ -182,7 +197,7 @@ def annotate_image(
     active_mode = (output_mode or mode or MODE_BOX).strip().lower()
 
     # 1. Resolve model dynamically if not explicitly specified
-    if active_mode in (MODE_MASK, MODE_BOX_AND_MASK, MODE_FULL_31):
+    if active_mode in (MODE_MASK, MODE_BOX_AND_MASK, MODE_FULL_31, MODE_RECTANGLE_MASK, MODE_BOX_MASK, MODE_POLYGON_MASK):
         active_model = model or client.resolve_segmentation_model()
     else:
         active_model = model or client.resolve_vision_model()
@@ -190,6 +205,12 @@ def annotate_image(
     # 2. Resolve candidate labels
     if candidate_labels:
         labels = list(candidate_labels)
+    elif active_mode in (MODE_RECTANGLE_MASK, MODE_BOX_MASK):
+        labels = list(BOX_MASK_LABELS)
+    elif active_mode == MODE_POLYGON_MASK:
+        labels = list(POLYGON_MASK_LABELS)
+    elif active_mode == MODE_POLYLINE:
+        labels = list(POLYLINE_LABELS)
     elif active_mode == MODE_FULL_31:
         labels = list(ALL_31_LABELS)
     else:
@@ -255,8 +276,16 @@ def annotate_image(
 
     if f_db is not None:
         try:
+            policy_filter = None
+            if active_mode in (MODE_RECTANGLE_MASK, MODE_BOX_MASK):
+                policy_filter = POLICY_BOX_MASK
+            elif active_mode == MODE_POLYGON_MASK:
+                policy_filter = POLICY_POLYGON_MASK
+            elif active_mode == MODE_POLYLINE:
+                policy_filter = POLICY_POLYLINE
+
             retrieval_engine = CorrectionRetrievalEngine(db=f_db)
-            retrieval_res = retrieval_engine.retrieve(candidate_labels=labels)
+            retrieval_res = retrieval_engine.retrieve(candidate_labels=labels, policy=policy_filter)
             if retrieval_res.prompt_extension:
                 prompt += "\n\n" + retrieval_res.prompt_extension
             rules_injected = retrieval_res.rules
@@ -295,7 +324,11 @@ def annotate_image(
     filtered_objects: List[ParsedObject] = []
     cvat_shapes: List[Dict[str, Any]] = []
 
-    taxonomy = Taxonomy() if active_mode == MODE_FULL_31 else None
+    taxonomy = (
+        Taxonomy()
+        if active_mode in (MODE_FULL_31, MODE_RECTANGLE_MASK, MODE_BOX_MASK, MODE_POLYGON_MASK, MODE_POLYLINE)
+        else None
+    )
     inst_count = 0
     reg_count = 0
     lane_count = 0
@@ -437,8 +470,15 @@ def annotate_image(
                     f"mask_missing: Detection '{obj.label}' has missing or invalid mask; emitted rectangle only in box_and_mask mode"
                 )
 
-        elif active_mode == MODE_FULL_31:
-            policy = taxonomy.get_policy(obj.label) if taxonomy else POLICY_BOX_MASK
+        elif active_mode in (MODE_FULL_31, MODE_RECTANGLE_MASK, MODE_BOX_MASK, MODE_POLYGON_MASK, MODE_POLYLINE):
+            if active_mode in (MODE_RECTANGLE_MASK, MODE_BOX_MASK):
+                policy = POLICY_BOX_MASK
+            elif active_mode == MODE_POLYGON_MASK:
+                policy = POLICY_POLYGON_MASK
+            elif active_mode == MODE_POLYLINE:
+                policy = POLICY_POLYLINE
+            else:
+                policy = taxonomy.get_policy(obj.label) if taxonomy else POLICY_BOX_MASK
 
             # POLICY A: RECTANGLE + MASK (14 instance labels)
             # For every accepted detection, emit BOTH a rectangle and a mask sharing the exact same group_id.
@@ -646,8 +686,20 @@ def annotate_image(
                     continue
 
     # 8b. Strict Runtime Output Validation
-    if active_mode == MODE_FULL_31 and taxonomy is not None:
-        cvat_shapes, val_warnings = validate_cvat_output_shapes(cvat_shapes, taxonomy=taxonomy)
+    if (
+        active_mode in (MODE_FULL_31, MODE_RECTANGLE_MASK, MODE_BOX_MASK, MODE_POLYGON_MASK, MODE_POLYLINE)
+        and taxonomy is not None
+    ):
+        policy_filter = None
+        if active_mode in (MODE_RECTANGLE_MASK, MODE_BOX_MASK):
+            policy_filter = POLICY_BOX_MASK
+        elif active_mode == MODE_POLYGON_MASK:
+            policy_filter = POLICY_POLYGON_MASK
+        elif active_mode == MODE_POLYLINE:
+            policy_filter = POLICY_POLYLINE
+        cvat_shapes, val_warnings = validate_cvat_output_shapes(
+            cvat_shapes, taxonomy=taxonomy, policy=policy_filter
+        )
         warnings.extend(val_warnings)
 
     # 9. Store AI prediction baseline for future human correction reconciliation

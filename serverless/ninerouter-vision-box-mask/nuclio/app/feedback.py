@@ -1242,6 +1242,10 @@ class FeedbackDatabase:
             resolved_db = Path(env_db_path)
         elif env_data_dir:
             resolved_db = Path(env_data_dir) / "feedback.sqlite3"
+        elif Path("/opt/nuclio/feedback/feedback.sqlite3").exists():
+            resolved_db = Path("/opt/nuclio/feedback/feedback.sqlite3")
+        elif Path("/opt/nuclio/feedback").is_dir():
+            resolved_db = Path("/opt/nuclio/feedback/feedback.sqlite3")
         else:
             resolved_db = Path(".tool-cvat") / "feedback.sqlite3"
 
@@ -1249,6 +1253,10 @@ class FeedbackDatabase:
             resolved_examples = Path(examples_dir)
         elif env_data_dir:
             resolved_examples = Path(env_data_dir) / "examples"
+        elif Path("/opt/nuclio/feedback/examples").is_dir():
+            resolved_examples = Path("/opt/nuclio/feedback/examples")
+        elif Path("/opt/nuclio/feedback").is_dir():
+            resolved_examples = Path("/opt/nuclio/feedback") / "examples"
         else:
             resolved_examples = resolved_db.parent / "examples"
 

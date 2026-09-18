@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from app.feedback import ALL_31_LABELS
+from core.taxonomy import BOX_MASK_LABELS, POLYGON_MASK_LABELS, POLYLINE_LABELS
 
 VALID_FUNCTION_KINDS = {"detector", "interactor", "tracker", "reid"}
 VALID_CVAT_LABEL_TYPES = {"rectangle", "polygon", "polyline", "points", "mask", "skeleton", "any"}
@@ -122,8 +123,59 @@ def validate_function_yaml(yaml_path: Path) -> Tuple[bool, List[str]]:
                 f"Must be one of {sorted(VALID_CVAT_LABEL_TYPES)}"
             )
 
-    # 5. Full 31-label detector specific validation
-    if "ninerouter-vision-31" in str(yaml_path) or fn_name == "ninerouter-vision-31":
+    # 5. Policy-specific detector validations
+    if "ninerouter-rectangle-mask" in str(yaml_path) or fn_name == "ninerouter-rectangle-mask":
+        if len(label_names) != 14:
+            errors.append(
+                f"ninerouter-rectangle-mask must have exactly 14 labels, but found {len(label_names)} in {yaml_path}"
+            )
+        missing_labels = set(BOX_MASK_LABELS) - set(label_names)
+        if missing_labels:
+            errors.append(f"ninerouter-rectangle-mask is missing expected labels: {sorted(missing_labels)}")
+        extra_labels = set(label_names) - set(BOX_MASK_LABELS)
+        if extra_labels:
+            errors.append(f"ninerouter-rectangle-mask has unexpected extra labels: {sorted(extra_labels)}")
+        for item in spec_items:
+            if isinstance(item, dict) and item.get("type") != "any":
+                errors.append(
+                    f"ninerouter-rectangle-mask label '{item.get('name')}' must have type 'any' for dual-shape compatibility, got '{item.get('type')}'"
+                )
+
+    elif "ninerouter-polygon-mask" in str(yaml_path) or fn_name == "ninerouter-polygon-mask":
+        if len(label_names) != 10:
+            errors.append(
+                f"ninerouter-polygon-mask must have exactly 10 labels, but found {len(label_names)} in {yaml_path}"
+            )
+        missing_labels = set(POLYGON_MASK_LABELS) - set(label_names)
+        if missing_labels:
+            errors.append(f"ninerouter-polygon-mask is missing expected labels: {sorted(missing_labels)}")
+        extra_labels = set(label_names) - set(POLYGON_MASK_LABELS)
+        if extra_labels:
+            errors.append(f"ninerouter-polygon-mask has unexpected extra labels: {sorted(extra_labels)}")
+        for item in spec_items:
+            if isinstance(item, dict) and item.get("type") != "any":
+                errors.append(
+                    f"ninerouter-polygon-mask label '{item.get('name')}' must have type 'any' for dual-shape compatibility, got '{item.get('type')}'"
+                )
+
+    elif "ninerouter-polyline" in str(yaml_path) or fn_name == "ninerouter-polyline":
+        if len(label_names) != 7:
+            errors.append(
+                f"ninerouter-polyline must have exactly 7 labels, but found {len(label_names)} in {yaml_path}"
+            )
+        missing_labels = set(POLYLINE_LABELS) - set(label_names)
+        if missing_labels:
+            errors.append(f"ninerouter-polyline is missing expected labels: {sorted(missing_labels)}")
+        extra_labels = set(label_names) - set(POLYLINE_LABELS)
+        if extra_labels:
+            errors.append(f"ninerouter-polyline has unexpected extra labels: {sorted(extra_labels)}")
+        for item in spec_items:
+            if isinstance(item, dict) and item.get("type") != "polyline":
+                errors.append(
+                    f"ninerouter-polyline label '{item.get('name')}' must have type 'polyline', got '{item.get('type')}'"
+                )
+
+    elif "ninerouter-vision-31" in str(yaml_path) or fn_name == "ninerouter-vision-31":
         if len(label_names) != 31:
             errors.append(
                 f"ninerouter-vision-31 must have exactly 31 labels, but found {len(label_names)} in {yaml_path}"
@@ -141,6 +193,9 @@ def validate_function_yaml(yaml_path: Path) -> Tuple[bool, List[str]]:
 def validate_all_detectors() -> Dict[str, Tuple[bool, List[str]]]:
     """Validate all detector function.yaml files in serverless/."""
     targets = [
+        REPO_ROOT / "serverless" / "ninerouter-rectangle-mask" / "nuclio" / "function.yaml",
+        REPO_ROOT / "serverless" / "ninerouter-polygon-mask" / "nuclio" / "function.yaml",
+        REPO_ROOT / "serverless" / "ninerouter-polyline" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-vision" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-vision-mask" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-vision-box-mask" / "nuclio" / "function.yaml",

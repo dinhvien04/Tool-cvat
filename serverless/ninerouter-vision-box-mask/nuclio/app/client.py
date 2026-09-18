@@ -20,10 +20,17 @@ from core.vision_contract import (
     DEFAULT_BBOX_LABELS,
     MODE_BOX,
     MODE_BOX_AND_MASK,
+    MODE_BOX_MASK,
     MODE_FULL_31,
     MODE_MASK,
+    MODE_POLYGON_MASK,
+    MODE_POLYLINE,
+    MODE_RECTANGLE_MASK,
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_FULL_31,
+    SYSTEM_PROMPT_POLYGON_MASK,
+    SYSTEM_PROMPT_POLYLINE,
+    SYSTEM_PROMPT_RECTANGLE_MASK,
     build_full_31_prompt,
     build_openai_vision_payload,
     build_user_prompt,
@@ -647,6 +654,12 @@ class NineRouterClient:
             sys_prompt = system_prompt
         elif mode == MODE_FULL_31:
             sys_prompt = SYSTEM_PROMPT_FULL_31
+        elif mode in (MODE_RECTANGLE_MASK, MODE_BOX_MASK):
+            sys_prompt = SYSTEM_PROMPT_RECTANGLE_MASK
+        elif mode == MODE_POLYGON_MASK:
+            sys_prompt = SYSTEM_PROMPT_POLYGON_MASK
+        elif mode == MODE_POLYLINE:
+            sys_prompt = SYSTEM_PROMPT_POLYLINE
         else:
             sys_prompt = SYSTEM_PROMPT
         if prompt is not None:

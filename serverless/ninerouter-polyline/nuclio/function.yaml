@@ -1,0 +1,70 @@
+metadata:
+  name: ninerouter-polyline
+  namespace: cvat
+  annotations:
+    name: 9Router Polyline
+    type: detector
+    spec: |
+      [
+        { "id": 1, "name": "lane/crosswalk", "type": "polyline" },
+        { "id": 2, "name": "lane/double white", "type": "polyline" },
+        { "id": 3, "name": "lane/double yellow", "type": "polyline" },
+        { "id": 4, "name": "lane/road curb", "type": "polyline" },
+        { "id": 5, "name": "lane/single other", "type": "polyline" },
+        { "id": 6, "name": "lane/single white", "type": "polyline" },
+        { "id": 7, "name": "lane/single yellow", "type": "polyline" }
+      ]
+
+spec:
+  description: 9Router Polyline Detector (7 Lane Demarcations & Crosswalks via local 9Router)
+  runtime: 'python:3.11'
+  handler: main:handler
+  eventTimeout: 180s
+
+  env:
+    - name: NINEROUTER_URL
+      value: 'http://host.docker.internal:20128'
+    - name: VISION_MODEL
+      value: ''
+    - name: DETECTION_MODE
+      value: 'polyline'
+    - name: NINEROUTER_TIMEOUT
+      value: '120.0'
+    - name: MAX_IMAGE_SIZE
+      value: '1600'
+    - name: FEEDBACK_DATA_DIR
+      value: '/opt/nuclio/feedback'
+    - name: FEEDBACK_DB_PATH
+      value: '/opt/nuclio/feedback/feedback.sqlite3'
+
+  volumes:
+    - volume:
+        name: feedback-data
+        hostPath:
+          path: 'D:/tool-cvat/.tool-cvat'
+      volumeMount:
+        name: feedback-data
+        mountPath: '/opt/nuclio/feedback'
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 2
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432 # 32MB
+
+  build:
+    image: cvat.custom.ninerouter.polyline
+    baseImage: python:3.11-slim
+    directives:
+      preCopy:
+        - kind: RUN
+          value: pip install --no-cache-dir requests pillow pyyaml
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume

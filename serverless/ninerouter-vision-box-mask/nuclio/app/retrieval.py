@@ -32,9 +32,39 @@ from app.feedback import (
     CORRECTION_RELABEL,
     FeedbackDatabase,
 )
-from core.taxonomy import GROUP_INSTANCE, GROUP_LANE, GROUP_REGION, Taxonomy
+from core.taxonomy import (
+    BOX_MASK_LABELS,
+    GROUP_INSTANCE,
+    GROUP_LANE,
+    GROUP_REGION,
+    POLYGON_MASK_LABELS,
+    POLYLINE_LABELS,
+    POLICY_BOX_MASK,
+    POLICY_POLYGON_MASK,
+    POLICY_POLYLINE,
+    Taxonomy,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_policy_from_labels(
+    candidate_labels: Optional[Sequence[str]] = None,
+    policy: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve and normalize explicit policy string ('box_mask', 'polygon_mask', 'polyline', or None for full_31)."""
+    if policy:
+        p = policy.strip().lower()
+        if p in (POLICY_BOX_MASK, "rectangle_mask", "box_mask", "instance", "detector_a"):
+            return POLICY_BOX_MASK
+        if p in (POLICY_POLYGON_MASK, "polygon_mask", "region", "detector_b"):
+            return POLICY_POLYGON_MASK
+        if p in (POLICY_POLYLINE, "polyline", "lane", "detector_c"):
+            return POLICY_POLYLINE
+        if p in ("full_31", "all", "none"):
+            return None
+
+    return None
 
 
 @dataclass
@@ -69,11 +99,14 @@ class CorrectionRetrievalEngine:
     def retrieve(
         self,
         candidate_labels: Optional[Sequence[str]] = None,
+        policy: Optional[str] = None,
     ) -> RetrievalResult:
         """Retrieve active derived rules and relevant few-shot correction examples.
 
         Args:
             candidate_labels: List of active class labels for the current detection task.
+            policy: Optional policy ('box_mask', 'polygon_mask', 'polyline', 'full_31').
+                If omitted, automatically inferred from candidate_labels.
 
         Returns:
             RetrievalResult containing rule strings, example records, visual examples, and formatted prompt text.
@@ -81,16 +114,30 @@ class CorrectionRetrievalEngine:
         if not self.db.is_enabled():
             return RetrievalResult()
 
+        canon_policy = resolve_policy_from_labels(candidate_labels=candidate_labels, policy=policy)
+
+        # Restrict candidate labels to the active policy if active
+        effective_labels = candidate_labels
+        if canon_policy == POLICY_BOX_MASK:
+            allowed = set(BOX_MASK_LABELS)
+            effective_labels = [l for l in candidate_labels if l in allowed] if candidate_labels else list(BOX_MASK_LABELS)
+        elif canon_policy == POLICY_POLYGON_MASK:
+            allowed = set(POLYGON_MASK_LABELS)
+            effective_labels = [l for l in candidate_labels if l in allowed] if candidate_labels else list(POLYGON_MASK_LABELS)
+        elif canon_policy == POLICY_POLYLINE:
+            allowed = set(POLYLINE_LABELS)
+            effective_labels = [l for l in candidate_labels if l in allowed] if candidate_labels else list(POLYLINE_LABELS)
+
         rules: List[str] = []
         if self.use_rules:
-            rules = self.db.get_active_rules(labels=candidate_labels)
+            rules = self.db.get_active_rules(labels=effective_labels)
 
         examples: List[Dict[str, Any]] = []
         visual_examples: List[Dict[str, Any]] = []
         if self.use_examples:
-            examples = self._select_few_shot_examples(candidate_labels=candidate_labels)
+            examples = self._select_few_shot_examples(candidate_labels=effective_labels, policy=canon_policy)
             if self.use_visual_examples:
-                visual_examples = self._build_visual_examples(examples)
+                visual_examples = self._build_visual_examples(examples, policy=canon_policy)
 
         prompt_ext = self._format_prompt_extension(rules, examples)
 
@@ -104,8 +151,9 @@ class CorrectionRetrievalEngine:
     def _select_few_shot_examples(
         self,
         candidate_labels: Optional[Sequence[str]] = None,
+        policy: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Select top relevant few-shot correction records matching candidate labels."""
+        """Select top relevant few-shot correction records matching candidate labels and policy."""
         # Query recent corrections prioritizing RELABEL, ADD_MISSING, DELETE_FALSE_POSITIVE
         conn = self.db._get_connection()
         try:
@@ -123,6 +171,21 @@ class CorrectionRetrievalEngine:
                 query += f" AND (ai_label IN ({placeholders}) OR human_label IN ({placeholders}))"
                 params.extend(list(candidate_labels) + list(candidate_labels))
 
+            # Zero cross-policy leakage: exclude records involving classes from other policies
+            foreign_labels: List[str] = []
+            if policy == POLICY_BOX_MASK:
+                foreign_labels = list(POLYGON_MASK_LABELS) + list(POLYLINE_LABELS)
+            elif policy == POLICY_POLYGON_MASK:
+                foreign_labels = list(BOX_MASK_LABELS) + list(POLYLINE_LABELS)
+            elif policy == POLICY_POLYLINE:
+                foreign_labels = list(BOX_MASK_LABELS) + list(POLYGON_MASK_LABELS)
+
+            if foreign_labels:
+                f_ph = ",".join("?" for _ in foreign_labels)
+                query += f" AND (ai_label IS NULL OR ai_label NOT IN ({f_ph}))"
+                query += f" AND (human_label IS NULL OR human_label NOT IN ({f_ph}))"
+                params.extend(foreign_labels + foreign_labels)
+
             # Prioritize RELABEL first, then ADD_MISSING, then DELETE_FALSE_POSITIVE
             query += """
                 ORDER BY
@@ -135,19 +198,27 @@ class CorrectionRetrievalEngine:
                     id DESC
                 LIMIT ?
             """
-            params.append(self.max_examples_per_pass)
+            params.append(self.max_examples_per_pass * 2 if policy else self.max_examples_per_pass)
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
+            taxonomy = Taxonomy()
             selected = []
             for r in rows:
+                ai_lbl = r["ai_label"]
+                human_lbl = r["human_label"]
+                tgt_lbl = human_lbl or ai_lbl
+                if policy and tgt_lbl:
+                    if taxonomy.get_policy(tgt_lbl) != policy:
+                        continue
+
                 item = {
                     "id": r["id"],
                     "image_hash": r["image_hash"],
                     "correction_type": r["correction_type"],
-                    "ai_label": r["ai_label"],
-                    "human_label": r["human_label"],
+                    "ai_label": ai_lbl,
+                    "human_label": human_lbl,
                     "ai_shape_json": r["ai_shape_json"],
                     "human_shape_json": r["human_shape_json"],
                     "iou": r["iou"],
@@ -156,6 +227,8 @@ class CorrectionRetrievalEngine:
                     "created_at": r["created_at"],
                 }
                 selected.append(item)
+                if len(selected) >= self.max_examples_per_pass:
+                    break
             return selected
         finally:
             conn.close()
@@ -163,11 +236,17 @@ class CorrectionRetrievalEngine:
     def _build_visual_examples(
         self,
         examples: List[Dict[str, Any]],
+        policy: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Build real multimodal few-shot visual examples with crop data URLs and expected annotations.
 
         Converts human-corrected geometry and labels into structured ground-truth annotations
         matching the 9Router vision contract. Safely skips unreadable, corrupt, or missing crops.
+        Enforces policy-aware expected_output schemas (Section 14):
+        - Policy A: single-key {"objects": [{"label": ..., "box_2d": ..., "mask": ...}]}
+        - Policy B: single-key {"regions": [{"label": ..., "polygon": ...}]}
+        - Policy C: single-key {"lanes": [{"label": ..., "polyline": ...}]}
+        - Full 31: multi-key {"objects": [...], "regions": [...], "lanes": [...]}
         """
         visual_examples: List[Dict[str, Any]] = []
 
@@ -226,13 +305,28 @@ class CorrectionRetrievalEngine:
             deleted_group = taxonomy.get_group(deleted_label)
             target_group = taxonomy.get_group(target_label)
 
+            # Strict policy isolation: skip examples from other policies
+            if policy == POLICY_BOX_MASK and target_group != GROUP_INSTANCE:
+                continue
+            if policy == POLICY_POLYGON_MASK and target_group != GROUP_REGION:
+                continue
+            if policy == POLICY_POLYLINE and target_group != GROUP_LANE:
+                continue
+
             if ctype == CORRECTION_DELETE_FALSE_POSITIVE:
-                # Reviewer deleted false positive; emit the full 3-array contract with empty arrays
-                expected_output = {
-                    "objects": [],
-                    "regions": [],
-                    "lanes": [],
-                }
+                # Reviewer deleted false positive; emit negative example matching target policy schema
+                if policy == POLICY_BOX_MASK:
+                    expected_output = {"objects": []}
+                elif policy == POLICY_POLYGON_MASK:
+                    expected_output = {"regions": []}
+                elif policy == POLICY_POLYLINE:
+                    expected_output = {"lanes": []}
+                else:
+                    expected_output = {
+                        "objects": [],
+                        "regions": [],
+                        "lanes": [],
+                    }
                 if deleted_group == GROUP_REGION:
                     description = f"False positive semantic region '{deleted_label}' deleted by human reviewer (negative example)"
                 elif deleted_group == GROUP_LANE:
@@ -249,6 +343,9 @@ class CorrectionRetrievalEngine:
 
                 # Route into objects[], regions[], or lanes[] according to 31-label taxonomy
                 if target_group == GROUP_REGION or "area/" in target_label:
+                    if policy in (POLICY_BOX_MASK, POLICY_POLYLINE):
+                        continue
+
                     # Semantic Region: POLICY B -> "polygon" key (NEVER mask-only, NEVER box)
                     poly_pts = None
                     if details.get("human_poly") and details["human_poly"].get("points"):
@@ -271,17 +368,23 @@ class CorrectionRetrievalEngine:
                     if len(norm_poly) < 3:
                         continue
 
-                    expected_output = {
-                        "objects": [],
-                        "regions": [
-                            {
-                                "label": target_label,
-                                "polygon": norm_poly,
-                            }
-                        ],
-                        "lanes": [],
+                    reg_item = {
+                        "label": target_label,
+                        "polygon": norm_poly,
                     }
+                    if policy == POLICY_POLYGON_MASK:
+                        expected_output = {"regions": [reg_item]}
+                    else:
+                        expected_output = {
+                            "objects": [],
+                            "regions": [reg_item],
+                            "lanes": [],
+                        }
+
                 elif target_group == GROUP_LANE or target_label.startswith("lane/"):
+                    if policy in (POLICY_BOX_MASK, POLICY_POLYGON_MASK):
+                        continue
+
                     # Lane Marking: POLICY C -> "polyline" key (NEVER mask, NEVER polygon)
                     line_pts = None
                     if details.get("human_polyline") and details["human_polyline"].get("points"):
@@ -306,17 +409,23 @@ class CorrectionRetrievalEngine:
                     if len(norm_line) < 2:
                         continue
 
-                    expected_output = {
-                        "objects": [],
-                        "regions": [],
-                        "lanes": [
-                            {
-                                "label": target_label,
-                                "polyline": norm_line,
-                            }
-                        ],
+                    lane_item = {
+                        "label": target_label,
+                        "polyline": norm_line,
                     }
+                    if policy == POLICY_POLYLINE:
+                        expected_output = {"lanes": [lane_item]}
+                    else:
+                        expected_output = {
+                            "objects": [],
+                            "regions": [],
+                            "lanes": [lane_item],
+                        }
+
                 else:
+                    if policy in (POLICY_POLYGON_MASK, POLICY_POLYLINE):
+                        continue
+
                     # Instance Object: POLICY A -> BOTH box_2d AND mask (NEVER box-only, NEVER fabricate)
                     rect_pts = None
                     if details.get("human_rect") and details["human_rect"].get("points"):
@@ -372,11 +481,14 @@ class CorrectionRetrievalEngine:
                         "mask": norm_mask,
                     }
 
-                    expected_output = {
-                        "objects": [inst_obj],
-                        "regions": [],
-                        "lanes": [],
-                    }
+                    if policy == POLICY_BOX_MASK:
+                        expected_output = {"objects": [inst_obj]}
+                    else:
+                        expected_output = {
+                            "objects": [inst_obj],
+                            "regions": [],
+                            "lanes": [],
+                        }
 
                 if ctype == CORRECTION_RELABEL:
                     description = f"Relabeled: '{ai_lbl}' corrected to human label '{human_lbl}'"

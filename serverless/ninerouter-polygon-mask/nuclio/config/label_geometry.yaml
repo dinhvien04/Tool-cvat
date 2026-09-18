@@ -1,0 +1,465 @@
+# 31-Label Geometry and Shape Routing Configuration
+# Phase 3B - Master Taxonomy Schema
+#
+# Rules:
+# - All 31 labels must exist exactly once.
+# - DO NOT rename any label.
+# - DO NOT merge ambiguous labels (pedestrian != person, traffic light != traffic_light, traffic sign != traffic_sign).
+# - Every label belongs to exactly one policy:
+#     - POLICY_BOX_MASK: 14 labels (rectangle, mask) - polygon removed!
+#     - POLICY_POLYGON_MASK: 10 labels (polygon, mask)
+#     - POLICY_POLYLINE: 7 labels (polyline only)
+
+version: "1.1.0"
+
+groups:
+  instance:
+    description: "Countable foreground objects with distinct instances, rigid/semi-rigid extents, and clear boundaries."
+    policy: "box_mask"
+    default_shapes:
+      - "rectangle"
+      - "mask"
+    default_preferred_shape: "rectangle"
+
+  region:
+    description: "Amorphous background surfaces, large infrastructure, and environmental stuff without discrete countable instances."
+    policy: "polygon_mask"
+    default_shapes:
+      - "mask"
+      - "polygon"
+    default_preferred_shape: "mask"
+
+  lane:
+    description: "Linear road boundary demarcations, dividing lines, curbs, and roadway pedestrian surface crossings."
+    policy: "polyline"
+    default_shapes:
+      - "polyline"
+    default_preferred_shape: "polyline"
+
+labels:
+  # --------------------------------------------------------------------------
+  # Instance Objects (14 labels) -> POLICY_BOX_MASK
+  # --------------------------------------------------------------------------
+  pedestrian:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Moving or standing human on foot in traffic/street scene (autonomous driving / BDD100K ontology)."
+
+  rider:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Human actively mounted on a bicycle, motorcycle, horse, or mobility device."
+
+  car:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Standard passenger automobile, sedan, hatchback, SUV, coupe, minivan, or taxi."
+
+  truck:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Heavy or light freight transport vehicle, pickup truck, cargo truck, semi-trailer."
+
+  bus:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Public transit bus, tour coach, school bus designed for passenger mass transit."
+
+  train:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Rail transit vehicle, locomotive, train carriage, tram, light-rail car on tracks."
+
+  motorcycle:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Motorized two-wheel or three-wheel vehicle (scooter, moped, motorbike)."
+
+  bicycle:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Non-motorized pedal cycle, road bike, mountain bike (vehicle itself, excluding rider)."
+
+  traffic light:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Traffic control signal housing structure with signaling lamps (space-separated label)."
+
+  traffic sign:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Road traffic sign face or board providing regulatory or warning info (space-separated label)."
+
+  pole:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "mask"
+    special_handling:
+      thin_object: true
+      optional_rectangle: true
+      supports_bounding_box: true
+      supports_mask: true
+      notes: "Vertical utility pole, lamp post, or traffic sign post. Slender aspect ratio makes mask preferred; rectangle required under paired Policy A."
+
+  person:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "General human being regardless of activity or pose (generic CV / COCO ontology)."
+
+  traffic_light:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Traffic control signal housing structure with signaling lamps (underscore-separated label)."
+
+  traffic_sign:
+    group: "instance"
+    policy: "box_mask"
+    allowed_shapes:
+      - "rectangle"
+      - "mask"
+    preferred_shape: "rectangle"
+    special_handling:
+      supports_bounding_box: true
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Road traffic sign face or board providing regulatory or warning info (underscore-separated label)."
+
+  # --------------------------------------------------------------------------
+  # Region / Semantic Stuff (10 labels) -> POLICY_POLYGON_MASK
+  # --------------------------------------------------------------------------
+  area/alternative:
+    group: "region"
+    policy: "polygon_mask"
+    allowed_shapes:
+      - "mask"
+      - "polygon"
+    preferred_shape: "mask"
+    special_handling:
+      supports_bounding_box: false
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Alternative drivable roadway space, adjacent/opposing lanes, or auxiliary maneuvering areas."
+
+  area/drivable:
+    group: "region"
+    policy: "polygon_mask"
+    allowed_shapes:
+      - "mask"
+      - "polygon"
+    preferred_shape: "mask"
+    special_handling:
+      supports_bounding_box: false
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Directly drivable lane surface in the ego-vehicle's active travel corridor."
+
+  road:
+    group: "region"
+    policy: "polygon_mask"
+    allowed_shapes:
+      - "mask"
+      - "polygon"
+    preferred_shape: "mask"
+    special_handling:
+      supports_bounding_box: false
+      supports_mask: true
+      is_thin_structure: false
+      notes: "General paved road surface, asphalt, street surface excluding curbs and sidewalks."
+
+  sidewalk:
+    group: "region"
+    policy: "polygon_mask"
+    allowed_shapes:
+      - "mask"
+      - "polygon"
+    preferred_shape: "mask"
+    special_handling:
+      supports_bounding_box: false
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Paved pedestrian walkway, footpath, or pavement bordering a roadway."
+
+  building:
+    group: "region"
+    policy: "polygon_mask"
+    allowed_shapes:
+      - "mask"
+      - "polygon"
+    preferred_shape: "mask"
+    special_handling:
+      supports_bounding_box: false
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Permanent architectural structure, building facades, residential or commercial buildings."
+
+  wall:
+    group: "region"
+    policy: "polygon_mask"
+    allowed_shapes:
+      - "mask"
+      - "polygon"
+    preferred_shape: "mask"
+    special_handling:
+      supports_bounding_box: false
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Freestanding brick, masonry, or concrete perimeter wall boundary."
+
+  fence:
+    group: "region"
+    policy: "polygon_mask"
+    allowed_shapes:
+      - "mask"
+      - "polygon"
+    preferred_shape: "mask"
+    special_handling:
+      supports_bounding_box: false
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Enclosure barrier made of wire mesh, wooden palisades, metal railings, or chain-link."
+
+  vegetation:
+    group: "region"
+    policy: "polygon_mask"
+    allowed_shapes:
+      - "mask"
+      - "polygon"
+    preferred_shape: "mask"
+    special_handling:
+      supports_bounding_box: false
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Trees, shrubs, hedges, grass, foliage, vertical or ground plant cover."
+
+  terrain:
+    group: "region"
+    policy: "polygon_mask"
+    allowed_shapes:
+      - "mask"
+      - "polygon"
+    preferred_shape: "mask"
+    special_handling:
+      supports_bounding_box: false
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Natural unpaved ground, dirt paths, sand, soil, rocks, gravel surface."
+
+  sky:
+    group: "region"
+    policy: "polygon_mask"
+    allowed_shapes:
+      - "mask"
+      - "polygon"
+    preferred_shape: "mask"
+    special_handling:
+      supports_bounding_box: false
+      supports_mask: true
+      is_thin_structure: false
+      notes: "Open celestial sky hemisphere, clouds, horizon background."
+
+  # --------------------------------------------------------------------------
+  # Lane Demarcations and Markings (7 labels) -> POLICY_POLYLINE
+  # --------------------------------------------------------------------------
+  lane/crosswalk:
+    group: "lane"
+    policy: "polyline"
+    allowed_shapes:
+      - "polyline"
+    preferred_shape: "polyline"
+    special_handling:
+      area_like: false
+      thin_line: true
+      supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
+      supports_polyline: true
+      notes: "Pedestrian crosswalk (zebra crossing stripes) emitted strictly as polyline traversal centerline per Policy C."
+
+  lane/double white:
+    group: "lane"
+    policy: "polyline"
+    allowed_shapes:
+      - "polyline"
+    preferred_shape: "polyline"
+    special_handling:
+      area_like: false
+      thin_line: true
+      supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
+      supports_polyline: true
+      notes: "Linear lane boundary marking: double solid white divider lines."
+
+  lane/double yellow:
+    group: "lane"
+    policy: "polyline"
+    allowed_shapes:
+      - "polyline"
+    preferred_shape: "polyline"
+    special_handling:
+      area_like: false
+      thin_line: true
+      supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
+      supports_polyline: true
+      notes: "Linear lane boundary marking: double solid yellow opposing traffic divider."
+
+  lane/road curb:
+    group: "lane"
+    policy: "polyline"
+    allowed_shapes:
+      - "polyline"
+    preferred_shape: "polyline"
+    special_handling:
+      area_like: false
+      thin_line: true
+      supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
+      supports_polyline: true
+      notes: "Linear edge/boundary: physical raised curb interface separating road from sidewalk or shoulder."
+
+  lane/single other:
+    group: "lane"
+    policy: "polyline"
+    allowed_shapes:
+      - "polyline"
+    preferred_shape: "polyline"
+    special_handling:
+      area_like: false
+      thin_line: true
+      supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
+      supports_polyline: true
+      notes: "Linear lane marking: single dashed, dotted, diagonal, or non-standard pavement line."
+
+  lane/single white:
+    group: "lane"
+    policy: "polyline"
+    allowed_shapes:
+      - "polyline"
+    preferred_shape: "polyline"
+    special_handling:
+      area_like: false
+      thin_line: true
+      supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
+      supports_polyline: true
+      notes: "Linear lane marking: single white longitudinal pavement line dividing lanes in same travel direction."
+
+  lane/single yellow:
+    group: "lane"
+    policy: "polyline"
+    allowed_shapes:
+      - "polyline"
+    preferred_shape: "polyline"
+    special_handling:
+      area_like: false
+      thin_line: true
+      supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
+      supports_polyline: true
+      notes: "Linear lane marking: single yellow longitudinal line demarcating lane boundary or shoulder."

@@ -1260,11 +1260,19 @@ def is_polyline(label: str) -> bool:
 def validate_cvat_output_shapes(
     shapes: List[Dict[str, Any]],
     taxonomy: Optional[Taxonomy] = None,
+    policy: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Strict runtime output validator for CVAT shapes before returning to CVAT.
 
     Guarantees:
-    - In 31-label mode:
+    - If policy is specified:
+      * POLICY_BOX_MASK / Detector A: strictly 14 instance classes. Each semantic object
+        has exactly 1 rectangle and 1 mask sharing group_id. Polygons and polylines are dropped.
+      * POLICY_POLYGON_MASK / Detector B: strictly 10 region classes. Each semantic region
+        has exactly 1 polygon and 1 mask sharing group_id. Rectangles and polylines are dropped.
+      * POLICY_POLYLINE / Detector C: strictly 7 lane classes. Each lane has exactly 1 polyline.
+        Rectangles, polygons, and masks are dropped.
+    - If policy is None (Full 31-label mode):
       * Policy A (14 instance labels): Every accepted object has BOTH a rectangle and mask
         sharing the exact same integer group_id. Single shapes (box-only or mask-only) are rejected.
       * Policy B (10 region labels): Every accepted region has BOTH a polygon and mask
@@ -1275,10 +1283,19 @@ def validate_cvat_output_shapes(
     Args:
         shapes: Candidate list of CVAT shape dictionaries.
         taxonomy: Optional Taxonomy instance. If omitted, uses global taxonomy.
+        policy: Optional policy string ('box_mask', 'polygon_mask', 'polyline') to enforce
+            detector-specific constraints.
 
     Returns:
         Tuple of (validated_shapes, validation_warnings).
     """
+    if policy in (POLICY_BOX_MASK, "detector_a", "instance"):
+        return validate_detector_a_shapes(shapes, taxonomy=taxonomy)
+    if policy in (POLICY_POLYGON_MASK, "detector_b", "region"):
+        return validate_detector_b_shapes(shapes, taxonomy=taxonomy)
+    if policy in (POLICY_POLYLINE, "detector_c", "lane"):
+        return validate_detector_c_shapes(shapes, taxonomy=taxonomy)
+
     tax = taxonomy or get_taxonomy()
     warnings: List[str] = []
 
@@ -1438,6 +1455,311 @@ def validate_cvat_output_shapes(
     ]
 
     return validated_shapes, warnings
+
+
+def validate_detector_a_shapes(
+    shapes: List[Dict[str, Any]],
+    taxonomy: Optional[Taxonomy] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Strict runtime output validator for Detector A (Rectangle + Mask, Policy A).
+
+    Constraints:
+    - Allowed labels: Strictly 14 Policy A instance labels.
+    - Each semantic object MUST have exactly 1 rectangle and 1 mask sharing the same integer group_id > 0.
+    - Polygon and polyline shapes are strictly dropped.
+    - Incomplete objects (rectangle-only or mask-only) are strictly dropped.
+    """
+    tax = taxonomy or get_taxonomy()
+    warnings: List[str] = []
+
+    if not isinstance(shapes, list):
+        return [], ["Invalid shapes container: expected list"]
+
+    allowed_labels = set(tax.get_box_mask_labels())
+
+    # Step 1: Basic structural validation and policy filtering
+    structurally_valid: List[Tuple[int, Dict[str, Any]]] = []
+    for idx, shape in enumerate(shapes):
+        if not isinstance(shape, dict):
+            warnings.append(f"shape_schema_error: Shape at index {idx} is not a dictionary; dropped")
+            continue
+
+        label = shape.get("label")
+        shape_type = shape.get("type")
+
+        if not isinstance(label, str) or not label.strip():
+            warnings.append(f"shape_schema_error: Shape at index {idx} missing valid label; dropped")
+            continue
+
+        label = label.strip()
+        if label not in allowed_labels:
+            warnings.append(
+                f"detector_a_policy_mismatch: Label {label!r} not in Policy A (14 instance classes); dropped"
+            )
+            continue
+
+        # Reject prohibited shape types for Detector A
+        if shape_type in (SHAPE_POLYGON, SHAPE_POLYLINE):
+            warnings.append(
+                f"detector_a_forbidden_shape: Shape type {shape_type!r} is forbidden in Detector A; dropped"
+            )
+            continue
+
+        if shape_type not in (SHAPE_RECTANGLE, SHAPE_MASK):
+            warnings.append(
+                f"invalid_shape_type: Unknown shape type {shape_type!r} for {label}; dropped"
+            )
+            continue
+
+        if shape_type == SHAPE_RECTANGLE:
+            pts = shape.get("points")
+            if not isinstance(pts, (list, tuple)) or len(pts) != 4:
+                warnings.append(f"invalid_box_points: Rectangle for {label} must have 4 coordinates; dropped")
+                continue
+            if float(pts[2]) <= float(pts[0]) or float(pts[3]) <= float(pts[1]):
+                warnings.append(f"invalid_box_dims: Rectangle for {label} has non-positive area; dropped")
+                continue
+
+        elif shape_type == SHAPE_MASK:
+            mask_data = shape.get("mask")
+            pts = shape.get("points")
+            if not isinstance(mask_data, (list, tuple)) or len(mask_data) == 0:
+                warnings.append(f"invalid_mask_data: Mask for {label} missing raster mask array; dropped")
+                continue
+            if pts is not None and (not isinstance(pts, (list, tuple)) or len(pts) < 4):
+                warnings.append(f"invalid_mask_points: Mask for {label} has invalid points array; dropped")
+                continue
+
+        structurally_valid.append((idx, shape))
+
+    # Step 2: Policy A group pairing (exactly 1 rectangle and 1 mask per group_id)
+    groups: Dict[Tuple[Any, str], List[Tuple[int, Dict[str, Any]]]] = {}
+    for orig_idx, shape in structurally_valid:
+        lbl = shape["label"]
+        stype = shape["type"]
+        gid = shape.get("group_id")
+
+        if gid is None:
+            warnings.append(f"detector_a_violation: Instance shape '{lbl}' ({stype}) missing group_id; dropped")
+            continue
+        if isinstance(gid, bool) or not isinstance(gid, int) or gid <= 0:
+            warnings.append(f"detector_a_violation: Instance shape '{lbl}' ({stype}) invalid group_id ({gid!r}); dropped")
+            continue
+
+        key = (gid, lbl)
+        groups.setdefault(key, []).append((orig_idx, shape))
+
+    # Ensure distinct instances never share the same group_id
+    from collections import Counter
+    gid_counts = Counter(gid for gid, _ in groups.keys())
+    approved_indices: set = set()
+
+    for (gid, lbl), group_entries in groups.items():
+        if gid_counts[gid] > 1:
+            warnings.append(
+                f"detector_a_violation: Group ID {gid} is shared across distinct instances; annotation dropped"
+            )
+            continue
+        types = [s["type"] for _, s in group_entries]
+        has_rect = types.count(SHAPE_RECTANGLE) == 1
+        has_mask = types.count(SHAPE_MASK) == 1
+        if has_rect and has_mask and len(group_entries) == 2:
+            for o_idx, _ in group_entries:
+                approved_indices.add(o_idx)
+        else:
+            warnings.append(
+                f"detector_a_violation: Instance group {gid} for '{lbl}' must have exactly 1 rectangle and 1 mask. Found {types}; annotation dropped"
+            )
+
+    validated_shapes = [s for o_idx, s in structurally_valid if o_idx in approved_indices]
+    return validated_shapes, warnings
+
+
+def validate_detector_b_shapes(
+    shapes: List[Dict[str, Any]],
+    taxonomy: Optional[Taxonomy] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Strict runtime output validator for Detector B (Polygon + Mask, Policy B).
+
+    Constraints:
+    - Allowed labels: Strictly 10 Policy B semantic region classes.
+    - Each semantic region MUST have exactly 1 polygon and 1 mask sharing the same integer group_id > 0.
+    - Rectangle and polyline shapes are strictly dropped.
+    - Incomplete regions (polygon-only or mask-only) are strictly dropped.
+    """
+    tax = taxonomy or get_taxonomy()
+    warnings: List[str] = []
+
+    if not isinstance(shapes, list):
+        return [], ["Invalid shapes container: expected list"]
+
+    allowed_labels = set(tax.get_polygon_mask_labels())
+
+    # Step 1: Basic structural validation and policy filtering
+    structurally_valid: List[Tuple[int, Dict[str, Any]]] = []
+    for idx, shape in enumerate(shapes):
+        if not isinstance(shape, dict):
+            warnings.append(f"shape_schema_error: Shape at index {idx} is not a dictionary; dropped")
+            continue
+
+        label = shape.get("label")
+        shape_type = shape.get("type")
+
+        if not isinstance(label, str) or not label.strip():
+            warnings.append(f"shape_schema_error: Shape at index {idx} missing valid label; dropped")
+            continue
+
+        label = label.strip()
+        if label not in allowed_labels:
+            warnings.append(
+                f"detector_b_policy_mismatch: Label {label!r} not in Policy B (10 region classes); dropped"
+            )
+            continue
+
+        # Reject prohibited shape types for Detector B
+        if shape_type in (SHAPE_RECTANGLE, SHAPE_POLYLINE):
+            warnings.append(
+                f"detector_b_forbidden_shape: Shape type {shape_type!r} is forbidden in Detector B; dropped"
+            )
+            continue
+
+        if shape_type not in (SHAPE_POLYGON, SHAPE_MASK):
+            warnings.append(
+                f"invalid_shape_type: Unknown shape type {shape_type!r} for {label}; dropped"
+            )
+            continue
+
+        if shape_type == SHAPE_POLYGON:
+            pts = shape.get("points")
+            if not isinstance(pts, (list, tuple)) or len(pts) < 6 or len(pts) % 2 != 0:
+                warnings.append(f"invalid_polygon_points: Polygon for {label} must have >= 3 points (6 coords); dropped")
+                continue
+
+        elif shape_type == SHAPE_MASK:
+            mask_data = shape.get("mask")
+            pts = shape.get("points")
+            if not isinstance(mask_data, (list, tuple)) or len(mask_data) == 0:
+                warnings.append(f"invalid_mask_data: Mask for {label} missing raster mask array; dropped")
+                continue
+            if pts is not None and (not isinstance(pts, (list, tuple)) or len(pts) < 4):
+                warnings.append(f"invalid_mask_points: Mask for {label} has invalid points array; dropped")
+                continue
+
+        structurally_valid.append((idx, shape))
+
+    # Step 2: Policy B group pairing (exactly 1 polygon and 1 mask per group_id)
+    groups: Dict[Tuple[Any, str], List[Tuple[int, Dict[str, Any]]]] = {}
+    for orig_idx, shape in structurally_valid:
+        lbl = shape["label"]
+        stype = shape["type"]
+        gid = shape.get("group_id")
+
+        if gid is None:
+            warnings.append(f"detector_b_violation: Region shape '{lbl}' ({stype}) missing group_id; dropped")
+            continue
+        if isinstance(gid, bool) or not isinstance(gid, int) or gid <= 0:
+            warnings.append(f"detector_b_violation: Region shape '{lbl}' ({stype}) invalid group_id ({gid!r}); dropped")
+            continue
+
+        key = (gid, lbl)
+        groups.setdefault(key, []).append((orig_idx, shape))
+
+    # Ensure distinct regions never share the same group_id
+    from collections import Counter
+    gid_counts = Counter(gid for gid, _ in groups.keys())
+    approved_indices: set = set()
+
+    for (gid, lbl), group_entries in groups.items():
+        if gid_counts[gid] > 1:
+            warnings.append(
+                f"detector_b_violation: Group ID {gid} is shared across distinct instances; annotation dropped"
+            )
+            continue
+        types = [s["type"] for _, s in group_entries]
+        has_poly = types.count(SHAPE_POLYGON) == 1
+        has_mask = types.count(SHAPE_MASK) == 1
+        if has_poly and has_mask and len(group_entries) == 2:
+            for o_idx, _ in group_entries:
+                approved_indices.add(o_idx)
+        else:
+            warnings.append(
+                f"detector_b_violation: Region group {gid} for '{lbl}' must have exactly 1 polygon and 1 mask. Found {types}; annotation dropped"
+            )
+
+    validated_shapes = [s for o_idx, s in structurally_valid if o_idx in approved_indices]
+    return validated_shapes, warnings
+
+
+def validate_detector_c_shapes(
+    shapes: List[Dict[str, Any]],
+    taxonomy: Optional[Taxonomy] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Strict runtime output validator for Detector C (Polyline only, Policy C).
+
+    Constraints:
+    - Allowed labels: Strictly 7 Policy C lane classes.
+    - Each lane MUST have exactly 1 polyline.
+    - Rectangle, polygon, and mask shapes are strictly dropped.
+    - Group_id is strictly removed (not used for lanes).
+    """
+    tax = taxonomy or get_taxonomy()
+    warnings: List[str] = []
+
+    if not isinstance(shapes, list):
+        return [], ["Invalid shapes container: expected list"]
+
+    allowed_labels = set(tax.get_polyline_labels())
+
+    validated_shapes: List[Dict[str, Any]] = []
+    for idx, shape in enumerate(shapes):
+        if not isinstance(shape, dict):
+            warnings.append(f"shape_schema_error: Shape at index {idx} is not a dictionary; dropped")
+            continue
+
+        label = shape.get("label")
+        shape_type = shape.get("type")
+
+        if not isinstance(label, str) or not label.strip():
+            warnings.append(f"shape_schema_error: Shape at index {idx} missing valid label; dropped")
+            continue
+
+        label = label.strip()
+        if label not in allowed_labels:
+            warnings.append(
+                f"detector_c_policy_mismatch: Label {label!r} not in Policy C (7 lane classes); dropped"
+            )
+            continue
+
+        # Reject prohibited shape types for Detector C
+        if shape_type in (SHAPE_RECTANGLE, SHAPE_POLYGON, SHAPE_MASK):
+            warnings.append(
+                f"detector_c_forbidden_shape: Shape type {shape_type!r} is forbidden in Detector C; dropped"
+            )
+            continue
+
+        if shape_type != SHAPE_POLYLINE:
+            warnings.append(
+                f"invalid_shape_type: Unknown shape type {shape_type!r} for {label}; dropped"
+            )
+            continue
+
+        pts = shape.get("points")
+        if not isinstance(pts, (list, tuple)) or len(pts) < 4 or len(pts) % 2 != 0:
+            warnings.append(f"invalid_polyline_points: Polyline for {label} must have >= 2 points (4 coords); dropped")
+            continue
+
+        # Make a copy to avoid mutating original, and pop group_id
+        valid_shape = dict(shape)
+        valid_shape.pop("group_id", None)
+        validated_shapes.append(valid_shape)
+
+    return validated_shapes, warnings
+
+
+# Canonical aliases
+validate_policy_a_shapes = validate_detector_a_shapes
+validate_policy_b_shapes = validate_detector_b_shapes
+validate_policy_c_shapes = validate_detector_c_shapes
 
 
 def get_group(label: str) -> str:

@@ -16,9 +16,18 @@ import os
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import yaml
+
+from core.taxonomy import (
+    BOX_MASK_LABELS,
+    POLYGON_MASK_LABELS,
+    POLYLINE_LABELS,
+    POLICY_BOX_MASK,
+    POLICY_POLYGON_MASK,
+    POLICY_POLYLINE,
+)
 
 # Path to configuration
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -89,7 +98,20 @@ MODE_BOX = "box"
 MODE_MASK = "mask"
 MODE_BOX_AND_MASK = "box_and_mask"
 MODE_FULL_31 = "full_31"
-SUPPORTED_MODES = (MODE_BOX, MODE_MASK, MODE_BOX_AND_MASK, MODE_FULL_31)
+MODE_RECTANGLE_MASK = "rectangle_mask"
+MODE_BOX_MASK = "box_mask"
+MODE_POLYGON_MASK = "polygon_mask"
+MODE_POLYLINE = "polyline"
+SUPPORTED_MODES = (
+    MODE_BOX,
+    MODE_MASK,
+    MODE_BOX_AND_MASK,
+    MODE_FULL_31,
+    MODE_RECTANGLE_MASK,
+    MODE_BOX_MASK,
+    MODE_POLYGON_MASK,
+    MODE_POLYLINE,
+)
 
 
 @dataclass
@@ -606,6 +628,88 @@ Rules:
    - If no items are detected for a category, return an empty array [] for that category.
 """
 
+SYSTEM_PROMPT_RECTANGLE_MASK = """You are an expert autonomous driving computer vision system.
+Your task is 2D object detection and instance segmentation for foreground traffic instances on the provided image.
+For every countable object instance, you must provide the label, tight bounding box (box_2d), and closed visible boundary perimeter contour (mask).
+You must output ONLY a valid JSON object. Do not include markdown formatting (no ```json code blocks), no explanations, and no conversational text.
+
+Return your response adhering strictly to the following JSON schema:
+{
+  "objects": [
+    {
+      "label": "<label_name>",
+      "box_2d": [ymin, xmin, ymax, xmax],
+      "mask": [[x1, y1], [x2, y2], [x3, y3], ...],
+      "confidence": 0.95
+    }
+  ]
+}
+
+Rules:
+1. Coordinate System:
+   - box_2d is [ymin, xmin, ymax, xmax] with normalized integers in [0, 1000].
+   - mask is a closed contour boundary [[x, y], ...] with at least 3 vertices normalized in [0, 1000] (x horizontal, y vertical).
+2. Allowed Labels (14 foreground instance classes only):
+   - You MUST ONLY select labels from the allowed list provided in the user prompt.
+   - Match label string EXACTLY. Do not rename, substitute, or invent labels.
+3. Every instance object MUST have BOTH box_2d and mask.
+4. Output pure JSON only. If no instances are detected, return {"objects": []}.
+"""
+
+SYSTEM_PROMPT_POLYGON_MASK = """You are an expert autonomous driving computer vision system.
+Your task is semantic region segmentation on the provided image for background infrastructure and surface classes.
+For every visible surface/infrastructure region, provide the label and closed boundary contour (polygon).
+Do NOT provide bounding boxes (box_2d) or raster masks (tool-cvat derives native CVAT mask from the same polygon).
+You must output ONLY a valid JSON object. Do not include markdown formatting (no ```json code blocks), no explanations, and no conversational text.
+
+Return your response adhering strictly to the following JSON schema:
+{
+  "regions": [
+    {
+      "label": "<label_name>",
+      "polygon": [[x1, y1], [x2, y2], [x3, y3], ...],
+      "confidence": 0.95
+    }
+  ]
+}
+
+Rules:
+1. Coordinate System:
+   - polygon is a closed boundary contour [[x, y], ...] with at least 3 vertices normalized in [0, 1000] (x horizontal, y vertical).
+2. Allowed Labels (10 semantic region classes only):
+   - You MUST ONLY select labels from the allowed list provided in the user prompt.
+   - Match label string EXACTLY. Do not rename, substitute, or invent labels.
+3. Do NOT output box_2d or mask for regions.
+4. Output pure JSON only. If no regions are detected, return {"regions": []}.
+"""
+
+SYSTEM_PROMPT_POLYLINE = """You are an expert autonomous driving computer vision system.
+Your task is lane demarcation and road geometry delineation on the provided image.
+For every lane boundary, divider line, curb, and crosswalk, provide the label and ordered sequence of centerline/traversal path points (polyline).
+Do NOT provide polygon, mask, or bounding box (box_2d) for lanes.
+You must output ONLY a valid JSON object. Do not include markdown formatting (no ```json code blocks), no explanations, and no conversational text.
+
+Return your response adhering strictly to the following JSON schema:
+{
+  "lanes": [
+    {
+      "label": "<label_name>",
+      "polyline": [[x1, y1], [x2, y2], ...],
+      "confidence": 0.95
+    }
+  ]
+}
+
+Rules:
+1. Coordinate System:
+   - polyline is an ordered sequence of points [[x, y], ...] along the lane or crosswalk centerline/path with at least 2 vertices normalized in [0, 1000] (x horizontal, y vertical).
+2. Allowed Labels (7 lane demarcation classes only):
+   - You MUST ONLY select labels from the allowed list provided in the user prompt.
+   - Match label string EXACTLY. Do not rename, substitute, or invent labels.
+3. All lane markings and crosswalks MUST be polyline only. Do NOT provide polygon, mask, or box_2d.
+4. Output pure JSON only. If no lanes are detected, return {"lanes": []}.
+"""
+
 
 def build_full_31_prompt(
     allowed_labels: Optional[List[str]] = None,
@@ -704,6 +808,171 @@ Rules:
 7. Output raw JSON only (no markdown fences, no explanatory text)."""
 
 
+def format_shared_constraints(
+    include_box: bool = False,
+    include_confidence: bool = True,
+    empty_fallback_key: Optional[str] = None,
+) -> str:
+    """Centralized shared prompt constraints across all detection policies (Section 16).
+
+    Standardizes:
+    - Pure JSON-only output without markdown fences or extraneous text.
+    - Exact label string matching: strict casing, spaces, underscores; no synonyms or renaming.
+    - Normalized integer coordinates in [0, 1000].
+    - Heuristic confidence score policy.
+    """
+    box_clause = (
+        "\n   - Bounding box (box_2d) format is [ymin, xmin, ymax, xmax] (0 <= ymin < ymax <= 1000, 0 <= xmin < xmax <= 1000)."
+        if include_box
+        else ""
+    )
+    conf_clause = (
+        "\n3. Confidence Score:\n"
+        "   - Include a float confidence score between 0.0 and 1.0 reflecting detection certainty and visual clarity."
+        if include_confidence
+        else ""
+    )
+    empty_clause = (
+        f" If no target items are visible, return {{\"{empty_fallback_key}\": []}}."
+        if empty_fallback_key
+        else ""
+    )
+
+    return f"""Shared Constraints:
+1. Coordinate System:
+   - All coordinates are normalized integers in the range [0, 1000].
+   - Point coordinates are [x, y] with x horizontal (0 to 1000) and y vertical (0 to 1000).{box_clause}
+2. Allowed Labels & Distinctions:
+   - Select labels ONLY from the allowed list provided.
+   - Match label strings EXACTLY, preserving exact casing, spaces, and underscores.
+   - Do NOT rename, substitute, invent, or use synonyms for labels.
+   - Distinct labels must not be confused (e.g. 'pedestrian' vs 'person', 'traffic light' vs 'traffic_light', 'traffic sign' vs 'traffic_sign').{conf_clause}
+4. Output Format:
+   - Strictly output raw, valid JSON only (no markdown fences, no explanatory text).{empty_clause}"""
+
+
+def build_rectangle_mask_prompt(
+    allowed_labels: Optional[List[str]] = None,
+    include_confidence: bool = True,
+) -> str:
+    """Build the vision prompt for Policy A: Foreground Instances (14 classes).
+
+    Requires BOTH tight bounding box (box_2d) and visible boundary perimeter contour (mask).
+    """
+    from core.taxonomy import BOX_MASK_LABELS
+
+    labels = allowed_labels if allowed_labels is not None else list(BOX_MASK_LABELS)
+    labels_formatted = "\n".join(f"  - {label}" for label in labels)
+    conf_field = ',\n      "confidence": 0.95' if include_confidence else ""
+    shared_rules = format_shared_constraints(include_box=True, include_confidence=include_confidence, empty_fallback_key="objects")
+
+    return f"""Perform 2D object detection and instance segmentation for foreground traffic instances on this image.
+Detect all visible instances of the allowed classes.
+For every instance, you MUST provide BOTH a tight bounding box (box_2d) AND a closed visible perimeter contour (mask).
+
+Allowed labels (choose ONLY from this list):
+{labels_formatted}
+
+Output schema:
+{{
+  "objects": [
+    {{
+      "label": "<exact_allowed_label>",
+      "box_2d": [ymin, xmin, ymax, xmax],
+      "mask": [[x1, y1], [x2, y2], [x3, y3], ...]{conf_field}
+    }}
+  ]
+}}
+
+Policy A Requirements:
+1. box_2d: Normalized integer coordinates [ymin, xmin, ymax, xmax] in [0, 1000] (0 <= ymin < ymax <= 1000, 0 <= xmin < xmax <= 1000).
+2. mask: A closed polygon contour boundary tracing the visible object perimeter [[x, y], ...] with at least 3 vertices normalized in [0, 1000] (x horizontal, y vertical).
+3. Every detected object instance MUST have BOTH box_2d and mask. Never omit mask or box_2d.
+
+{shared_rules}"""
+
+
+def build_polygon_mask_prompt(
+    allowed_labels: Optional[List[str]] = None,
+    include_confidence: bool = True,
+) -> str:
+    """Build the vision prompt for Policy B: Semantic Regions (10 classes).
+
+    Delineates surface and infrastructure regions as polygon closed boundary contours.
+    Strictly suppresses bounding boxes.
+    """
+    from core.taxonomy import POLYGON_MASK_LABELS
+
+    labels = allowed_labels if allowed_labels is not None else list(POLYGON_MASK_LABELS)
+    labels_formatted = "\n".join(f"  - {label}" for label in labels)
+    conf_field = ',\n      "confidence": 0.95' if include_confidence else ""
+    shared_rules = format_shared_constraints(include_box=False, include_confidence=include_confidence, empty_fallback_key="regions")
+
+    return f"""Perform semantic region segmentation for background infrastructure and surface classes on this image.
+Delineate all visible regions of the allowed classes.
+For every region, provide the precise boundary contour (polygon). Do NOT provide bounding boxes (box_2d) or masks (tool-cvat derives native CVAT mask from the same polygon).
+
+Allowed labels (choose ONLY from this list):
+{labels_formatted}
+
+Output schema:
+{{
+  "regions": [
+    {{
+      "label": "<exact_allowed_label>",
+      "polygon": [[x1, y1], [x2, y2], [x3, y3], ...]{conf_field}
+    }}
+  ]
+}}
+
+Policy B Requirements:
+1. polygon: A closed boundary contour [[x, y], ...] with at least 3 vertices normalized in [0, 1000] (x horizontal, y vertical).
+2. Do NOT provide box_2d or mask for regions (tool-cvat derives native CVAT mask from the same polygon).
+
+{shared_rules}"""
+
+
+def build_polyline_prompt(
+    allowed_labels: Optional[List[str]] = None,
+    include_confidence: bool = True,
+) -> str:
+    """Build the vision prompt for Policy C: Lane Demarcations & Crosswalks (7 classes).
+
+    Traces lane markings, curbs, dividers, and crosswalk centerlines as ordered polyline paths.
+    Strictly forbids polygon, mask, and bounding box.
+    """
+    from core.taxonomy import POLYLINE_LABELS
+
+    labels = allowed_labels if allowed_labels is not None else list(POLYLINE_LABELS)
+    labels_formatted = "\n".join(f"  - {label}" for label in labels)
+    conf_field = ',\n      "confidence": 0.95' if include_confidence else ""
+    shared_rules = format_shared_constraints(include_box=False, include_confidence=include_confidence, empty_fallback_key="lanes")
+
+    return f"""Perform lane demarcation and road geometry delineation on this image.
+Trace all visible lane boundaries, divider lines, road curbs, and pedestrian crosswalks.
+For every lane marking and crosswalk, provide the ordered sequence of centerline/traversal path points (polyline).
+Do NOT provide polygon, mask, or bounding box (box_2d) for lanes.
+
+Allowed labels (choose ONLY from this list):
+{labels_formatted}
+
+Output schema:
+{{
+  "lanes": [
+    {{
+      "label": "<exact_allowed_label>",
+      "polyline": [[x1, y1], [x2, y2], ...]{conf_field}
+    }}
+  ]
+}}
+
+Policy C Requirements:
+1. polyline: An ordered sequence of points [[x, y], ...] along the lane or crosswalk path with at least 2 vertices normalized in [0, 1000] (x horizontal, y vertical).
+2. All lane markings and crosswalks MUST be polyline only. Do NOT provide polygon, mask, or box_2d.
+
+{shared_rules}"""
+
+
 def build_user_prompt(
     allowed_labels: Optional[List[str]] = None,
     include_confidence: bool = True,
@@ -714,10 +983,16 @@ def build_user_prompt(
     Args:
         allowed_labels: List of candidate labels.
         include_confidence: Whether to request confidence score.
-        mode: Detection mode ('box', 'mask', 'box_and_mask', or 'full_31').
+        mode: Detection mode ('box', 'mask', 'box_and_mask', 'full_31', 'rectangle_mask', 'polygon_mask', 'polyline').
     """
     if mode == MODE_FULL_31:
         return build_full_31_prompt(allowed_labels=allowed_labels, include_confidence=include_confidence)
+    if mode in (MODE_RECTANGLE_MASK, MODE_BOX_MASK):
+        return build_rectangle_mask_prompt(allowed_labels=allowed_labels, include_confidence=include_confidence)
+    if mode == MODE_POLYGON_MASK:
+        return build_polygon_mask_prompt(allowed_labels=allowed_labels, include_confidence=include_confidence)
+    if mode == MODE_POLYLINE:
+        return build_polyline_prompt(allowed_labels=allowed_labels, include_confidence=include_confidence)
 
     labels = allowed_labels if allowed_labels is not None else list(DEFAULT_BBOX_LABELS)
     labels_formatted = "\n".join(f"- {label}" for label in labels)
@@ -787,6 +1062,12 @@ def build_openai_vision_payload(
         sys_prompt = system_prompt
     elif mode == MODE_FULL_31:
         sys_prompt = SYSTEM_PROMPT_FULL_31
+    elif mode in (MODE_RECTANGLE_MASK, MODE_BOX_MASK):
+        sys_prompt = SYSTEM_PROMPT_RECTANGLE_MASK
+    elif mode == MODE_POLYGON_MASK:
+        sys_prompt = SYSTEM_PROMPT_POLYGON_MASK
+    elif mode == MODE_POLYLINE:
+        sys_prompt = SYSTEM_PROMPT_POLYLINE
     else:
         sys_prompt = SYSTEM_PROMPT
     user_prompt = build_user_prompt(allowed_labels=allowed_labels, mode=mode)

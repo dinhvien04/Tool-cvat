@@ -506,7 +506,7 @@ def parse_and_validate(
 
     # Determine 3-policy strict mode vs legacy box-only mode
     is_3_policy_scene = (
-        mode == "full_31"
+        mode in ("full_31", "rectangle_mask", "box_mask", "polygon_mask", "polyline")
         or (mode is None and (len(raw_regions) > 0 or len(raw_lanes) > 0 or (isinstance(data, dict) and ("regions" in data or "lanes" in data))))
     )
 
