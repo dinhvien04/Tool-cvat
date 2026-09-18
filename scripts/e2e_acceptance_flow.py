@@ -155,29 +155,58 @@ def main() -> int:
 
     # Define baseline AI predictions simulating detector output
     ai_shapes = [
+        # Policy A: car (paired rectangle + mask sharing group_id 1)
         {
             "type": "rectangle",
             "label": "car",
             "points": [100.0, 200.0, 350.0, 420.0],
             "confidence": 0.96,
+            "group_id": 1,
         },
+        {
+            "type": "polygon",
+            "label": "car",
+            "points": [100.0, 200.0, 350.0, 200.0, 350.0, 420.0, 100.0, 420.0],
+            "confidence": 0.96,
+            "group_id": 1,
+        },
+        # Policy A: traffic sign (paired rectangle + mask sharing group_id 2)
         {
             "type": "rectangle",
             "label": "traffic sign",
             "points": [400.0, 150.0, 470.0, 230.0],
             "confidence": 0.91,
+            "group_id": 2,
         },
+        {
+            "type": "polygon",
+            "label": "traffic sign",
+            "points": [400.0, 150.0, 470.0, 150.0, 470.0, 230.0, 400.0, 230.0],
+            "confidence": 0.91,
+            "group_id": 2,
+        },
+        # Policy A: pole (paired rectangle + mask sharing group_id 3)
         {
             "type": "rectangle",
             "label": "pole",
             "points": [800.0, 100.0, 840.0, 500.0],
             "confidence": 0.88,
+            "group_id": 3,
         },
+        {
+            "type": "polygon",
+            "label": "pole",
+            "points": [800.0, 100.0, 840.0, 100.0, 840.0, 500.0, 800.0, 500.0],
+            "confidence": 0.88,
+            "group_id": 3,
+        },
+        # Policy B: road (polygon, group_id 4)
         {
             "type": "polygon",
             "label": "road",
             "points": [0.0, 450.0, 600.0, 380.0, 1280.0, 460.0, 1280.0, 720.0, 0.0, 720.0],
             "confidence": 0.97,
+            "group_id": 4,
         },
     ]
 
@@ -195,38 +224,70 @@ def main() -> int:
 
     # 4. Simulate Human Annotator performing all 5 correction types
     print("\n[Step 4] Simulating Human Annotator with all 5 correction types...")
-    # 1. RELABEL: car -> truck (same box)
-    # 2. BOX_MOVE: traffic sign shifted by 35px
+    # 1. RELABEL: car -> truck (paired rectangle + mask sharing group 1)
+    # 2. BOX_MOVE: traffic sign shifted by 35px (paired rectangle + mask sharing group 2)
     # 3. DELETE_FALSE_POSITIVE: pole omitted
-    # 4. ADD_MISSING: pedestrian added
-    # 5. MASK_EDIT / REGION_EDIT: road contour edited
+    # 4. ADD_MISSING: pedestrian added (paired rectangle + mask sharing group 4)
+    # 5. REGION_EDIT: road contour edited (polygon sharing group 5)
     human_cvat_shapes = [
+        # RELABEL: car -> truck (paired box + polygon mask)
         {
             "type": "rectangle",
             "label_id": name_to_id.get("truck", name_to_id.get("car", 1)),
             "frame": 0,
             "points": [100.0, 200.0, 350.0, 420.0],
+            "group": 1,
             "occluded": False,
         },
+        {
+            "type": "polygon",
+            "label_id": name_to_id.get("truck", name_to_id.get("car", 1)),
+            "frame": 0,
+            "points": [100.0, 200.0, 350.0, 200.0, 350.0, 420.0, 100.0, 420.0],
+            "group": 1,
+            "occluded": False,
+        },
+        # BOX_MOVE: traffic sign shifted by 35px
         {
             "type": "rectangle",
             "label_id": name_to_id.get("traffic sign", name_to_id.get("traffic_sign", 1)),
             "frame": 0,
             "points": [435.0, 150.0, 505.0, 230.0],  # shifted +35px X
+            "group": 2,
             "occluded": False,
         },
+        {
+            "type": "polygon",
+            "label_id": name_to_id.get("traffic sign", name_to_id.get("traffic_sign", 1)),
+            "frame": 0,
+            "points": [435.0, 150.0, 505.0, 150.0, 505.0, 230.0, 435.0, 230.0],
+            "group": 2,
+            "occluded": False,
+        },
+        # ADD_MISSING: pedestrian added
         {
             "type": "rectangle",
             "label_id": name_to_id.get("pedestrian", name_to_id.get("person", 1)),
             "frame": 0,
             "points": [600.0, 220.0, 660.0, 380.0],  # newly added object
+            "group": 4,
             "occluded": False,
         },
         {
             "type": "polygon",
+            "label_id": name_to_id.get("pedestrian", name_to_id.get("person", 1)),
+            "frame": 0,
+            "points": [600.0, 220.0, 660.0, 220.0, 660.0, 380.0, 600.0, 380.0],
+            "group": 4,
+            "occluded": False,
+        },
+        # REGION_EDIT: road contour edited
+        {
+            "type": "polygon",
             "label_id": name_to_id.get("road", 1),
             "frame": 0,
-            "points": [0.0, 420.0, 620.0, 360.0, 1280.0, 430.0, 1280.0, 720.0, 0.0, 720.0],  # contour edited
+            "points": [0.0, 550.0, 620.0, 500.0, 1280.0, 530.0, 1280.0, 720.0, 0.0, 720.0],  # contour edited
+            "group": 5,
             "occluded": False,
         },
     ]

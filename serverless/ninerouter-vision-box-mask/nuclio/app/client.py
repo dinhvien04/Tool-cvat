@@ -24,6 +24,7 @@ from core.vision_contract import (
     MODE_MASK,
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_FULL_31,
+    build_full_31_prompt,
     build_openai_vision_payload,
     build_user_prompt,
 )
@@ -47,6 +48,10 @@ PREFERRED_SEGMENTATION_MODELS: Tuple[str, ...] = (
 
 # In-memory capability cache to prevent redundant API calls during runtime inference
 _SEGMENTATION_CAPABILITY_CACHE: Dict[str, bool] = {}
+
+# 3-policy Full 31-label capability cache: (model_id, prompt_version) -> bool
+FULL_31_PROMPT_VERSION: str = "v1.0"
+_FULL_31_CAPABILITY_CACHE: Dict[Tuple[str, str], bool] = {}
 
 
 class NineRouterError(Exception):
@@ -427,6 +432,100 @@ class NineRouterClient:
 
         msg = f"Model '{model}' did not return valid segmentation: {'; '.join(reasons)}"
         _SEGMENTATION_CAPABILITY_CACHE[model] = False
+        return False, msg
+
+    def probe_full_31_capability(
+        self,
+        model: str,
+        timeout: Optional[float] = None,
+        prompt_version: str = FULL_31_PROMPT_VERSION,
+    ) -> Tuple[bool, str]:
+        """Probe model for 3-policy Full 31-label capability using ONE minimal request.
+
+        Validates that the model can understand and output across all 3 policies:
+        - Policy A (objects): box_2d + mask
+        - Policy B (regions): polygon
+        - Policy C (lanes): polyline
+
+        Results are cached by (model, prompt_version) to avoid repeated probe overhead.
+
+        Args:
+            model: Vision model identifier to probe.
+            timeout: Optional timeout in seconds (defaults to 15.0s).
+            prompt_version: Schema version string.
+
+        Returns:
+            Tuple of (is_capable: bool, message: str).
+        """
+        cache_key = (model, prompt_version)
+        if cache_key in _FULL_31_CAPABILITY_CACHE:
+            cached_val = _FULL_31_CAPABILITY_CACHE[cache_key]
+            return cached_val, f"Cached 3-policy capability for {model}: {cached_val}"
+
+        available_ids = self.get_vision_model_ids()
+        if model not in available_ids:
+            msg = f"Model '{model}' is not in available vision models ({available_ids})"
+            _FULL_31_CAPABILITY_CACHE[cache_key] = False
+            return False, msg
+
+        import io
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (256, 256), color=(220, 220, 220))
+        draw = ImageDraw.Draw(img)
+        # Background / road region
+        draw.rectangle([0, 100, 256, 256], fill=(50, 50, 50))
+        # Car object
+        draw.rectangle([60, 140, 160, 200], fill=(200, 30, 30))
+        # Lane divider line
+        draw.line([(128, 100), (128, 256)], fill=(255, 255, 255), width=3)
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        img_bytes = buf.getvalue()
+
+        probe_labels = ["car", "road", "lane/single white"]
+        prompt = build_full_31_prompt(allowed_labels=probe_labels)
+
+        probe_timeout = timeout or 15.0
+        try:
+            resp = self.send_vision_request(
+                model=model,
+                image_bytes_or_b64=img_bytes,
+                prompt=prompt,
+                timeout=probe_timeout,
+                mode=MODE_FULL_31,
+            )
+        except Exception as e:
+            msg = f"3-policy capability probe request failed: {e}"
+            _FULL_31_CAPABILITY_CACHE[cache_key] = False
+            return False, msg
+
+        from core.vision_contract import parse_vision_response
+        try:
+            result = parse_vision_response(resp.content, allowed_labels=probe_labels, strict=False)
+            has_obj = len(result.objects) > 0 and result.objects[0].box_2d is not None
+            has_reg = len(result.regions) > 0 and len(result.regions[0].polygon) >= 3
+            has_lane = len(result.lanes) > 0 and len(result.lanes[0].polyline) >= 2
+
+            if has_obj or has_reg or has_lane:
+                _FULL_31_CAPABILITY_CACHE[cache_key] = True
+                return True, f"Model '{model}' verified 3-policy capability (objects={len(result.objects)}, regions={len(result.regions)}, lanes={len(result.lanes)})"
+        except Exception:
+            pass
+
+        # Check structural validity
+        from app.parser import clean_json_string
+        try:
+            data = json.loads(clean_json_string(resp.content))
+            if isinstance(data, dict) and ("objects" in data or "regions" in data or "lanes" in data):
+                _FULL_31_CAPABILITY_CACHE[cache_key] = True
+                return True, f"Model '{model}' conforms to 3-policy response structure"
+        except Exception:
+            pass
+
+        msg = f"Model '{model}' failed 3-policy schema verification: raw response {resp.content[:150]!r}"
+        _FULL_31_CAPABILITY_CACHE[cache_key] = False
         return False, msg
 
     def resolve_segmentation_model(

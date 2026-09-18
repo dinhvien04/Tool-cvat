@@ -1361,6 +1361,9 @@ def validate_cvat_output_shapes(
             if gid is None:
                 warnings.append(f"policy_a_violation: Instance shape '{lbl}' ({stype}) missing group_id; dropped")
                 continue
+            if isinstance(gid, bool) or not isinstance(gid, int) or gid <= 0:
+                warnings.append(f"policy_a_violation: Instance shape '{lbl}' ({stype}) invalid group_id ({gid!r}); dropped")
+                continue
             if stype not in (SHAPE_RECTANGLE, SHAPE_MASK):
                 warnings.append(f"policy_a_violation: Instance shape '{lbl}' cannot have type {stype!r}; dropped")
                 continue
@@ -1370,6 +1373,9 @@ def validate_cvat_output_shapes(
         elif policy == POLICY_POLYGON_MASK:
             if gid is None:
                 warnings.append(f"policy_b_violation: Region shape '{lbl}' ({stype}) missing group_id; dropped")
+                continue
+            if isinstance(gid, bool) or not isinstance(gid, int) or gid <= 0:
+                warnings.append(f"policy_b_violation: Region shape '{lbl}' ({stype}) invalid group_id ({gid!r}); dropped")
                 continue
             if stype not in (SHAPE_POLYGON, SHAPE_MASK):
                 warnings.append(f"policy_b_violation: Region shape '{lbl}' cannot have type {stype!r}; dropped")
@@ -1381,10 +1387,22 @@ def validate_cvat_output_shapes(
             if stype != SHAPE_POLYLINE:
                 warnings.append(f"policy_c_violation: Lane label '{lbl}' must be polyline ONLY, got {stype!r}; dropped")
                 continue
+            if "group_id" in shape:
+                shape.pop("group_id", None)
             approved_indices.add(orig_idx)
+
+    # Ensure distinct instances never share the same group_id
+    from collections import Counter
+    all_group_keys = list(policy_a_groups.keys()) + list(policy_b_groups.keys())
+    gid_counts = Counter(gid for gid, _ in all_group_keys)
 
     # Validate Policy A groups (must have exactly 1 rectangle and 1 mask)
     for (gid, lbl), group_entries in policy_a_groups.items():
+        if gid_counts[gid] > 1:
+            warnings.append(
+                f"policy_a_violation: Group ID {gid} is shared across distinct instances; annotation dropped"
+            )
+            continue
         types = [s["type"] for _, s in group_entries]
         has_rect = types.count(SHAPE_RECTANGLE) == 1
         has_mask = types.count(SHAPE_MASK) == 1
@@ -1398,6 +1416,11 @@ def validate_cvat_output_shapes(
 
     # Validate Policy B groups (must have exactly 1 polygon and 1 mask)
     for (gid, lbl), group_entries in policy_b_groups.items():
+        if gid_counts[gid] > 1:
+            warnings.append(
+                f"policy_b_violation: Group ID {gid} is shared across distinct instances; annotation dropped"
+            )
+            continue
         types = [s["type"] for _, s in group_entries]
         has_poly = types.count(SHAPE_POLYGON) == 1
         has_mask = types.count(SHAPE_MASK) == 1

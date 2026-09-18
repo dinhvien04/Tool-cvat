@@ -356,33 +356,83 @@ class DetectionResult:
         return json.dumps(self.to_dict(), indent=indent)
 
     def to_cvat_annotations(self, width: int, height: int) -> List[Dict[str, Any]]:
-        """Convert all objects, regions, and lanes into CVAT shape objects."""
+        """Convert all objects, regions, and lanes into CVAT shape objects.
+
+        Strictly enforces 3-policy atomicity:
+        - Policy A (Foreground Instances): Emits BOTH rectangle and mask sharing the same integer group_id.
+          If either rectangle or mask fails, is missing, or is degenerate, emits NEITHER.
+        - Policy B (Semantic Regions): Emits BOTH polygon and native CVAT mask (derived from the SAME polygon)
+          sharing the same integer group_id. Bounding box is strictly prohibited. If either fails, emits NEITHER.
+        - Policy C (Lane Markings): Emits valid polyline only. Zero fallback to polygon or mask. No group needed.
+        """
+        from core.geometry import calculate_polygon_area
+
         shapes: List[Dict[str, Any]] = []
         next_group_id = 1
+
         for obj in self.objects:
-            rect = obj.to_cvat_rect(width=width, height=height)
-            mask_shape = obj.to_cvat_mask(width=width, height=height)
-            if mask_shape:
+            try:
+                rect = obj.to_cvat_rect(width=width, height=height)
+                if not isinstance(rect, dict) or rect.get("type") != "rectangle":
+                    continue
+                pts = rect.get("points")
+                if not isinstance(pts, (list, tuple)) or len(pts) != 4:
+                    continue
+                if float(pts[2]) <= float(pts[0]) or float(pts[3]) <= float(pts[1]):
+                    continue
+
+                mask_shape = obj.to_cvat_mask(width=width, height=height)
+                if not isinstance(mask_shape, dict) or mask_shape.get("type") != "mask":
+                    continue
+                mask_data = mask_shape.get("mask")
+                if not isinstance(mask_data, (list, tuple)) or len(mask_data) <= 4:
+                    continue
+
                 rect["group_id"] = next_group_id
                 mask_shape["group_id"] = next_group_id
                 next_group_id += 1
                 shapes.extend([rect, mask_shape])
-            else:
-                shapes.append(rect)
+            except Exception:
+                continue
 
         for reg in self.regions:
-            poly = reg.to_cvat_polygon(width=width, height=height)
-            mask_shape = reg.to_cvat_mask(width=width, height=height)
-            if mask_shape:
+            try:
+                poly = reg.to_cvat_polygon(width=width, height=height)
+                if not isinstance(poly, dict) or poly.get("type") != "polygon":
+                    continue
+                pts = poly.get("points")
+                if not isinstance(pts, (list, tuple)) or len(pts) < 6 or len(pts) % 2 != 0:
+                    continue
+                poly_pts = [(float(pts[i]), float(pts[i + 1])) for i in range(0, len(pts), 2)]
+                if calculate_polygon_area(poly_pts) < 0.5:
+                    continue
+
+                mask_shape = reg.to_cvat_mask(width=width, height=height)
+                if not isinstance(mask_shape, dict) or mask_shape.get("type") != "mask":
+                    continue
+                mask_data = mask_shape.get("mask")
+                if not isinstance(mask_data, (list, tuple)) or len(mask_data) <= 4:
+                    continue
+
                 poly["group_id"] = next_group_id
                 mask_shape["group_id"] = next_group_id
                 next_group_id += 1
                 shapes.extend([poly, mask_shape])
-            else:
-                shapes.append(poly)
+            except Exception:
+                continue
 
         for lane in self.lanes:
-            shapes.append(lane.to_cvat_polyline(width=width, height=height))
+            try:
+                line = lane.to_cvat_polyline(width=width, height=height)
+                if not isinstance(line, dict) or line.get("type") != "polyline":
+                    continue
+                pts = line.get("points")
+                if not isinstance(pts, (list, tuple)) or len(pts) < 4 or len(pts) % 2 != 0:
+                    continue
+                line.pop("group_id", None)
+                shapes.append(line)
+            except Exception:
+                continue
 
         return shapes
 
@@ -973,7 +1023,7 @@ def parse_vision_response(
                         raise ValueError(f"Region at index {idx} has label {label!r} not in allowed list: {allowed_set}")
                     continue
 
-                poly_raw = item.get("polygon") or item.get("mask")
+                poly_raw = item.get("polygon")
                 if not isinstance(poly_raw, (list, tuple)) or len(poly_raw) < 3:
                     if strict:
                         raise ValueError(f"Region at index {idx} has invalid polygon (requires >= 3 points): {poly_raw!r}")
@@ -1041,7 +1091,7 @@ def parse_vision_response(
                         raise ValueError(f"Lane at index {idx} has label {label!r} not in allowed list: {allowed_set}")
                     continue
 
-                line_raw = item.get("polyline") or item.get("mask") or item.get("points")
+                line_raw = item.get("polyline")
                 if not isinstance(line_raw, (list, tuple)) or len(line_raw) < 2:
                     if strict:
                         raise ValueError(f"Lane at index {idx} has invalid polyline (requires >= 2 points): {line_raw!r}")

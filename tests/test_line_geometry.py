@@ -24,6 +24,9 @@ from core.line_geometry import (
     calculate_polygon_aspect_ratio,
     douglas_peucker,
     extract_centerline_from_polygon,
+    extract_lane_centerline,
+    denormalize_polyline,
+    polyline_to_cvat_polyline,
     is_thin_ribbon,
     lane_shape_pipeline,
     polygon_to_cvat_polyline,
@@ -331,3 +334,99 @@ class TestLaneShapePipeline:
             LANE_SINGLE_YELLOW,
         ):
             assert label in ALL_LANE_LABELS
+
+
+class TestDirectPolylinePipeline:
+    """Tests for direct Polyline -> CVAT Polyline (Production Policy C)."""
+
+    def test_direct_polyline_preserves_exact_point_order_and_count(self):
+        """Verify direct polyline denormalization strictly preserves point order and count."""
+        # Arbitrary multi-point polyline from model
+        pts = [
+            [100, 200],
+            [200, 300],
+            [350, 450],
+            [500, 600],
+            [700, 900],
+        ]
+        shape = polyline_to_cvat_polyline(
+            polyline=pts,
+            width=1000,
+            height=1000,
+            label=LANE_SINGLE_WHITE,
+            confidence=0.95,
+        )
+        assert shape is not None
+        assert shape["type"] == "polyline"
+        assert shape["label"] == LANE_SINGLE_WHITE
+        assert shape["confidence"] == "0.95"
+        # Exactly 5 points (10 coordinates) in identical sequence
+        assert shape["points"] == [
+            100.0, 200.0,
+            200.0, 300.0,
+            350.0, 450.0,
+            500.0, 600.0,
+            700.0, 900.0,
+        ]
+
+    def test_crosswalk_direct_polyline_traversal(self):
+        """Crosswalks predicted as direct traversal polylines must preserve point sequence."""
+        traversal_pts = [
+            [150, 500],
+            [400, 520],
+            [650, 480],
+            [900, 500],
+        ]
+        shape = polyline_to_cvat_polyline(
+            polyline=traversal_pts,
+            width=1280,
+            height=720,
+            label=LANE_CROSSWALK,
+            confidence=0.89,
+        )
+        assert shape is not None
+        assert shape["type"] == "polyline"
+        assert shape["label"] == LANE_CROSSWALK
+        # Expected coordinates: (pt[0]/1000 * 1280), (pt[1]/1000 * 720)
+        assert shape["points"] == [
+            192.0, 360.0,
+            512.0, 374.4,
+            832.0, 345.6,
+            1152.0, 360.0,
+        ]
+
+    def test_denormalize_polyline_validation(self):
+        """Verify denormalize_polyline enforces min points, numeric coordinates, and bounds."""
+        # Too few points raises ValueError
+        with pytest.raises(ValueError, match="at least 2 points"):
+            denormalize_polyline([[100, 200]], width=1000, height=1000)
+
+        # Non-numeric coordinate raises TypeError
+        with pytest.raises(TypeError, match="numeric"):
+            denormalize_polyline([[100, "abc"], [200, 300]], width=1000, height=1000)
+
+        # Invalid dimensions
+        with pytest.raises(ValueError, match="Invalid image dimensions"):
+            denormalize_polyline([[100, 200], [200, 300]], width=0, height=1000)
+
+        # Grossly out-of-bounds raises ValueError
+        with pytest.raises(ValueError, match="grossly out of bounds"):
+            denormalize_polyline([[100, 200], [2000, 300]], width=1000, height=1000)
+
+        # Moderate overshoot within [-100, 1100] is clamped
+        clamped = denormalize_polyline([[-10, 50], [1050, 950]], width=1000, height=1000, clamp=True)
+        assert clamped[0] == (0.0, 50.0)
+        assert clamped[1] == (1000.0, 950.0)
+
+    def test_clean_separation_between_direct_polyline_and_contour_centerline(self):
+        """Ensure clean separation between direct polyline denormalization and legacy contour centerline extraction."""
+        # 1. Direct polyline: 4 collinear points stay exactly 4 points without PCA thinning
+        collinear_pts = [[100, 100], [200, 200], [300, 300], [400, 400]]
+        direct_shape = polyline_to_cvat_polyline(collinear_pts, width=1000, height=1000, label=LANE_DOUBLE_WHITE)
+        assert len(direct_shape["points"]) == 8  # all 4 points retained verbatim
+
+        # 2. Legacy ribbon contour centerline: runs PCA, medial resampling, and Douglas-Peucker
+        ribbon_contour = [(100.0, 800.0), (120.0, 800.0), (452.0, 400.0), (448.0, 400.0)]
+        centerline = extract_lane_centerline(ribbon_contour, num_samples=5)
+        assert centerline is not None
+        assert extract_centerline_from_polygon(ribbon_contour, num_samples=5) == centerline

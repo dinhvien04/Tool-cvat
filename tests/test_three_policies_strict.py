@@ -36,6 +36,9 @@ from core.line_geometry import (
     LANE_DOUBLE_YELLOW,
     LANE_ROAD_CURB,
     lane_shape_pipeline,
+    polyline_to_cvat_polyline,
+    denormalize_polyline,
+    extract_lane_centerline,
 )
 from app.service import route_phase3b_shapes, MAX_OBJECTS, MAX_REGIONS, MAX_LANES
 from app.feedback import (
@@ -173,6 +176,46 @@ def test_policy_c_fails_and_drops_without_fallback():
         allow_fallback=False,
     )
     assert shape is None  # Strictly dropped!
+
+
+def test_section_8_direct_polyline_to_cvat_polyline():
+    """Section 8: Model polyline normalized [0..1000] directly converts to CVAT polyline shape.
+
+    Preserves exact point order, skips PCA thinning / centerline resampling.
+    """
+    pts = [[100, 200], [250, 400], [600, 850]]
+    shape = polyline_to_cvat_polyline(
+        polyline=pts,
+        width=1000,
+        height=1000,
+        label=LANE_SINGLE_WHITE,
+        confidence=0.96,
+    )
+    assert shape is not None
+    assert shape["type"] == SHAPE_POLYLINE
+    assert shape["label"] == LANE_SINGLE_WHITE
+    assert shape["confidence"] == "0.96"
+    assert shape["points"] == [100.0, 200.0, 250.0, 400.0, 600.0, 850.0]
+
+
+def test_section_8_crosswalk_direct_polyline_traversal():
+    """Section 8: lane/crosswalk follows direct polyline traversal path."""
+    traversal_pts = [[200, 300], [500, 310], [800, 290]]
+    shape = polyline_to_cvat_polyline(
+        polyline=traversal_pts,
+        width=1920,
+        height=1080,
+        label=LANE_CROSSWALK,
+        confidence=0.91,
+    )
+    assert shape is not None
+    assert shape["type"] == SHAPE_POLYLINE
+    assert shape["label"] == LANE_CROSSWALK
+    assert shape["points"] == [
+        round((200 / 1000.0) * 1920, 2), round((300 / 1000.0) * 1080, 2),
+        round((500 / 1000.0) * 1920, 2), round((310 / 1000.0) * 1080, 2),
+        round((800 / 1000.0) * 1920, 2), round((290 / 1000.0) * 1080, 2),
+    ]
 
 
 # ==============================================================================

@@ -13,7 +13,7 @@ import io
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from PIL import Image
 
@@ -21,7 +21,10 @@ from app.client import NineRouterClient, NineRouterError
 from app.config import DEFAULT_MAX_IMAGE_SIZE, DEFAULT_VISION_MODEL
 from app.image_ops import image_to_data_url, load_image, resize_image_if_needed
 from app.parser import ParsedObject, ParseResult, parse_and_validate
-from core.line_geometry import lane_shape_pipeline
+from core.line_geometry import (
+    denormalize_polyline,
+    polyline_to_cvat_polyline,
+)
 from core.taxonomy import (
     GROUP_INSTANCE,
     GROUP_LANE,
@@ -272,6 +275,7 @@ def annotate_image(
         temperature=temperature,
         max_tokens=max_tokens,
         visual_examples=visual_examples if visual_examples else None,
+        mode=active_mode,
     )
 
     # 7. Parse and validate response
@@ -283,6 +287,7 @@ def annotate_image(
         image_height=curr_h,
         strict=strict,
         fallback_confidence=fallback_confidence,
+        mode=active_mode,
     )
     warnings.extend(parse_result.warnings)
 
@@ -299,9 +304,13 @@ def annotate_image(
 
     existing_gids = [
         o.group_id for o in items_to_process
-        if getattr(o, "group_id", None) is not None and isinstance(o.group_id, int)
+        if getattr(o, "group_id", None) is not None
+        and isinstance(o.group_id, int)
+        and not isinstance(o.group_id, bool)
+        and o.group_id > 0
     ]
     next_group_id = (max(existing_gids) + 1) if existing_gids else 1
+    used_group_ids: Set[int] = set()
 
     for obj in items_to_process:
         effective_conf: Optional[float] = None
@@ -330,6 +339,11 @@ def annotate_image(
                 obj.pixel_polygon = [
                     (round(p[0] + roi_offset_x, 2), round(p[1] + roi_offset_y, 2))
                     for p in obj.pixel_polygon
+                ]
+            if getattr(obj, "pixel_polyline", None) is not None:
+                obj.pixel_polyline = [
+                    (round(p[0] + roi_offset_x, 2), round(p[1] + roi_offset_y, 2))
+                    for p in obj.pixel_polyline
                 ]
             if obj.cvat_mask is not None and len(obj.cvat_mask) >= 4:
                 crop_pixels = obj.cvat_mask[:-4]
@@ -446,8 +460,24 @@ def annotate_image(
                     continue
 
                 inst_count += 1
-                group_id = obj.group_id if (obj.group_id is not None and isinstance(obj.group_id, int)) else next_group_id
-                next_group_id = max(next_group_id + 1, group_id + 1)
+                gid = (
+                    obj.group_id
+                    if (
+                        obj.group_id is not None
+                        and isinstance(obj.group_id, int)
+                        and not isinstance(obj.group_id, bool)
+                        and obj.group_id > 0
+                        and obj.group_id not in used_group_ids
+                    )
+                    else None
+                )
+                if gid is None:
+                    while next_group_id in used_group_ids:
+                        next_group_id += 1
+                    gid = next_group_id
+                    next_group_id += 1
+                used_group_ids.add(gid)
+                group_id = gid
 
                 box_shape = {
                     "label": obj.label,
@@ -520,8 +550,24 @@ def annotate_image(
                     continue
 
                 reg_count += 1
-                group_id = obj.group_id if (obj.group_id is not None and isinstance(obj.group_id, int)) else next_group_id
-                next_group_id = max(next_group_id + 1, group_id + 1)
+                gid = (
+                    obj.group_id
+                    if (
+                        obj.group_id is not None
+                        and isinstance(obj.group_id, int)
+                        and not isinstance(obj.group_id, bool)
+                        and obj.group_id > 0
+                        and obj.group_id not in used_group_ids
+                    )
+                    else None
+                )
+                if gid is None:
+                    while next_group_id in used_group_ids:
+                        next_group_id += 1
+                    gid = next_group_id
+                    next_group_id += 1
+                used_group_ids.add(gid)
+                group_id = gid
 
                 flat_pts = [round(float(c), 2) for pt in pts_px for c in pt]
                 poly_shape = {
@@ -558,24 +604,40 @@ def annotate_image(
                 if has_valid_box:
                     warnings.append(f"lane_box_suppressed: Suppressed box for lane marking '{obj.label}'")
 
-                if not obj.mask:
-                    warnings.append(
-                        f"lane_polyline_failed: Lane marking '{obj.label}' missing contour for polyline extraction; dropped per Policy C"
-                    )
-                    continue
+                lane_shape = None
+                if getattr(obj, "pixel_polyline", None) and len(obj.pixel_polyline) >= 2:
+                    flat_pts = [round(float(c), 2) for pt in obj.pixel_polyline for c in pt]
+                    lane_shape = {
+                        "type": "polyline",
+                        "label": obj.label,
+                        "points": flat_pts,
+                    }
+                    if conf_str is not None:
+                        lane_shape["confidence"] = conf_str
+                else:
+                    polyline_pts = getattr(obj, "lane_polyline", None) or getattr(obj, "polyline", None) or obj.mask
+                    if not polyline_pts:
+                        warnings.append(
+                            f"lane_polyline_failed: Lane marking '{obj.label}' missing polyline vertices; dropped per Policy C"
+                        )
+                        continue
 
-                lane_shape = lane_shape_pipeline(
-                    label=obj.label,
-                    contour=obj.mask,
-                    width=orig_w,
-                    height=orig_h,
-                    confidence=effective_conf,
-                    preferred_geometry="polyline",
-                    allow_fallback=False,
-                )
+                    lane_shape = polyline_to_cvat_polyline(
+                        polyline=polyline_pts,
+                        width=orig_w,
+                        height=orig_h,
+                        label=obj.label,
+                        confidence=effective_conf,
+                    )
+                    if lane_shape and (roi_offset_x > 0 or roi_offset_y > 0):
+                        lane_shape["points"] = [
+                            round(p + (roi_offset_x if idx % 2 == 0 else roi_offset_y), 2)
+                            for idx, p in enumerate(lane_shape["points"])
+                        ]
 
                 if lane_shape is not None and lane_shape.get("type") == "polyline":
                     lane_count += 1
+                    lane_shape.pop("group_id", None)
                     cvat_shapes.append(lane_shape)
                 else:
                     warnings.append(

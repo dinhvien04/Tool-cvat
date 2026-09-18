@@ -329,6 +329,37 @@ def extract_centerline_from_polygon(
     return simplified
 
 
+def extract_lane_centerline(
+    pixel_points: Sequence[Sequence[Union[int, float]]],
+    num_samples: int = DEFAULT_NUM_SAMPLES,
+    simplify_epsilon: float = DEFAULT_SIMPLIFY_EPSILON,
+    min_aspect_ratio: float = DEFAULT_MIN_ASPECT_RATIO,
+) -> Optional[List[Tuple[float, float]]]:
+    """Extract ordered centerline polyline from a 2D ribbon polygon contour.
+
+    Legacy Contour Centerline Extraction:
+    Used when legacy annotations or earlier model versions emit closed polygon boundaries
+    rather than direct polylines. Employs 2D PCA for principal orientation, medial station
+    resampling, and Douglas-Peucker simplification.
+
+    Args:
+        pixel_points: Sequence of [x, y] coordinates in pixel space.
+        num_samples: Number of equidistant longitudinal stations to sample (default 15).
+        simplify_epsilon: Tolerance for Douglas-Peucker simplification (default 1.5 px).
+        min_aspect_ratio: Minimum aspect ratio required to consider the polygon a thin ribbon.
+
+    Returns:
+        List of (x, y) float tuples forming the ordered centerline polyline,
+        or None if extraction fails or polygon is not a thin ribbon.
+    """
+    return extract_centerline_from_polygon(
+        pixel_points=pixel_points,
+        num_samples=num_samples,
+        simplify_epsilon=simplify_epsilon,
+        min_aspect_ratio=min_aspect_ratio,
+    )
+
+
 def polygon_to_cvat_polyline(
     contour: List[List[Union[int, float]]],
     width: int,
@@ -421,6 +452,129 @@ def polygon_to_cvat_polyline(
         return None
 
     flat_points = [round(float(coord), 2) for pt in centerline for coord in pt]
+
+    res: Dict[str, Any] = {
+        "type": "polyline",
+        "points": flat_points,
+    }
+
+    if label is not None:
+        res["label"] = str(label)
+
+    if confidence is not None:
+        if isinstance(confidence, (int, float)):
+            res["confidence"] = str(round(float(confidence), 2))
+        else:
+            res["confidence"] = str(confidence)
+
+    return res
+
+
+def denormalize_polyline(
+    polyline: Sequence[Sequence[Union[int, float]]],
+    width: int,
+    height: int,
+    clamp: bool = True,
+    min_points: int = MIN_POLYLINE_POINTS,
+) -> List[Tuple[float, float]]:
+    """Convert normalized [0, 1000] polyline vertices to image pixel coordinates.
+
+    Directly scales 1D traversal points from normalized [0, 1000] coordinate space to image pixel space.
+    Strictly preserves point order and count without running PCA, thinning, or centerline reduction.
+    Under Policy C, model-emitted lane polylines are already 1D centerlines.
+
+    Args:
+        polyline: Sequence of [x, y] coordinates normalized in [0, 1000].
+        width: Image width in pixels (> 0).
+        height: Image height in pixels (> 0).
+        clamp: If True, coordinates within [-100, 1100] are clamped to [0, 1000].
+        min_points: Minimum number of vertices required (default 2).
+
+    Returns:
+        List of (x, y) float tuples in image pixel coordinates.
+
+    Raises:
+        ValueError: If width/height <= 0, polyline has < min_points, or coordinates invalid.
+        TypeError: If polyline or coordinate types are invalid.
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Invalid image dimensions: width={width}, height={height} (both must be positive)")
+
+    if not isinstance(polyline, (list, tuple)):
+        raise TypeError(f"Polyline must be a list or tuple of points, got {type(polyline).__name__}")
+
+    if len(polyline) < min_points:
+        raise ValueError(f"Polyline must contain at least {min_points} points, got {len(polyline)}")
+
+    pts_px: List[Tuple[float, float]] = []
+    for idx, pt in enumerate(polyline):
+        if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+            raise ValueError(f"Polyline point at index {idx} must be a 2-element sequence [x, y], got {pt!r}")
+        try:
+            px = float(pt[0])
+            py = float(pt[1])
+        except (ValueError, TypeError) as e:
+            raise TypeError(f"Polyline point at index {idx} coordinates must be numeric: {e}")
+
+        if math.isnan(px) or math.isnan(py) or math.isinf(px) or math.isinf(py):
+            raise ValueError(f"Polyline point at index {idx} coordinates cannot be NaN or Inf: {[px, py]}")
+
+        if clamp:
+            if px < -100.0 or px > 1100.0 or py < -100.0 or py > 1100.0:
+                raise ValueError(f"Polyline point at index {idx} coordinate [{px}, {py}] is grossly out of bounds")
+            px_c = max(0.0, min(1000.0, px))
+            py_c = max(0.0, min(1000.0, py))
+        else:
+            if px < 0.0 or px > 1000.0 or py < 0.0 or py > 1000.0:
+                raise ValueError(f"Polyline point at index {idx} coordinate [{px}, {py}] is out of bounds [0, 1000]")
+            px_c, py_c = px, py
+
+        px_scaled = round(max(0.0, min(float(width), (px_c / 1000.0) * float(width))), 2)
+        py_scaled = round(max(0.0, min(float(height), (py_c / 1000.0) * float(height))), 2)
+        pts_px.append((px_scaled, py_scaled))
+
+    return pts_px
+
+
+def polyline_to_cvat_polyline(
+    polyline: Sequence[Sequence[Union[int, float]]],
+    width: int,
+    height: int,
+    label: Optional[str] = None,
+    confidence: Optional[Union[float, str]] = None,
+    clamp: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Direct Policy C Polyline Denormalization (Model [0, 1000] -> CVAT Pixel Coordinates).
+
+    Directly scales 1D traversal points from normalized [0, 1000] coordinate space to image pixel space.
+    Strictly preserves point order and count without running PCA, thinning, or centerline reduction.
+    Under Policy C, model-emitted lane polylines are already 1D centerlines.
+
+    Args:
+        polyline: Sequence of [x, y] coordinates normalized in [0, 1000].
+        width: Image width in pixels (> 0).
+        height: Image height in pixels (> 0).
+        label: Optional lane class label.
+        confidence: Optional detection confidence score.
+        clamp: If True, coordinates within [-100, 1100] are clamped to [0, 1000].
+
+    Returns:
+        CVAT polyline shape dictionary {"type": "polyline", "points": [x1, y1, x2, y2, ...]},
+        or None if input is invalid/degenerate (< 2 points).
+    """
+    if width <= 0 or height <= 0:
+        return None
+
+    try:
+        pts_px = denormalize_polyline(
+            polyline, width=width, height=height, clamp=clamp, min_points=MIN_POLYLINE_POINTS
+        )
+    except (ValueError, TypeError):
+        return None
+
+    flat_points = [coord for pt in pts_px for coord in pt]
+    if len(flat_points) < MIN_POLYLINE_POINTS * 2:
+        return None
 
     res: Dict[str, Any] = {
         "type": "polyline",

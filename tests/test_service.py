@@ -243,3 +243,91 @@ def test_annotate_image_strict_mode_error(sample_image_bytes, mock_client):
     # Strict mode raises
     with pytest.raises(VisionParseError, match="not in allowed labels"):
         annotate_image(sample_image_bytes, mock_client, strict=True)
+
+
+def test_annotate_image_full_31_mode_propagation(sample_image_bytes, mock_client):
+    """Verify annotate_image with mode='full_31' passes mode='full_31' to client.send_vision_request."""
+    from core.vision_contract import MODE_FULL_31
+
+    fake_resp = VisionResponse(
+        content=json.dumps({"objects": [], "regions": [], "lanes": []}),
+        raw_response={},
+        duration_seconds=0.2,
+        model="ag/gemini-3.8-flash-high",
+        status_code=200,
+    )
+    mock_client.send_vision_request.return_value = fake_resp
+
+    annotate_image(
+        image_source=sample_image_bytes,
+        client=mock_client,
+        mode=MODE_FULL_31,
+    )
+
+    mock_client.send_vision_request.assert_called_once()
+    _, kwargs = mock_client.send_vision_request.call_args
+    assert kwargs.get("mode") == MODE_FULL_31
+
+
+def test_annotate_image_payload_regression_system_prompt_full_31(sample_image_bytes):
+    """Regression test: active_mode=MODE_FULL_31 causes client payload to contain SYSTEM_PROMPT_FULL_31, NOT SYSTEM_PROMPT."""
+    from core.vision_contract import (
+        MODE_BOX,
+        MODE_FULL_31,
+        SYSTEM_PROMPT,
+        SYSTEM_PROMPT_FULL_31,
+    )
+
+    real_client = NineRouterClient(base_url="http://127.0.0.1:20128")
+    captured_payloads = []
+
+    def mock_post(url, json=None, **kwargs):
+        captured_payloads.append(json)
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"objects": [], "regions": [], "lanes": []}'
+                    }
+                }
+            ],
+            "model": "ag/gemini-3.8-flash-high",
+        }
+        return resp
+
+    with patch.object(real_client.session, "post", side_effect=mock_post):
+        # 1. When mode=MODE_FULL_31: payload must contain SYSTEM_PROMPT_FULL_31, NOT SYSTEM_PROMPT
+        annotate_image(
+            image_source=sample_image_bytes,
+            client=real_client,
+            model="ag/gemini-3.8-flash-high",
+            mode=MODE_FULL_31,
+        )
+
+        assert len(captured_payloads) == 1
+        full31_payload = captured_payloads[0]
+        sys_msg_full31 = full31_payload["messages"][0]["content"]
+
+        assert sys_msg_full31 == SYSTEM_PROMPT_FULL_31
+        assert sys_msg_full31 != SYSTEM_PROMPT
+        assert "Policy A — Foreground Instances (14 classes)" in sys_msg_full31
+        assert "Policy B — Semantic Regions (10 classes)" in sys_msg_full31
+        assert "Policy C — Lane Demarcations & Crosswalks (7 classes)" in sys_msg_full31
+
+        # 2. When mode=MODE_BOX: payload must contain standard bbox SYSTEM_PROMPT
+        annotate_image(
+            image_source=sample_image_bytes,
+            client=real_client,
+            model="ag/gemini-3.8-flash-high",
+            mode=MODE_BOX,
+        )
+
+        assert len(captured_payloads) == 2
+        box_payload = captured_payloads[1]
+        sys_msg_box = box_payload["messages"][0]["content"]
+
+        assert sys_msg_box == SYSTEM_PROMPT
+        assert sys_msg_box != SYSTEM_PROMPT_FULL_31
+

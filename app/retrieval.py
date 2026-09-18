@@ -346,6 +346,8 @@ class CorrectionRetrievalEngine:
                     mask_pts = None
                     if details.get("human_mask") and details["human_mask"].get("points"):
                         mask_pts = details["human_mask"]["points"]
+                    elif details.get("human_poly") and details["human_poly"].get("points"):
+                        mask_pts = details["human_poly"]["points"]
                     elif human_shape.get("type") in ("mask", "polygon") and human_shape.get("points"):
                         mask_pts = human_shape["points"]
                     elif human_shape.get("points") and len(human_shape["points"]) >= 6:

@@ -1,5 +1,6 @@
 """Tests for app.client module covering all HTTP failure modes and edge cases."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -364,3 +365,34 @@ def test_send_vision_request_empty_choices():
                 model="test-model",
                 image_bytes_or_b64="dGVzdA==",
             )
+
+
+def test_probe_full_31_capability_success_and_caching():
+    """Verify probe_full_31_capability succeeds on valid 3-policy response and caches result."""
+    from app.client import _FULL_31_CAPABILITY_CACHE, FULL_31_PROMPT_VERSION
+
+    client = NineRouterClient()
+    test_model = "test-full31-capable-model"
+
+    # Mock available models
+    with patch.object(client, "get_vision_model_ids", return_value=[test_model]):
+        # Mock send_vision_request
+        mock_response = MagicMock()
+        mock_response.content = json.dumps({
+            "objects": [{"label": "car", "box_2d": [100, 100, 200, 200], "mask": [[100, 100], [200, 100], [200, 200]]}],
+            "regions": [{"label": "road", "polygon": [[0, 500], [1000, 500], [1000, 1000]]}],
+            "lanes": [{"label": "lane/single white", "polyline": [[500, 500], [500, 1000]]}],
+        })
+        with patch.object(client, "send_vision_request", return_value=mock_response) as mock_send:
+            ok, msg = client.probe_full_31_capability(test_model)
+            assert ok is True
+            assert "verified 3-policy capability" in msg
+            assert mock_send.call_count == 1
+
+            # Second call should hit the cache without sending another request
+            ok2, msg2 = client.probe_full_31_capability(test_model)
+            assert ok2 is True
+            assert "Cached" in msg2
+            assert mock_send.call_count == 1
+            assert _FULL_31_CAPABILITY_CACHE.get((test_model, FULL_31_PROMPT_VERSION)) is True
+
