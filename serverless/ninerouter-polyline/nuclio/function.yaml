@@ -19,7 +19,7 @@ spec:
   description: 9Router Polyline Detector (7 Lane Demarcations & Crosswalks via local 9Router)
   runtime: 'python:3.11'
   handler: main:handler
-  eventTimeout: 180s
+  eventTimeout: 240s
 
   env:
     - name: NINEROUTER_URL
@@ -29,7 +29,7 @@ spec:
     - name: DETECTION_MODE
       value: 'polyline'
     - name: NINEROUTER_TIMEOUT
-      value: '120.0'
+      value: '180.0'
     - name: MAX_IMAGE_SIZE
       value: '1600'
     - name: FEEDBACK_DATA_DIR

@@ -691,7 +691,7 @@ def parse_and_validate(
 
         if raw_mask is None:
             if require_object_mask:
-                msg = f"Detection at index {idx} ('{label}') is missing required 'mask' contour per Policy A"
+                msg = f"policy_a_incomplete: Detection at index {idx} ('{label}') is missing required 'mask' contour per Policy A"
                 if strict:
                     raise VisionParseError(msg)
                 warnings.append(msg)

@@ -33,6 +33,9 @@ param (
     [string]$NineRouterKey = $env:NINEROUTER_KEY,
 
     [Parameter(Mandatory = $false)]
+    [string]$NineRouterTimeout = "180.0",
+
+    [Parameter(Mandatory = $false)]
     [string]$CvatWebhookSecret = $env:CVAT_WEBHOOK_SECRET
 )
 
@@ -253,7 +256,7 @@ nuctl deploy $fnName \
     --env "NINEROUTER_URL=$NineRouterUrl" \
     --env "VISION_MODEL=$resolvedVisionModel" \
     --env "DETECTION_MODE=$fnMode" \
-    --env "NINEROUTER_TIMEOUT=120.0" \
+    --env "NINEROUTER_TIMEOUT=$NineRouterTimeout" \
     --env "FEEDBACK_DATA_DIR=/opt/nuclio/feedback" \
     --env "FEEDBACK_DB_PATH=/opt/nuclio/feedback/feedback.sqlite3" \
     $extraEnvBash \
@@ -281,7 +284,7 @@ nuctl deploy $fnName \
             "--env", "NINEROUTER_URL=$NineRouterUrl",
             "--env", "VISION_MODEL=$resolvedVisionModel",
             "--env", "DETECTION_MODE=$fnMode",
-            "--env", "NINEROUTER_TIMEOUT=120.0",
+            "--env", "NINEROUTER_TIMEOUT=$NineRouterTimeout",
             "--env", "FEEDBACK_DATA_DIR=/opt/nuclio/feedback",
             "--env", "FEEDBACK_DB_PATH=/opt/nuclio/feedback/feedback.sqlite3"
         )

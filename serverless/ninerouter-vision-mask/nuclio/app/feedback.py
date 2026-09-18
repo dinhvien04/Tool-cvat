@@ -1232,9 +1232,11 @@ class FeedbackDatabase:
         max_examples_total: int = 150,
         max_storage_mb: int = 50,
         max_crop_dimension: int = 512,
+        timeout: Optional[float] = None,
     ):
         env_data_dir = os.getenv("FEEDBACK_DATA_DIR")
         env_db_path = os.getenv("FEEDBACK_DB_PATH")
+        env_timeout = os.getenv("FEEDBACK_DB_TIMEOUT")
 
         if db_path is not None:
             resolved_db = Path(db_path)
@@ -1265,6 +1267,15 @@ class FeedbackDatabase:
         self.max_examples_total = max_examples_total
         self.max_storage_mb = max_storage_mb
         self.max_crop_dimension = max_crop_dimension
+        if timeout is not None:
+            self.timeout = float(timeout)
+        elif env_timeout:
+            try:
+                self.timeout = float(env_timeout)
+            except (ValueError, TypeError):
+                self.timeout = 5.0
+        else:
+            self.timeout = 5.0
 
         # Ensure parent directories exist
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1292,14 +1303,15 @@ class FeedbackDatabase:
     def _get_connection(self) -> sqlite3.Connection:
         """Create a connection with robust file-locking journal mode and row factory.
 
-        Uses TRUNCATE journal mode and busy_timeout=30000. TRUNCATE is universally
+        Uses TRUNCATE journal mode and busy_timeout based on self.timeout. TRUNCATE is universally
         supported across Windows NTFS, Docker bind mounts (9P/VirtioFS), WSL2, and Linux,
         completely avoiding POSIX shared-memory (-shm) failures seen with WAL mode on bind mounts.
         """
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
         conn.row_factory = sqlite3.Row
         try:
-            conn.execute("PRAGMA busy_timeout=30000")
+            busy_ms = max(100, int(self.timeout * 1000))
+            conn.execute(f"PRAGMA busy_timeout={busy_ms}")
             conn.execute("PRAGMA journal_mode=TRUNCATE")
             conn.execute("PRAGMA synchronous=NORMAL")
         except sqlite3.OperationalError as exc:

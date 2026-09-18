@@ -10,12 +10,15 @@ in-memory pipeline used by:
 from __future__ import annotations
 
 import io
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 from app.client import NineRouterClient, NineRouterError
 from app.config import DEFAULT_MAX_IMAGE_SIZE, DEFAULT_VISION_MODEL
