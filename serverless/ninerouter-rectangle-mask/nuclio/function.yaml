@@ -32,13 +32,17 @@ spec:
     - name: NINEROUTER_URL
       value: 'http://host.docker.internal:20128'
     - name: VISION_MODEL
-      value: ''
+      value: 'ag/gemini-3.8-flash-low'
+    - name: RECTANGLE_MASK_MODEL
+      value: 'ag/gemini-3.8-flash-low'
     - name: DETECTION_MODE
       value: 'rectangle_mask'
     - name: NINEROUTER_TIMEOUT
       value: '180.0'
     - name: MAX_IMAGE_SIZE
-      value: '1600'
+      value: '1280'
+    - name: MAX_TOKENS
+      value: '2000'
     - name: FEEDBACK_DATA_DIR
       value: '/opt/nuclio/feedback'
     - name: FEEDBACK_DB_PATH

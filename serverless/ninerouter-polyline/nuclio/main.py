@@ -143,14 +143,26 @@ def handler(context, event):
                 "CVAT_WEBHOOK_SECRET is not configured; running webhook dispatch in local dev mode without signature verification."
             )
 
-        # Process job/task completion events
-        if "job" in event_type or "task" in event_type:
-            job_info = data.get("job", {})
+        # Process job/task/annotation events
+        event_lower = (event_type or "").lower()
+        if any(k in event_lower for k in ("job", "task", "annotation")):
+            job_info = data.get("job", {}) if isinstance(data.get("job"), dict) else {}
             job_id = job_info.get("id") or data.get("job_id")
-            state = job_info.get("state") or data.get("state")
-            stage = job_info.get("stage") or data.get("stage")
+            state = str(job_info.get("state") or data.get("state") or "").lower()
+            stage = str(job_info.get("stage") or data.get("stage") or "").lower()
 
-            if job_id and (state == "completed" or stage in ("acceptance", "validation")):
+            # Trigger sync immediately on Save, update, completion, or active annotation states
+            should_sync = bool(
+                job_id
+                and (
+                    state in ("completed", "in progress", "annotation", "validation", "acceptance")
+                    or stage in ("acceptance", "validation", "annotation", "in progress")
+                    or "save" in event_lower
+                    or "update" in event_lower
+                )
+            )
+
+            if should_sync:
                 try:
                     from app.cvat_sync import sync_job_feedback
                     cvat_url = os.getenv("CVAT_URL", "http://cvat_server:8080")

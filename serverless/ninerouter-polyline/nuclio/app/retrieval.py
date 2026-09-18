@@ -16,6 +16,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+import sqlite3
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from PIL import Image
@@ -46,6 +47,9 @@ from core.taxonomy import (
 )
 
 logger = logging.getLogger(__name__)
+
+# In-memory crop Data URL cache to keep few-shot retrieval < 5ms
+_CROP_DATA_URL_CACHE: Dict[Tuple[str, float], str] = {}
 
 
 def resolve_policy_from_labels(
@@ -89,17 +93,21 @@ class CorrectionRetrievalEngine:
         use_rules: bool = True,
         use_examples: bool = True,
         use_visual_examples: bool = True,
+        max_visual_examples: Optional[int] = None,
     ):
         self.db = db or FeedbackDatabase()
         self.max_examples_per_pass = max_examples_per_pass
         self.use_rules = use_rules
         self.use_examples = use_examples
         self.use_visual_examples = use_visual_examples
+        self.max_visual_examples = max_visual_examples if max_visual_examples is not None else max_examples_per_pass
+        self.taxonomy = Taxonomy()
 
     def retrieve(
         self,
         candidate_labels: Optional[Sequence[str]] = None,
         policy: Optional[str] = None,
+        max_visual_examples: Optional[int] = None,
     ) -> RetrievalResult:
         """Retrieve active derived rules and relevant few-shot correction examples.
 
@@ -107,37 +115,49 @@ class CorrectionRetrievalEngine:
             candidate_labels: List of active class labels for the current detection task.
             policy: Optional policy ('box_mask', 'polygon_mask', 'polyline', 'full_31').
                 If omitted, automatically inferred from candidate_labels.
+            max_visual_examples: Optional override for max visual examples to include.
 
         Returns:
             RetrievalResult containing rule strings, example records, visual examples, and formatted prompt text.
         """
-        if not self.db.is_enabled():
-            return RetrievalResult()
-
-        canon_policy = resolve_policy_from_labels(candidate_labels=candidate_labels, policy=policy)
-
-        # Restrict candidate labels to the active policy if active
-        effective_labels = candidate_labels
-        if canon_policy == POLICY_BOX_MASK:
-            allowed = set(BOX_MASK_LABELS)
-            effective_labels = [l for l in candidate_labels if l in allowed] if candidate_labels else list(BOX_MASK_LABELS)
-        elif canon_policy == POLICY_POLYGON_MASK:
-            allowed = set(POLYGON_MASK_LABELS)
-            effective_labels = [l for l in candidate_labels if l in allowed] if candidate_labels else list(POLYGON_MASK_LABELS)
-        elif canon_policy == POLICY_POLYLINE:
-            allowed = set(POLYLINE_LABELS)
-            effective_labels = [l for l in candidate_labels if l in allowed] if candidate_labels else list(POLYLINE_LABELS)
-
         rules: List[str] = []
-        if self.use_rules:
-            rules = self.db.get_active_rules(labels=effective_labels)
-
         examples: List[Dict[str, Any]] = []
         visual_examples: List[Dict[str, Any]] = []
-        if self.use_examples:
-            examples = self._select_few_shot_examples(candidate_labels=effective_labels, policy=canon_policy)
-            if self.use_visual_examples:
-                visual_examples = self._build_visual_examples(examples, policy=canon_policy)
+
+        try:
+            with self.db._get_connection() as conn:
+                if not self.db.is_enabled(conn=conn):
+                    return RetrievalResult()
+
+                canon_policy = resolve_policy_from_labels(candidate_labels=candidate_labels, policy=policy)
+
+                # Restrict candidate labels to the active policy if active
+                effective_labels = candidate_labels
+                if canon_policy == POLICY_BOX_MASK:
+                    allowed = set(BOX_MASK_LABELS)
+                    effective_labels = [l for l in candidate_labels if l in allowed] if candidate_labels else list(BOX_MASK_LABELS)
+                elif canon_policy == POLICY_POLYGON_MASK:
+                    allowed = set(POLYGON_MASK_LABELS)
+                    effective_labels = [l for l in candidate_labels if l in allowed] if candidate_labels else list(POLYGON_MASK_LABELS)
+                elif canon_policy == POLICY_POLYLINE:
+                    allowed = set(POLYLINE_LABELS)
+                    effective_labels = [l for l in candidate_labels if l in allowed] if candidate_labels else list(POLYLINE_LABELS)
+
+                if self.use_rules:
+                    rules = self.db.get_active_rules(labels=effective_labels, conn=conn)
+
+                if self.use_examples:
+                    examples = self._select_few_shot_examples(candidate_labels=effective_labels, policy=canon_policy, conn=conn)
+        except sqlite3.OperationalError as exc:
+            logger.warning("Database lock/operational error during retrieve: %s; failing open", exc)
+            return RetrievalResult()
+        except Exception as exc:
+            logger.warning("Unexpected error during retrieve: %s; failing open", exc)
+            return RetrievalResult()
+
+        if self.use_examples and self.use_visual_examples and examples:
+            visual_limit = max_visual_examples if max_visual_examples is not None else self.max_visual_examples
+            visual_examples = self._build_visual_examples(examples, policy=canon_policy, max_visual=visual_limit)
 
         prompt_ext = self._format_prompt_extension(rules, examples)
 
@@ -152,12 +172,11 @@ class CorrectionRetrievalEngine:
         self,
         candidate_labels: Optional[Sequence[str]] = None,
         policy: Optional[str] = None,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> List[Dict[str, Any]]:
         """Select top relevant few-shot correction records matching candidate labels and policy."""
-        # Query recent corrections prioritizing RELABEL, ADD_MISSING, DELETE_FALSE_POSITIVE
-        conn = self.db._get_connection()
-        try:
-            cursor = conn.cursor()
+        def _query(c: sqlite3.Connection) -> List[Dict[str, Any]]:
+            cursor = c.cursor()
             query = """
                 SELECT id, image_hash, correction_type, ai_label, human_label,
                        ai_shape_json, human_shape_json, iou, crop_path, details_json, created_at
@@ -203,7 +222,7 @@ class CorrectionRetrievalEngine:
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
-            taxonomy = Taxonomy()
+            taxonomy = self.taxonomy
             selected = []
             for r in rows:
                 ai_lbl = r["ai_label"]
@@ -230,13 +249,21 @@ class CorrectionRetrievalEngine:
                 if len(selected) >= self.max_examples_per_pass:
                     break
             return selected
-        finally:
-            conn.close()
+
+        try:
+            if conn is not None:
+                return _query(conn)
+            with self.db._get_connection() as c:
+                return _query(c)
+        except sqlite3.OperationalError as exc:
+            logger.warning("Database lock/operational error during _select_few_shot_examples: %s", exc)
+            return []
 
     def _build_visual_examples(
         self,
         examples: List[Dict[str, Any]],
         policy: Optional[str] = None,
+        max_visual: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Build real multimodal few-shot visual examples with crop data URLs and expected annotations.
 
@@ -249,9 +276,10 @@ class CorrectionRetrievalEngine:
         - Full 31: multi-key {"objects": [...], "regions": [...], "lanes": [...]}
         """
         visual_examples: List[Dict[str, Any]] = []
+        limit = max_visual if max_visual is not None else self.max_visual_examples
 
         for item in examples:
-            if len(visual_examples) >= self.max_examples_per_pass:
+            if len(visual_examples) >= limit:
                 break
 
             crop_rel = item.get("crop_path")
@@ -259,21 +287,36 @@ class CorrectionRetrievalEngine:
                 continue
 
             resolved_path = self.db.resolve_crop_path(crop_rel)
-            if not resolved_path or not resolved_path.exists() or not resolved_path.is_file():
+            if not resolved_path:
                 continue
 
-            # Load and encode crop safely
-            try:
-                with Image.open(resolved_path) as im:
-                    rgb_im = im.convert("RGB")
-                    if max(rgb_im.size) > 512:
-                        rgb_im.thumbnail((512, 512), Image.Resampling.LANCZOS)
-                    buf = io.BytesIO()
-                    rgb_im.save(buf, format="JPEG", quality=85)
-                    crop_data_url = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
-            except Exception as e:
-                logger.debug(f"Skipping corrupt or unreadable crop file {resolved_path}: {e}")
-                continue
+            # Load and encode crop safely (bounded in 384-512px) with in-memory caching
+            crop_key = str(resolved_path)
+            if crop_key in _CROP_DATA_URL_CACHE:
+                crop_data_url = _CROP_DATA_URL_CACHE[crop_key]
+            else:
+                if not resolved_path.is_file():
+                    continue
+                try:
+                    with Image.open(resolved_path) as im:
+                        rgb_im = im.convert("RGB")
+                        max_dim = max(rgb_im.size)
+                        if max_dim > 512:
+                            rgb_im.thumbnail((512, 512), Image.Resampling.LANCZOS)
+                        elif 0 < max_dim < 384:
+                            scale_up = 384.0 / float(max_dim)
+                            new_w = max(1, int(round(rgb_im.width * scale_up)))
+                            new_h = max(1, int(round(rgb_im.height * scale_up)))
+                            rgb_im = rgb_im.resize((new_w, new_h), Image.Resampling.BILINEAR)
+                        buf = io.BytesIO()
+                        rgb_im.save(buf, format="JPEG", quality=85)
+                        crop_data_url = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+                        if len(_CROP_DATA_URL_CACHE) > 200:
+                            _CROP_DATA_URL_CACHE.clear()
+                        _CROP_DATA_URL_CACHE[crop_key] = crop_data_url
+                except Exception as e:
+                    logger.debug(f"Skipping corrupt or unreadable crop file {resolved_path}: {e}")
+                    continue
 
             ctype = item.get("correction_type")
             ai_lbl = item.get("ai_label")
@@ -300,7 +343,7 @@ class CorrectionRetrievalEngine:
                 continue
             crop_coords = details.get("crop_coords")  # [cx1, cy1, cx2, cy2] in original image pixels
 
-            taxonomy = Taxonomy()
+            taxonomy = self.taxonomy
             deleted_label = ai_lbl or target_label
             deleted_group = taxonomy.get_group(deleted_label)
             target_group = taxonomy.get_group(target_label)

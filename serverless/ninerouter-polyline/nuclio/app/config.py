@@ -29,7 +29,16 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output"
 DEFAULT_NINEROUTER_URL_HOST = "http://127.0.0.1:20128"
 DEFAULT_NINEROUTER_URL_CONTAINER = "http://host.docker.internal:20128"
 DEFAULT_VISION_MODEL = "ag/gemini-3.8-flash-high"
+DEFAULT_POLYLINE_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_RECTANGLE_MASK_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_POLYGON_MASK_VISION_MODEL = "ag/gemini-3.8-flash-low"
 DEFAULT_MAX_IMAGE_SIZE = 1600
+DEFAULT_POLYLINE_MAX_IMAGE_SIZE = 1280
+DEFAULT_POLYLINE_MAX_TOKENS = 1200
+DEFAULT_RECTANGLE_MASK_MAX_IMAGE_SIZE = 1280
+DEFAULT_RECTANGLE_MASK_MAX_TOKENS = 2000
+DEFAULT_POLYGON_MASK_MAX_IMAGE_SIZE = 1280
+DEFAULT_POLYGON_MASK_MAX_TOKENS = 2500
 DEFAULT_NINEROUTER_TIMEOUT = 180.0
 DEFAULT_FALLBACK_CONFIDENCE: Optional[float] = None
 
@@ -109,12 +118,28 @@ class AppConfig:
     ninerouter_url: str = DEFAULT_NINEROUTER_URL
     ninerouter_key: Optional[str] = None
     vision_model: str = DEFAULT_VISION_MODEL
+    rectangle_mask_model: Optional[str] = None
+    polygon_mask_model: Optional[str] = None
+    polyline_model: Optional[str] = None
     max_image_size: int = DEFAULT_MAX_IMAGE_SIZE
     ninerouter_timeout: float = DEFAULT_NINEROUTER_TIMEOUT
     fallback_confidence: Optional[float] = DEFAULT_FALLBACK_CONFIDENCE
     output_dir: Path = DEFAULT_OUTPUT_DIR
     labels_config_path: Path = DEFAULT_LABELS_PATH
     labels: LabelConfig = field(default_factory=LabelConfig)
+
+    def get_model_for_mode(self, mode: Optional[str] = None) -> str:
+        """Return model configured for a specific mode/detector, falling back to vision_model."""
+        if not mode:
+            return self.vision_model
+        m = mode.strip().lower()
+        if m in ("rectangle_mask", "box_mask"):
+            return self.rectangle_mask_model or os.getenv("RECTANGLE_MASK_MODEL") or self.vision_model
+        elif m == "polygon_mask":
+            return self.polygon_mask_model or os.getenv("POLYGON_MASK_MODEL") or self.vision_model
+        elif m == "polyline":
+            return self.polyline_model or os.getenv("POLYLINE_MODEL") or self.vision_model
+        return self.vision_model
 
     def __repr__(self) -> str:
         """Safe string representation masking API keys."""
@@ -123,6 +148,9 @@ class AppConfig:
             f"AppConfig(ninerouter_url={self.ninerouter_url!r}, "
             f"ninerouter_key={masked_key!r}, "
             f"vision_model={self.vision_model!r}, "
+            f"rectangle_mask_model={self.rectangle_mask_model!r}, "
+            f"polygon_mask_model={self.polygon_mask_model!r}, "
+            f"polyline_model={self.polyline_model!r}, "
             f"max_image_size={self.max_image_size}, "
             f"ninerouter_timeout={self.ninerouter_timeout}, "
             f"fallback_confidence={self.fallback_confidence}, "
@@ -216,10 +244,22 @@ class AppConfig:
         )
         label_cfg = LabelConfig.from_yaml(target_labels_path)
 
+        rect_model_env = os.getenv("RECTANGLE_MASK_MODEL")
+        rect_model = rect_model_env.strip() if rect_model_env else None
+
+        poly_model_env = os.getenv("POLYGON_MASK_MODEL")
+        poly_model = poly_model_env.strip() if poly_model_env else None
+
+        polyline_model_env = os.getenv("POLYLINE_MODEL")
+        polyline_model = polyline_model_env.strip() if polyline_model_env else None
+
         return cls(
             ninerouter_url=url,
             ninerouter_key=key,
             vision_model=model,
+            rectangle_mask_model=rect_model,
+            polygon_mask_model=poly_model,
+            polyline_model=polyline_model,
             max_image_size=max_size,
             ninerouter_timeout=timeout_val,
             fallback_confidence=fallback_conf,

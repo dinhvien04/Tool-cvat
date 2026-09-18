@@ -586,11 +586,23 @@ class Taxonomy:
     - Helper methods for parser, prompt builder, and shape router.
     """
 
+    _cached_default_state: Optional[Dict[str, Any]] = None
+
     def __init__(
         self,
         geometry_config_path: Optional[Union[str, Path]] = None,
         semantics_config_path: Optional[Union[str, Path]] = None,
     ) -> None:
+        if geometry_config_path is None and semantics_config_path is None and Taxonomy._cached_default_state is not None:
+            cached = Taxonomy._cached_default_state
+            self._labels = cached["labels"]
+            self._policy_to_labels = cached["policy_to_labels"]
+            self._group_to_labels = cached["group_to_labels"]
+            self._shape_to_labels = cached["shape_to_labels"]
+            self._ambiguity_map = cached["ambiguity_map"]
+            self._ambiguity_pairs = cached["ambiguity_pairs"]
+            return
+
         self._labels: Dict[str, LabelMetadata] = {}
         self._policy_to_labels: Dict[str, List[str]] = {
             POLICY_BOX_MASK: [],
@@ -622,6 +634,16 @@ class Taxonomy:
 
         # Strictly validate integrity
         self.validate()
+
+        if geometry_config_path is None and semantics_config_path is None:
+            Taxonomy._cached_default_state = {
+                "labels": dict(self._labels),
+                "policy_to_labels": {k: list(v) for k, v in self._policy_to_labels.items()},
+                "group_to_labels": {k: list(v) for k, v in self._group_to_labels.items()},
+                "shape_to_labels": {k: list(v) for k, v in self._shape_to_labels.items()},
+                "ambiguity_map": dict(self._ambiguity_map),
+                "ambiguity_pairs": list(self._ambiguity_pairs),
+            }
 
     def _load_geometry(self, path: Optional[Union[str, Path]]) -> None:
         """Load geometry configuration from YAML or built-in defaults."""

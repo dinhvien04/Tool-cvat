@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +22,19 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 from app.client import NineRouterClient, NineRouterError
-from app.config import DEFAULT_MAX_IMAGE_SIZE, DEFAULT_VISION_MODEL
+from app.config import (
+    DEFAULT_MAX_IMAGE_SIZE,
+    DEFAULT_POLYGON_MASK_MAX_IMAGE_SIZE,
+    DEFAULT_POLYGON_MASK_MAX_TOKENS,
+    DEFAULT_POLYGON_MASK_VISION_MODEL,
+    DEFAULT_POLYLINE_MAX_IMAGE_SIZE,
+    DEFAULT_POLYLINE_MAX_TOKENS,
+    DEFAULT_POLYLINE_VISION_MODEL,
+    DEFAULT_RECTANGLE_MASK_MAX_IMAGE_SIZE,
+    DEFAULT_RECTANGLE_MASK_MAX_TOKENS,
+    DEFAULT_RECTANGLE_MASK_VISION_MODEL,
+    DEFAULT_VISION_MODEL,
+)
 from app.image_ops import image_to_data_url, load_image, resize_image_if_needed
 from app.parser import ParsedObject, ParseResult, parse_and_validate
 from core.line_geometry import (
@@ -200,10 +213,45 @@ def annotate_image(
     active_mode = (output_mode or mode or MODE_BOX).strip().lower()
 
     # 1. Resolve model dynamically if not explicitly specified
-    if active_mode in (MODE_MASK, MODE_BOX_AND_MASK, MODE_FULL_31, MODE_RECTANGLE_MASK, MODE_BOX_MASK, MODE_POLYGON_MASK):
+    if active_mode in (MODE_RECTANGLE_MASK, MODE_BOX_MASK):
+        active_model = model or client.resolve_rectangle_mask_model()
+    elif active_mode == MODE_POLYGON_MASK:
+        active_model = model or client.resolve_polygon_mask_model()
+    elif active_mode in (MODE_MASK, MODE_BOX_AND_MASK, MODE_FULL_31):
         active_model = model or client.resolve_segmentation_model()
+    elif active_mode == MODE_POLYLINE:
+        active_model = model or client.resolve_polyline_model()
     else:
         active_model = model or client.resolve_vision_model()
+
+    # Resolve effective max_size and max_tokens based on active mode
+    eff_max_size = max_size
+    if eff_max_size is None or eff_max_size == DEFAULT_MAX_IMAGE_SIZE:
+        if active_mode in (MODE_RECTANGLE_MASK, MODE_BOX_MASK):
+            rect_size_env = os.getenv("RECTANGLE_MASK_MAX_IMAGE_SIZE") or os.getenv("MAX_IMAGE_SIZE")
+            eff_max_size = int(rect_size_env) if rect_size_env else DEFAULT_RECTANGLE_MASK_MAX_IMAGE_SIZE
+        elif active_mode == MODE_POLYGON_MASK:
+            poly_size_env = os.getenv("POLYGON_MASK_MAX_IMAGE_SIZE") or os.getenv("MAX_IMAGE_SIZE")
+            eff_max_size = int(poly_size_env) if poly_size_env else DEFAULT_POLYGON_MASK_MAX_IMAGE_SIZE
+        elif active_mode == MODE_POLYLINE:
+            poly_size_env = os.getenv("POLYLINE_MAX_IMAGE_SIZE")
+            eff_max_size = int(poly_size_env) if poly_size_env else DEFAULT_POLYLINE_MAX_IMAGE_SIZE
+        elif eff_max_size is None:
+            eff_max_size = DEFAULT_MAX_IMAGE_SIZE
+
+    eff_max_tokens = max_tokens
+    if eff_max_tokens is None or eff_max_tokens == 4096:
+        if active_mode in (MODE_RECTANGLE_MASK, MODE_BOX_MASK):
+            rect_tok_env = os.getenv("RECTANGLE_MASK_MAX_TOKENS") or os.getenv("MAX_TOKENS")
+            eff_max_tokens = int(rect_tok_env) if rect_tok_env else DEFAULT_RECTANGLE_MASK_MAX_TOKENS
+        elif active_mode == MODE_POLYGON_MASK:
+            poly_tok_env = os.getenv("POLYGON_MASK_MAX_TOKENS") or os.getenv("MAX_TOKENS")
+            eff_max_tokens = int(poly_tok_env) if poly_tok_env else DEFAULT_POLYGON_MASK_MAX_TOKENS
+        elif active_mode == MODE_POLYLINE:
+            poly_tok_env = os.getenv("POLYLINE_MAX_TOKENS")
+            eff_max_tokens = int(poly_tok_env) if poly_tok_env else DEFAULT_POLYLINE_MAX_TOKENS
+        elif eff_max_tokens is None:
+            eff_max_tokens = 4096
 
     # 2. Resolve candidate labels
     if candidate_labels:
@@ -240,7 +288,7 @@ def annotate_image(
 
     # 4. Create aspect-ratio preserving copy for transmission
     send_image, was_resized, (send_w, send_h) = resize_image_if_needed(
-        crop_image, max_size=max_size
+        crop_image, max_size=eff_max_size
     )
 
     # 5. Prepare Base64 Data URL and vision prompt with requested mode
@@ -287,8 +335,8 @@ def annotate_image(
             elif active_mode == MODE_POLYLINE:
                 policy_filter = POLICY_POLYLINE
 
-            retrieval_engine = CorrectionRetrievalEngine(db=f_db)
-            retrieval_res = retrieval_engine.retrieve(candidate_labels=labels, policy=policy_filter)
+            retrieval_engine = CorrectionRetrievalEngine(db=f_db, max_visual_examples=1)
+            retrieval_res = retrieval_engine.retrieve(candidate_labels=labels, policy=policy_filter, max_visual_examples=1)
             if retrieval_res.prompt_extension:
                 prompt += "\n\n" + retrieval_res.prompt_extension
             rules_injected = retrieval_res.rules
@@ -305,7 +353,7 @@ def annotate_image(
         image_bytes_or_b64=data_url,
         prompt=prompt,
         temperature=temperature,
-        max_tokens=max_tokens,
+        max_tokens=eff_max_tokens,
         visual_examples=visual_examples if visual_examples else None,
         mode=active_mode,
     )

@@ -30,6 +30,15 @@ param (
     [string]$VisionModel = $env:VISION_MODEL,
 
     [Parameter(Mandatory = $false)]
+    [string]$RectangleMaskModel = $env:RECTANGLE_MASK_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$PolygonMaskModel = $env:POLYGON_MASK_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$PolylineModel = $env:POLYLINE_MODEL,
+
+    [Parameter(Mandatory = $false)]
     [string]$NineRouterKey = $env:NINEROUTER_KEY,
 
     [Parameter(Mandatory = $false)]
@@ -40,6 +49,11 @@ param (
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $VisionModel) { $VisionModel = "ag/gemini-3.8-flash-low" }
+if (-not $RectangleMaskModel) { $RectangleMaskModel = "ag/gemini-3.8-flash-low" }
+if (-not $PolygonMaskModel) { $PolygonMaskModel = "ag/gemini-3.8-flash-low" }
+if (-not $PolylineModel) { $PolylineModel = "ag/gemini-3.8-flash-low" }
 
 Write-Host "======================================================================" -ForegroundColor Cyan
 Write-Host " CVAT x 9Router - Deploy Streamlined 3-Detector Suite" -ForegroundColor Cyan
@@ -216,6 +230,27 @@ foreach ($fn in $functionsToDeploy) {
     Write-Host "Deploying $fnDisplay ($fnName)..." -ForegroundColor Cyan
     Write-Host "----------------------------------------------------------------------" -ForegroundColor Gray
 
+    # Resolve detector-specific model with fallback to VISION_MODEL
+    $fnModel = $resolvedVisionModel
+    $detectorEnvVar = ""
+    if ($fnName -eq "ninerouter-rectangle-mask") {
+        if ($RectangleMaskModel -and $RectangleMaskModel.Trim() -ne "") {
+            $fnModel = $RectangleMaskModel.Trim()
+        }
+        $detectorEnvVar = "RECTANGLE_MASK_MODEL=$fnModel"
+    } elseif ($fnName -eq "ninerouter-polygon-mask") {
+        if ($PolygonMaskModel -and $PolygonMaskModel.Trim() -ne "") {
+            $fnModel = $PolygonMaskModel.Trim()
+        }
+        $detectorEnvVar = "POLYGON_MASK_MODEL=$fnModel"
+    } elseif ($fnName -eq "ninerouter-polyline") {
+        if ($PolylineModel -and $PolylineModel.Trim() -ne "") {
+            $fnModel = $PolylineModel.Trim()
+        }
+        $detectorEnvVar = "POLYLINE_MODEL=$fnModel"
+    }
+    Write-Host "Active model for $($fnName): $fnModel" -ForegroundColor Green
+
     # Validate specification
     $specValidator = Join-Path $ScriptDir "validate_function_spec.py"
     & python $specValidator --yaml-path $functionYaml
@@ -240,6 +275,9 @@ foreach ($fn in $functionsToDeploy) {
         if ($CvatWebhookSecret) {
             $extraEnvBash += "--env `"CVAT_WEBHOOK_SECRET=$CvatWebhookSecret`" "
         }
+        if ($detectorEnvVar) {
+            $extraEnvBash += "--env `"$detectorEnvVar`" "
+        }
 
         $bashScript = @"
 set -e
@@ -254,7 +292,7 @@ nuctl deploy $fnName \
     --platform local \
     --platform-config '{"attributes": {"network": "$networkName"}}' \
     --env "NINEROUTER_URL=$NineRouterUrl" \
-    --env "VISION_MODEL=$resolvedVisionModel" \
+    --env "VISION_MODEL=$fnModel" \
     --env "DETECTION_MODE=$fnMode" \
     --env "NINEROUTER_TIMEOUT=$NineRouterTimeout" \
     --env "FEEDBACK_DATA_DIR=/opt/nuclio/feedback" \
@@ -282,12 +320,13 @@ nuctl deploy $fnName \
             "--platform", "local",
             "--platform-config", "{`"attributes`": {`"network`": `"$networkName`"}}",
             "--env", "NINEROUTER_URL=$NineRouterUrl",
-            "--env", "VISION_MODEL=$resolvedVisionModel",
+            "--env", "VISION_MODEL=$fnModel",
             "--env", "DETECTION_MODE=$fnMode",
             "--env", "NINEROUTER_TIMEOUT=$NineRouterTimeout",
             "--env", "FEEDBACK_DATA_DIR=/opt/nuclio/feedback",
             "--env", "FEEDBACK_DB_PATH=/opt/nuclio/feedback/feedback.sqlite3"
         )
+        if ($detectorEnvVar) { $deployArgs += @("--env", $detectorEnvVar) }
         if ($NineRouterKey) { $deployArgs += @("--env", "NINEROUTER_KEY=$NineRouterKey") }
         if ($CvatWebhookSecret) { $deployArgs += @("--env", "CVAT_WEBHOOK_SECRET=$CvatWebhookSecret") }
         & nuctl @deployArgs

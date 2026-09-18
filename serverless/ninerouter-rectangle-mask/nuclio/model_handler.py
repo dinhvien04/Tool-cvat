@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
@@ -31,6 +32,9 @@ from app.config import (
     DEFAULT_MAX_IMAGE_SIZE,
     DEFAULT_NINEROUTER_TIMEOUT,
     DEFAULT_NINEROUTER_URL_CONTAINER,
+    DEFAULT_RECTANGLE_MASK_MAX_IMAGE_SIZE,
+    DEFAULT_RECTANGLE_MASK_MAX_TOKENS,
+    DEFAULT_RECTANGLE_MASK_VISION_MODEL,
     DEFAULT_VISION_MODEL,
     mask_api_key,
 )
@@ -73,12 +77,13 @@ class ModelHandler:
         model: Optional[str] = None,
         timeout: Optional[float] = None,
         max_image_size: Optional[int] = None,
+        max_tokens: Optional[int] = None,
         candidate_labels: Optional[List[str]] = None,
         mode: Optional[str] = None,
     ):
         self.base_url = base_url or os.getenv("NINEROUTER_URL", DEFAULT_NINEROUTER_URL_CONTAINER)
         self.api_key = api_key or os.getenv("NINEROUTER_KEY")
-        self.requested_model = model or os.getenv("VISION_MODEL")
+        self.requested_model = model or os.getenv("RECTANGLE_MASK_MODEL") or os.getenv("VISION_MODEL")
         env_mode = os.getenv("DETECTION_MODE", MODE_RECTANGLE_MASK)
         self.default_mode = (mode or env_mode or MODE_RECTANGLE_MASK).strip().lower()
 
@@ -91,14 +96,23 @@ class ModelHandler:
         except (ValueError, TypeError):
             self.timeout = DEFAULT_NINEROUTER_TIMEOUT
 
-        max_size_env = os.getenv("MAX_IMAGE_SIZE")
+        max_size_env = os.getenv("RECTANGLE_MASK_MAX_IMAGE_SIZE") or os.getenv("MAX_IMAGE_SIZE")
         try:
-            val_size = max_image_size if max_image_size is not None else (max_size_env or DEFAULT_MAX_IMAGE_SIZE)
+            val_size = max_image_size if max_image_size is not None else (max_size_env or DEFAULT_RECTANGLE_MASK_MAX_IMAGE_SIZE)
             self.max_image_size = int(val_size)
             if self.max_image_size <= 0:
-                self.max_image_size = DEFAULT_MAX_IMAGE_SIZE
+                self.max_image_size = DEFAULT_RECTANGLE_MASK_MAX_IMAGE_SIZE
         except (ValueError, TypeError):
-            self.max_image_size = DEFAULT_MAX_IMAGE_SIZE
+            self.max_image_size = DEFAULT_RECTANGLE_MASK_MAX_IMAGE_SIZE
+
+        max_tokens_env = os.getenv("RECTANGLE_MASK_MAX_TOKENS") or os.getenv("MAX_TOKENS")
+        try:
+            val_tokens = max_tokens if max_tokens is not None else (max_tokens_env or DEFAULT_RECTANGLE_MASK_MAX_TOKENS)
+            self.max_tokens = int(val_tokens)
+            if self.max_tokens <= 0:
+                self.max_tokens = DEFAULT_RECTANGLE_MASK_MAX_TOKENS
+        except (ValueError, TypeError):
+            self.max_tokens = DEFAULT_RECTANGLE_MASK_MAX_TOKENS
 
         self.candidate_labels = candidate_labels or load_spec_labels_from_function_yaml()
 
@@ -109,9 +123,12 @@ class ModelHandler:
             timeout=self.timeout,
         )
 
-        # Dynamic segmentation model resolution
+        # Dynamic model resolution prioritizing fast low-reasoning models for Rectangle + Mask
         try:
-            self.active_model: str = self.client.resolve_segmentation_model(self.requested_model)
+            if hasattr(self.client, "resolve_rectangle_mask_model"):
+                self.active_model: str = self.client.resolve_rectangle_mask_model(self.requested_model)
+            else:
+                self.active_model: str = self.client.resolve_segmentation_model(self.requested_model)
         except Exception as e:
             logger.error(f"Failed to resolve vision model {self.requested_model!r} from 9Router: {e}")
             raise
@@ -119,7 +136,8 @@ class ModelHandler:
         logger.info(
             f"Initialized ModelHandler (Rectangle + Mask): base_url={self.base_url!r}, "
             f"key={mask_api_key(self.api_key)}, model={self.active_model!r}, "
-            f"timeout={self.timeout}s, labels_count={len(self.candidate_labels)}"
+            f"timeout={self.timeout}s, max_size={self.max_image_size}, max_tokens={self.max_tokens}, "
+            f"labels_count={len(self.candidate_labels)}"
         )
 
     def __repr__(self) -> str:
@@ -156,6 +174,7 @@ class ModelHandler:
         if not image_bytes:
             raise ValueError("Empty image payload received")
 
+        t_infer_start = time.perf_counter()
         active_mode = (mode or self.default_mode).strip().lower()
 
         result: AnnotationResult = annotate_image(
@@ -165,9 +184,19 @@ class ModelHandler:
             candidate_labels=self.candidate_labels,
             threshold=threshold,
             max_size=self.max_image_size,
+            max_tokens=self.max_tokens,
             strict=False,
             mode=active_mode,
             roi=roi,
+        )
+
+        total_s = time.perf_counter() - t_infer_start
+        router_s = result.api_duration_seconds
+        local_ms = max(0.0, (total_s - router_s) * 1000.0)
+
+        logger.info(
+            f"PERF detector={active_mode} router_s={router_s:.2f} local_ms={local_ms:.1f} "
+            f"total_s={total_s:.2f} shapes={len(result.shapes)}"
         )
 
         logger.info(

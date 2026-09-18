@@ -110,6 +110,19 @@ class SyncReport:
     success: bool = True
     message: str = ""
 
+    @property
+    def total_corrections(self) -> int:
+        if isinstance(self.corrections_found, dict):
+            return sum(self.corrections_found.values())
+        try:
+            return int(self.corrections_found)
+        except (TypeError, ValueError):
+            return 0
+
+    @property
+    def corrections_recorded(self) -> int:
+        return self.total_corrections
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "job_id": self.job_id,
@@ -118,6 +131,7 @@ class SyncReport:
             "frames_reconciled": self.frames_reconciled,
             "total_human_shapes": self.total_human_shapes,
             "corrections_found": self.corrections_found,
+            "corrections_recorded": self.corrections_recorded,
             "rules_derived": self.rules_derived,
             "success": self.success,
             "message": self.message,
@@ -391,7 +405,9 @@ def sync_job_feedback(
     # 2. Fetch Labels
     label_map: Dict[int, str] = {}
     if task_id:
-        label_map = client.get_labels(task_id)
+        fetched_map = client.get_labels(task_id)
+        if isinstance(fetched_map, dict):
+            label_map = fetched_map
 
     # 3. Fetch Job Annotations
     anno_data = client.get_annotations(job_id)
@@ -408,7 +424,13 @@ def sync_job_feedback(
     for s in shapes:
         frame_idx = int(s.get("frame", 0))
         label_id = s.get("label_id")
-        label_name = label_map.get(label_id, s.get("label", str(label_id)))
+        raw_label = s.get("label")
+        if label_id is not None and label_id in label_map:
+            label_name = str(label_map[label_id])
+        elif raw_label is not None:
+            label_name = str(raw_label)
+        else:
+            label_name = str(label_id) if label_id is not None else ""
 
         converted_shape = {
             "id": s.get("id"),

@@ -16,15 +16,19 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 import shutil
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 from PIL import Image, ImageChops, ImageDraw
 
@@ -1267,15 +1271,16 @@ class FeedbackDatabase:
         self.max_examples_total = max_examples_total
         self.max_storage_mb = max_storage_mb
         self.max_crop_dimension = max_crop_dimension
+        DEFAULT_DB_TIMEOUT = 0.5  # Fast 0.25 - 1.0s fail-open window for locks
         if timeout is not None:
             self.timeout = float(timeout)
         elif env_timeout:
             try:
                 self.timeout = float(env_timeout)
             except (ValueError, TypeError):
-                self.timeout = 5.0
+                self.timeout = DEFAULT_DB_TIMEOUT
         else:
-            self.timeout = 5.0
+            self.timeout = DEFAULT_DB_TIMEOUT
 
         # Ensure parent directories exist
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1300,28 +1305,44 @@ class FeedbackDatabase:
             return cand2
         return None
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_connection(self):
         """Create a connection with robust file-locking journal mode and row factory.
 
-        Uses TRUNCATE journal mode and busy_timeout based on self.timeout. TRUNCATE is universally
-        supported across Windows NTFS, Docker bind mounts (9P/VirtioFS), WSL2, and Linux,
-        completely avoiding POSIX shared-memory (-shm) failures seen with WAL mode on bind mounts.
+        Uses TRUNCATE journal mode and busy_timeout based on self.timeout (default 0.5s).
+        TRUNCATE is universally supported across Windows NTFS, Docker bind mounts (9P/VirtioFS),
+        WSL2, and Linux, completely avoiding POSIX shared-memory (-shm) failures seen with WAL mode.
+        Closes the connection cleanly upon context exit to prevent Windows file-lock leakage.
         """
         conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
         conn.row_factory = sqlite3.Row
+
         try:
-            busy_ms = max(100, int(self.timeout * 1000))
-            conn.execute(f"PRAGMA busy_timeout={busy_ms}")
-            conn.execute("PRAGMA journal_mode=TRUNCATE")
-            conn.execute("PRAGMA synchronous=NORMAL")
-        except sqlite3.OperationalError as exc:
-            logger.warning("Could not set SQLite pragmas (%s); proceeding with defaults", exc)
-        return conn
+            yield conn
+            if conn.in_transaction:
+                conn.commit()
+        except Exception:
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _init_db(self) -> None:
         """Initialize database schema with proper indexes."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=TRUNCATE")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.OperationalError as exc:
+                logger.warning("Could not set database pragmas: %s", exc)
 
             # 1. Predictions baseline table
             cursor.execute(
@@ -1434,12 +1455,13 @@ class FeedbackDatabase:
         self,
         image_hash: str,
         shapes: List[Dict[str, Any]],
-        model: str,
-        mode: str,
+        model: str = "default",
+        mode: str = "rectangle_mask",
         task_id: Optional[int] = None,
         job_id: Optional[int] = None,
         frame_index: Optional[int] = None,
         perceptual_hash: Optional[str] = None,
+        **kwargs: Any,
     ) -> int:
         """Store original AI prediction as baseline (sanitized, zero secrets/base64).
 
@@ -1456,6 +1478,10 @@ class FeedbackDatabase:
         Returns:
             Inserted record row id.
         """
+        if (not model or model == "default") and "model_name" in kwargs:
+            model = str(kwargs.pop("model_name"))
+        if not mode and "pipeline_mode" in kwargs:
+            mode = str(kwargs.pop("pipeline_mode"))
         # Sanitize shapes to avoid unbounded memory
         clean_shapes = []
         for s in shapes:
@@ -1476,18 +1502,22 @@ class FeedbackDatabase:
         now_iso = datetime.now(timezone.utc).isoformat()
         shapes_str = json.dumps(clean_shapes)
 
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO predictions
-                    (image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_str, now_iso),
-            )
-            conn.commit()
-            return cursor.lastrowid
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO predictions
+                        (image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_str, now_iso),
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except sqlite3.OperationalError as exc:
+            logger.warning("Feedback DB lock during save_prediction_baseline (%s); failing open", exc)
+            return -1
 
     def get_prediction_baseline(
         self,
@@ -1504,84 +1534,20 @@ class FeedbackDatabase:
         2. Secondary: Lightweight perceptual hash fallback (dHash with Hamming distance <= 5).
         3. Tertiary: Exact job_id + frame_index fallback.
         """
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
 
-            # Level 1: Exact decoded-RGB SHA-256 fingerprint
-            cursor.execute(
-                """
-                SELECT id, image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at
-                FROM predictions
-                WHERE image_hash = ?
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (image_hash,),
-            )
-            row = cursor.fetchone()
-            if row:
-                return {
-                    "id": row["id"],
-                    "image_hash": row["image_hash"],
-                    "perceptual_hash": row["perceptual_hash"],
-                    "task_id": row["task_id"],
-                    "job_id": row["job_id"],
-                    "frame_index": row["frame_index"],
-                    "model": row["model"],
-                    "mode": row["mode"],
-                    "shapes": json.loads(row["shapes_json"]),
-                    "created_at": row["created_at"],
-                    "match_type": "exact_fingerprint",
-                }
-
-            # Level 2: Secondary perceptual difference hash fallback
-            if perceptual_hash:
+                # Level 1: Exact decoded-RGB SHA-256 fingerprint
                 cursor.execute(
                     """
                     SELECT id, image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at
                     FROM predictions
-                    WHERE perceptual_hash IS NOT NULL
-                    ORDER BY id DESC
-                    LIMIT 100
-                    """
-                )
-                candidates = cursor.fetchall()
-                best_row = None
-                min_dist = 65
-                for cand in candidates:
-                    c_phash = cand["perceptual_hash"]
-                    if c_phash:
-                        dist = hamming_distance(perceptual_hash, c_phash)
-                        if dist <= max_hamming_distance and dist < min_dist:
-                            min_dist = dist
-                            best_row = cand
-                if best_row:
-                    return {
-                        "id": best_row["id"],
-                        "image_hash": best_row["image_hash"],
-                        "perceptual_hash": best_row["perceptual_hash"],
-                        "task_id": best_row["task_id"],
-                        "job_id": best_row["job_id"],
-                        "frame_index": best_row["frame_index"],
-                        "model": best_row["model"],
-                        "mode": best_row["mode"],
-                        "shapes": json.loads(best_row["shapes_json"]),
-                        "created_at": best_row["created_at"],
-                        "match_type": "perceptual_hash",
-                        "hamming_distance": min_dist,
-                    }
-
-            # Level 3: Tertiary job_id + frame_index fallback
-            if job_id is not None and frame_index is not None:
-                cursor.execute(
-                    """
-                    SELECT id, image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at
-                    FROM predictions
-                    WHERE job_id = ? AND frame_index = ?
+                    WHERE image_hash = ?
                     ORDER BY id DESC
                     LIMIT 1
                     """,
-                    (job_id, frame_index),
+                    (image_hash,),
                 )
                 row = cursor.fetchone()
                 if row:
@@ -1596,9 +1562,77 @@ class FeedbackDatabase:
                         "mode": row["mode"],
                         "shapes": json.loads(row["shapes_json"]),
                         "created_at": row["created_at"],
-                        "match_type": "job_frame_fallback",
+                        "match_type": "exact_fingerprint",
                     }
 
+                # Level 2: Secondary perceptual difference hash fallback
+                if perceptual_hash:
+                    cursor.execute(
+                        """
+                        SELECT id, image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at
+                        FROM predictions
+                        WHERE perceptual_hash IS NOT NULL
+                        ORDER BY id DESC
+                        LIMIT 100
+                        """
+                    )
+                    candidates = cursor.fetchall()
+                    best_row = None
+                    min_dist = 65
+                    for cand in candidates:
+                        c_phash = cand["perceptual_hash"]
+                        if c_phash:
+                            dist = hamming_distance(perceptual_hash, c_phash)
+                            if dist <= max_hamming_distance and dist < min_dist:
+                                min_dist = dist
+                                best_row = cand
+                    if best_row:
+                        return {
+                            "id": best_row["id"],
+                            "image_hash": best_row["image_hash"],
+                            "perceptual_hash": best_row["perceptual_hash"],
+                            "task_id": best_row["task_id"],
+                            "job_id": best_row["job_id"],
+                            "frame_index": best_row["frame_index"],
+                            "model": best_row["model"],
+                            "mode": best_row["mode"],
+                            "shapes": json.loads(best_row["shapes_json"]),
+                            "created_at": best_row["created_at"],
+                            "match_type": "perceptual_hash",
+                            "hamming_distance": min_dist,
+                        }
+
+                # Level 3: Tertiary job_id + frame_index fallback
+                if job_id is not None and frame_index is not None:
+                    cursor.execute(
+                        """
+                        SELECT id, image_hash, perceptual_hash, task_id, job_id, frame_index, model, mode, shapes_json, created_at
+                        FROM predictions
+                        WHERE job_id = ? AND frame_index = ?
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (job_id, frame_index),
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        return {
+                            "id": row["id"],
+                            "image_hash": row["image_hash"],
+                            "perceptual_hash": row["perceptual_hash"],
+                            "task_id": row["task_id"],
+                            "job_id": row["job_id"],
+                            "frame_index": row["frame_index"],
+                            "model": row["model"],
+                            "mode": row["mode"],
+                            "shapes": json.loads(row["shapes_json"]),
+                            "created_at": row["created_at"],
+                            "match_type": "job_frame_fallback",
+                        }
+
+                return None
+        except sqlite3.OperationalError as exc:
+            logger.warning("Feedback DB lock during get_prediction_baseline (%s); failing open", exc)
             return None
 
     # -------------------------------------------------------------------------
@@ -1617,18 +1651,22 @@ class FeedbackDatabase:
         """Save human annotations imported from CVAT."""
         now_iso = datetime.now(timezone.utc).isoformat()
         shapes_str = json.dumps(shapes)
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO human_annotations
-                    (image_hash, task_id, job_id, frame_index, shapes_json, quality_tier, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (image_hash, task_id, job_id, frame_index, shapes_str, quality_tier, now_iso),
-            )
-            conn.commit()
-            return cursor.lastrowid
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO human_annotations
+                        (image_hash, task_id, job_id, frame_index, shapes_json, quality_tier, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (image_hash, task_id, job_id, frame_index, shapes_str, quality_tier, now_iso),
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except sqlite3.OperationalError as exc:
+            logger.warning("Feedback DB lock during save_human_annotations (%s); failing open", exc)
+            return -1
 
     # -------------------------------------------------------------------------
     # Recording Corrections & Generating Crops
@@ -1659,54 +1697,58 @@ class FeedbackDatabase:
         now_iso = datetime.now(timezone.utc).isoformat()
         created_ids: List[int] = []
 
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            for item in corrections:
-                crop_rel_path = None
-                # Create visual crop for high-value correction signals if image is present
-                if image is not None and item.correction_type in (
-                    CORRECTION_RELABEL,
-                    CORRECTION_BOX_MOVE,
-                    CORRECTION_BOX_RESIZE,
-                    CORRECTION_MASK_EDIT,
-                    CORRECTION_REGION_EDIT,
-                    CORRECTION_LANE_EDIT,
-                    CORRECTION_ADD_MISSING,
-                    CORRECTION_DELETE_FALSE_POSITIVE,
-                ):
-                    crop_rel_path = self._save_correction_crop(image, item, image_hash)
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                for item in corrections:
+                    crop_rel_path = None
+                    # Create visual crop for high-value correction signals if image is present
+                    if image is not None and item.correction_type in (
+                        CORRECTION_RELABEL,
+                        CORRECTION_BOX_MOVE,
+                        CORRECTION_BOX_RESIZE,
+                        CORRECTION_MASK_EDIT,
+                        CORRECTION_REGION_EDIT,
+                        CORRECTION_LANE_EDIT,
+                        CORRECTION_ADD_MISSING,
+                        CORRECTION_DELETE_FALSE_POSITIVE,
+                    ):
+                        crop_rel_path = self._save_correction_crop(image, item, image_hash)
 
-                cursor.execute(
-                    """
-                    INSERT INTO corrections
-                        (image_hash, task_id, job_id, frame_index, correction_type,
-                         ai_label, human_label, ai_shape_json, human_shape_json,
-                         iou, crop_path, details_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        image_hash,
-                        task_id,
-                        job_id,
-                        frame_index,
-                        item.correction_type,
-                        item.ai_label,
-                        item.human_label,
-                        json.dumps(item.ai_shape) if item.ai_shape else None,
-                        json.dumps(item.human_shape) if item.human_shape else None,
-                        float(item.iou),
-                        crop_rel_path,
-                        json.dumps(item.details),
-                        now_iso,
-                    ),
-                )
-                created_ids.append(cursor.lastrowid)
+                    cursor.execute(
+                        """
+                        INSERT INTO corrections
+                            (image_hash, task_id, job_id, frame_index, correction_type,
+                             ai_label, human_label, ai_shape_json, human_shape_json,
+                             iou, crop_path, details_json, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            image_hash,
+                            task_id,
+                            job_id,
+                            frame_index,
+                            item.correction_type,
+                            item.ai_label,
+                            item.human_label,
+                            json.dumps(item.ai_shape) if item.ai_shape else None,
+                            json.dumps(item.human_shape) if item.human_shape else None,
+                            float(item.iou),
+                            crop_rel_path,
+                            json.dumps(item.details),
+                            now_iso,
+                        ),
+                    )
+                    created_ids.append(cursor.lastrowid)
 
-            conn.commit()
+                conn.commit()
 
-        # Prune storage if crop limits exceeded
-        self._prune_crops_if_needed()
-        return created_ids
+            # Prune storage if crop limits exceeded
+            self._prune_crops_if_needed()
+            return created_ids
+        except sqlite3.OperationalError as exc:
+            logger.warning("Feedback DB lock during record_corrections (%s); failing open", exc)
+            return []
 
     def _save_correction_crop(
         self,
@@ -1827,59 +1869,62 @@ class FeedbackDatabase:
             for lbl in ALL_31_LABELS
         }
 
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT correction_type, ai_label, human_label, COUNT(*) as cnt
-                FROM corrections
-                GROUP BY correction_type, ai_label, human_label
-                """
-            )
-            for row in cursor.fetchall():
-                ctype = row["correction_type"]
-                ai_lbl = row["ai_label"]
-                human_lbl = row["human_label"]
-                cnt = int(row["cnt"])
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT correction_type, ai_label, human_label, COUNT(*) as cnt
+                    FROM corrections
+                    GROUP BY correction_type, ai_label, human_label
+                    """
+                )
+                for row in cursor.fetchall():
+                    ctype = row["correction_type"]
+                    ai_lbl = row["ai_label"]
+                    human_lbl = row["human_label"]
+                    cnt = int(row["cnt"])
 
-                if ctype == CORRECTION_NO_CHANGE and ai_lbl in stats:
-                    stats[ai_lbl]["accepted"] += cnt
+                    if ctype == CORRECTION_NO_CHANGE and ai_lbl in stats:
+                        stats[ai_lbl]["accepted"] += cnt
 
-                elif ctype == CORRECTION_RELABEL:
-                    if ai_lbl in stats:
-                        stats[ai_lbl]["relabeled_from"] += cnt
+                    elif ctype == CORRECTION_RELABEL:
+                        if ai_lbl in stats:
+                            stats[ai_lbl]["relabeled_from"] += cnt
+                            stats[ai_lbl]["total_corrections"] += cnt
+                        if human_lbl in stats:
+                            stats[human_lbl]["relabeled_to"] += cnt
+                            stats[human_lbl]["total_corrections"] += cnt
+
+                    elif ctype == CORRECTION_BOX_MOVE and ai_lbl in stats:
+                        stats[ai_lbl]["box_moved"] += cnt
                         stats[ai_lbl]["total_corrections"] += cnt
-                    if human_lbl in stats:
-                        stats[human_lbl]["relabeled_to"] += cnt
+
+                    elif ctype == CORRECTION_BOX_RESIZE and ai_lbl in stats:
+                        stats[ai_lbl]["box_resized"] += cnt
+                        stats[ai_lbl]["total_corrections"] += cnt
+
+                    elif ctype == CORRECTION_MASK_EDIT and ai_lbl in stats:
+                        stats[ai_lbl]["mask_edited"] += cnt
+                        stats[ai_lbl]["total_corrections"] += cnt
+
+                    elif ctype == CORRECTION_REGION_EDIT and ai_lbl in stats:
+                        stats[ai_lbl]["region_edited"] += cnt
+                        stats[ai_lbl]["total_corrections"] += cnt
+
+                    elif ctype == CORRECTION_LANE_EDIT and ai_lbl in stats:
+                        stats[ai_lbl]["lane_edited"] += cnt
+                        stats[ai_lbl]["total_corrections"] += cnt
+
+                    elif ctype == CORRECTION_DELETE_FALSE_POSITIVE and ai_lbl in stats:
+                        stats[ai_lbl]["false_positives"] += cnt
+                        stats[ai_lbl]["total_corrections"] += cnt
+
+                    elif ctype == CORRECTION_ADD_MISSING and human_lbl in stats:
+                        stats[human_lbl]["missed_adds"] += cnt
                         stats[human_lbl]["total_corrections"] += cnt
-
-                elif ctype == CORRECTION_BOX_MOVE and ai_lbl in stats:
-                    stats[ai_lbl]["box_moved"] += cnt
-                    stats[ai_lbl]["total_corrections"] += cnt
-
-                elif ctype == CORRECTION_BOX_RESIZE and ai_lbl in stats:
-                    stats[ai_lbl]["box_resized"] += cnt
-                    stats[ai_lbl]["total_corrections"] += cnt
-
-                elif ctype == CORRECTION_MASK_EDIT and ai_lbl in stats:
-                    stats[ai_lbl]["mask_edited"] += cnt
-                    stats[ai_lbl]["total_corrections"] += cnt
-
-                elif ctype == CORRECTION_REGION_EDIT and ai_lbl in stats:
-                    stats[ai_lbl]["region_edited"] += cnt
-                    stats[ai_lbl]["total_corrections"] += cnt
-
-                elif ctype == CORRECTION_LANE_EDIT and ai_lbl in stats:
-                    stats[ai_lbl]["lane_edited"] += cnt
-                    stats[ai_lbl]["total_corrections"] += cnt
-
-                elif ctype == CORRECTION_DELETE_FALSE_POSITIVE and ai_lbl in stats:
-                    stats[ai_lbl]["false_positives"] += cnt
-                    stats[ai_lbl]["total_corrections"] += cnt
-
-                elif ctype == CORRECTION_ADD_MISSING and human_lbl in stats:
-                    stats[human_lbl]["missed_adds"] += cnt
-                    stats[human_lbl]["total_corrections"] += cnt
+        except sqlite3.OperationalError as exc:
+            logger.warning("Database lock/operational error during get_label_statistics: %s", exc)
 
         return stats
 
@@ -1904,11 +1949,15 @@ class FeedbackDatabase:
         query += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
 
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-            return [dict(r) for r in rows]
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                return [dict(r) for r in rows]
+        except sqlite3.OperationalError as exc:
+            logger.warning("Database lock/operational error during get_corrections: %s", exc)
+            return []
 
     # -------------------------------------------------------------------------
     # Derived Rule Generation
@@ -1928,130 +1977,133 @@ class FeedbackDatabase:
         now_iso = datetime.now(timezone.utc).isoformat()
         rules_added: List[Dict[str, Any]] = []
 
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
 
-            # 1. Confusion pairs: RELABEL
-            cursor.execute(
-                """
-                SELECT ai_label, human_label, COUNT(*) as cnt
-                FROM corrections
-                WHERE correction_type = 'RELABEL' AND ai_label IS NOT NULL AND human_label IS NOT NULL
-                GROUP BY ai_label, human_label
-                HAVING cnt >= ?
-                """,
-                (min_samples,),
-            )
-            for row in cursor.fetchall():
-                src = row["ai_label"]
-                tgt = row["human_label"]
-                cnt = int(row["cnt"])
-                rule_text = (
-                    f"Frequent confusion pattern: Objects predicted as '{src}' were corrected to '{tgt}' "
-                    f"in {cnt} human reviews. Carefully distinguish '{src}' from '{tgt}' by inspecting vehicle bed, "
-                    f"size, or visual context before outputting."
-                )
+                # 1. Confusion pairs: RELABEL
                 cursor.execute(
                     """
-                    INSERT INTO rules
-                        (source_label, target_label, rule_type, rule_text, sample_count, confidence, is_active, updated_at)
-                    VALUES (?, ?, 'confusion_pair', ?, ?, 1.0, 1, ?)
-                    ON CONFLICT(rule_text) DO UPDATE SET
-                        sample_count = excluded.sample_count,
-                        updated_at = excluded.updated_at
+                    SELECT ai_label, human_label, COUNT(*) as cnt
+                    FROM corrections
+                    WHERE correction_type = 'RELABEL' AND ai_label IS NOT NULL AND human_label IS NOT NULL
+                    GROUP BY ai_label, human_label
+                    HAVING cnt >= ?
                     """,
-                    (src, tgt, rule_text, cnt, now_iso),
+                    (min_samples,),
                 )
-                rules_added.append({
-                    "source_label": src,
-                    "target_label": tgt,
-                    "rule_type": "confusion_pair",
-                    "rule_text": rule_text,
-                    "sample_count": cnt,
-                })
+                for row in cursor.fetchall():
+                    src = row["ai_label"]
+                    tgt = row["human_label"]
+                    cnt = int(row["cnt"])
+                    rule_text = (
+                        f"Frequent confusion pattern: Objects predicted as '{src}' were corrected to '{tgt}' "
+                        f"in {cnt} human reviews. Carefully distinguish '{src}' from '{tgt}' by inspecting vehicle bed, "
+                        f"size, or visual context before outputting."
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO rules
+                            (source_label, target_label, rule_type, rule_text, sample_count, confidence, is_active, updated_at)
+                        VALUES (?, ?, 'confusion_pair', ?, ?, 1.0, 1, ?)
+                        ON CONFLICT(rule_text) DO UPDATE SET
+                            sample_count = excluded.sample_count,
+                            updated_at = excluded.updated_at
+                        """,
+                        (src, tgt, rule_text, cnt, now_iso),
+                    )
+                    rules_added.append({
+                        "source_label": src,
+                        "target_label": tgt,
+                        "rule_type": "confusion_pair",
+                        "rule_text": rule_text,
+                        "sample_count": cnt,
+                    })
 
-            # 2. Frequent False Positives: DELETE_FALSE_POSITIVE
-            cursor.execute(
-                """
-                SELECT ai_label, COUNT(*) as cnt
-                FROM corrections
-                WHERE correction_type = 'DELETE_FALSE_POSITIVE' AND ai_label IS NOT NULL
-                GROUP BY ai_label
-                HAVING cnt >= ?
-                """,
-                (min_samples,),
-            )
-            for row in cursor.fetchall():
-                src = row["ai_label"]
-                cnt = int(row["cnt"])
-                rule_text = (
-                    f"High false-positive rate: Model frequently hallucinated '{src}' ({cnt} deleted by annotators). "
-                    f"Require high visual certainty before predicting '{src}'."
-                )
+                # 2. Frequent False Positives: DELETE_FALSE_POSITIVE
                 cursor.execute(
                     """
-                    INSERT INTO rules
-                        (source_label, target_label, rule_type, rule_text, sample_count, confidence, is_active, updated_at)
-                    VALUES (?, NULL, 'false_positive', ?, ?, 1.0, 1, ?)
-                    ON CONFLICT(rule_text) DO UPDATE SET
-                        sample_count = excluded.sample_count,
-                        updated_at = excluded.updated_at
+                    SELECT ai_label, COUNT(*) as cnt
+                    FROM corrections
+                    WHERE correction_type = 'DELETE_FALSE_POSITIVE' AND ai_label IS NOT NULL
+                    GROUP BY ai_label
+                    HAVING cnt >= ?
                     """,
-                    (src, rule_text, cnt, now_iso),
+                    (min_samples,),
                 )
-                rules_added.append({
-                    "source_label": src,
-                    "target_label": None,
-                    "rule_type": "false_positive",
-                    "rule_text": rule_text,
-                    "sample_count": cnt,
-                })
+                for row in cursor.fetchall():
+                    src = row["ai_label"]
+                    cnt = int(row["cnt"])
+                    rule_text = (
+                        f"High false-positive rate: Model frequently hallucinated '{src}' ({cnt} deleted by annotators). "
+                        f"Require high visual certainty before predicting '{src}'."
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO rules
+                            (source_label, target_label, rule_type, rule_text, sample_count, confidence, is_active, updated_at)
+                        VALUES (?, NULL, 'false_positive', ?, ?, 1.0, 1, ?)
+                        ON CONFLICT(rule_text) DO UPDATE SET
+                            sample_count = excluded.sample_count,
+                            updated_at = excluded.updated_at
+                        """,
+                        (src, rule_text, cnt, now_iso),
+                    )
+                    rules_added.append({
+                        "source_label": src,
+                        "target_label": None,
+                        "rule_type": "false_positive",
+                        "rule_text": rule_text,
+                        "sample_count": cnt,
+                    })
 
-            # 3. Frequently Missed Additions: ADD_MISSING
-            cursor.execute(
-                """
-                SELECT human_label, COUNT(*) as cnt
-                FROM corrections
-                WHERE correction_type = 'ADD_MISSING' AND human_label IS NOT NULL
-                GROUP BY human_label
-                HAVING cnt >= ?
-                """,
-                (min_samples,),
-            )
-            for row in cursor.fetchall():
-                tgt = row["human_label"]
-                cnt = int(row["cnt"])
-                rule_text = (
-                    f"Frequently missed class: Annotators manually added '{tgt}' ({cnt} times). "
-                    f"Thoroughly inspect the image foreground and background for overlooked '{tgt}' instances."
-                )
+                # 3. Frequently Missed Additions: ADD_MISSING
                 cursor.execute(
                     """
-                    INSERT INTO rules
-                        (source_label, target_label, rule_type, rule_text, sample_count, confidence, is_active, updated_at)
-                    VALUES (NULL, ?, 'missed_addition', ?, ?, 1.0, 1, ?)
-                    ON CONFLICT(rule_text) DO UPDATE SET
-                        sample_count = excluded.sample_count,
-                        updated_at = excluded.updated_at
+                    SELECT human_label, COUNT(*) as cnt
+                    FROM corrections
+                    WHERE correction_type = 'ADD_MISSING' AND human_label IS NOT NULL
+                    GROUP BY human_label
+                    HAVING cnt >= ?
                     """,
-                    (tgt, rule_text, cnt, now_iso),
+                    (min_samples,),
                 )
-                rules_added.append({
-                    "source_label": None,
-                    "target_label": tgt,
-                    "rule_type": "missed_addition",
-                    "rule_text": rule_text,
-                    "sample_count": cnt,
-                })
+                for row in cursor.fetchall():
+                    tgt = row["human_label"]
+                    cnt = int(row["cnt"])
+                    rule_text = (
+                        f"Frequently missed class: Annotators manually added '{tgt}' ({cnt} times). "
+                        f"Thoroughly inspect the image foreground and background for overlooked '{tgt}' instances."
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO rules
+                            (source_label, target_label, rule_type, rule_text, sample_count, confidence, is_active, updated_at)
+                        VALUES (NULL, ?, 'missed_addition', ?, ?, 1.0, 1, ?)
+                        ON CONFLICT(rule_text) DO UPDATE SET
+                            sample_count = excluded.sample_count,
+                            updated_at = excluded.updated_at
+                        """,
+                        (tgt, rule_text, cnt, now_iso),
+                    )
+                    rules_added.append({
+                        "source_label": None,
+                        "target_label": tgt,
+                        "rule_type": "missed_addition",
+                        "rule_text": rule_text,
+                        "sample_count": cnt,
+                    })
 
-            conn.commit()
+                conn.commit()
+        except sqlite3.OperationalError as exc:
+            logger.warning("Database lock/operational error during derive_rules: %s", exc)
 
         return rules_added
 
-    def get_active_rules(self, labels: Optional[Sequence[str]] = None) -> List[str]:
+    def get_active_rules(self, labels: Optional[Sequence[str]] = None, conn: Optional[sqlite3.Connection] = None) -> List[str]:
         """Retrieve active rule strings filtered by candidate labels."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
+        def _query(c: sqlite3.Connection) -> List[str]:
+            cursor = c.cursor()
             if labels:
                 placeholders = ",".join("?" for _ in labels)
                 query = f"""
@@ -2067,33 +2119,56 @@ class FeedbackDatabase:
             rows = cursor.fetchall()
             return [str(r["rule_text"]) for r in rows]
 
+        try:
+            if conn is not None:
+                return _query(conn)
+            with self._get_connection() as c:
+                return _query(c)
+        except sqlite3.OperationalError as exc:
+            logger.warning("Database lock/operational error during get_active_rules: %s", exc)
+            return []
+
     # -------------------------------------------------------------------------
     # Maintenance & Settings
     # -------------------------------------------------------------------------
 
     def set_enabled(self, enabled: bool) -> None:
         """Toggle feedback learning globally."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO feedback_meta (key, value) VALUES ('enabled', ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                """,
-                ("true" if enabled else "false",),
-            )
-            conn.commit()
-
-    def is_enabled(self) -> bool:
-        """Check if feedback learning is enabled."""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO feedback_meta (key, value) VALUES ('enabled', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    ("true" if enabled else "false",),
+                )
+                conn.commit()
+        except sqlite3.OperationalError as exc:
+            logger.warning("Database lock/operational error during set_enabled: %s", exc)
+
+    def is_enabled(self, conn: Optional[sqlite3.Connection] = None) -> bool:
+        """Check if feedback learning is enabled."""
+        try:
+            if conn is not None:
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM feedback_meta WHERE key = 'enabled'")
+                row = cursor.fetchone()
+                if not row:
+                    return True
+                return row["value"].lower() == "true"
+
+            with self._get_connection() as c:
+                cursor = c.cursor()
                 cursor.execute("SELECT value FROM feedback_meta WHERE key = 'enabled'")
                 row = cursor.fetchone()
                 if not row:
                     return True  # Enabled by default
                 return row["value"].lower() == "true"
+        except sqlite3.OperationalError as e:
+            logger.warning("Database lock during is_enabled (%s); disabling feedback retrieval for current pass", e)
+            return False
         except Exception as e:
             logger.warning("Error reading feedback_meta: %s; defaulting is_enabled to True", e)
             return True
@@ -2105,16 +2180,19 @@ class FeedbackDatabase:
         rules: bool = False,
     ) -> None:
         """Clear database records and crops."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            if all_data:
-                cursor.execute("DELETE FROM corrections")
-                cursor.execute("DELETE FROM predictions")
-                cursor.execute("DELETE FROM human_annotations")
-                cursor.execute("DELETE FROM rules")
-            elif rules:
-                cursor.execute("DELETE FROM rules")
-            conn.commit()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                if all_data:
+                    cursor.execute("DELETE FROM corrections")
+                    cursor.execute("DELETE FROM predictions")
+                    cursor.execute("DELETE FROM human_annotations")
+                    cursor.execute("DELETE FROM rules")
+                elif rules:
+                    cursor.execute("DELETE FROM rules")
+                conn.commit()
+        except sqlite3.OperationalError as exc:
+            logger.warning("Database lock/operational error during clear: %s", exc)
 
         if (all_data or crops) and self.examples_dir.exists():
             for p in self.examples_dir.glob("*.jpg"):

@@ -630,7 +630,7 @@ Rules:
 
 SYSTEM_PROMPT_RECTANGLE_MASK = """You are an expert autonomous driving computer vision system.
 Your task is 2D object detection and instance segmentation for foreground traffic instances on the provided image.
-For every countable object instance, you must provide the label, tight bounding box (box_2d), and closed visible boundary perimeter contour (mask).
+For every countable object instance, you must provide the label, tight bounding box (box_2d), and concise closed visible boundary perimeter contour (mask with 8-40 vertices).
 You must output ONLY a valid JSON object. Do not include markdown formatting (no ```json code blocks), no explanations, and no conversational text.
 
 Return your response adhering strictly to the following JSON schema:
@@ -648,19 +648,22 @@ Return your response adhering strictly to the following JSON schema:
 Rules:
 1. Coordinate System:
    - box_2d is [ymin, xmin, ymax, xmax] with normalized integers in [0, 1000].
-   - mask is a closed contour boundary [[x, y], ...] with at least 3 vertices normalized in [0, 1000] (x horizontal, y vertical).
+   - mask is a concise closed perimeter contour [[x, y], ...] with 8 to 40 vertices per instance normalized in [0, 1000] (x horizontal, y vertical).
 2. Allowed Labels (14 foreground instance classes only):
    - You MUST ONLY select labels from the allowed list provided in the user prompt.
    - Match label string EXACTLY. Do not rename, substitute, or invent labels.
-3. Every instance object MUST have BOTH box_2d and mask.
+3. Every instance object MUST have BOTH box_2d and mask. Never omit mask or box_2d.
 4. Output pure JSON only. If no instances are detected, return {"objects": []}.
 """
 
 SYSTEM_PROMPT_POLYGON_MASK = """You are an expert autonomous driving computer vision system.
 Your task is semantic region segmentation on the provided image for background infrastructure and surface classes.
-For every visible surface/infrastructure region, provide the label and closed boundary contour (polygon).
+Delineate only prominent, continuous surface and structural regions of the allowed classes.
+Ignore microscopic fragments, tiny background patches, or distant blurry slivers.
+For each continuous region, provide the label and a closed boundary contour (polygon) with ~12-80 useful vertices.
 Do NOT provide bounding boxes (box_2d) or raster masks (tool-cvat derives native CVAT mask from the same polygon).
-You must output ONLY a valid JSON object. Do not include markdown formatting (no ```json code blocks), no explanations, and no conversational text.
+You must output ONLY a valid JSON object conforming strictly to {"regions": [...]}.
+Do not include markdown formatting (no ```json code blocks), no explanations, and no conversational text.
 
 Return your response adhering strictly to the following JSON schema:
 {
@@ -676,11 +679,14 @@ Return your response adhering strictly to the following JSON schema:
 Rules:
 1. Coordinate System:
    - polygon is a closed boundary contour [[x, y], ...] with at least 3 vertices normalized in [0, 1000] (x horizontal, y vertical).
-2. Allowed Labels (10 semantic region classes only):
+2. Geometry Complexity:
+   - Delineate each region boundary with approximately 12 to 80 useful vertices.
+   - Capture meaningful curves without dense redundant coordinate spam along straight edges.
+3. Allowed Labels (10 semantic region classes only):
    - You MUST ONLY select labels from the allowed list provided in the user prompt.
    - Match label string EXACTLY. Do not rename, substitute, or invent labels.
-3. Do NOT output box_2d or mask for regions.
-4. Output pure JSON only. If no regions are detected, return {"regions": []}.
+4. Do NOT output box_2d or mask for regions.
+5. Output pure JSON only. If no regions are detected, return {"regions": []}.
 """
 
 SYSTEM_PROMPT_POLYLINE = """You are an expert autonomous driving computer vision system.
@@ -707,7 +713,9 @@ Rules:
    - You MUST ONLY select labels from the allowed list provided in the user prompt.
    - Match label string EXACTLY. Do not rename, substitute, or invent labels.
 3. All lane markings and crosswalks MUST be polyline only. Do NOT provide polygon, mask, or box_2d.
-4. Output pure JSON only. If no lanes are detected, return {"lanes": []}.
+4. Point Conciseness:
+   - Use ~2-30 useful, ordered centerline/traversal points per polyline. Do not over-sample straight lines.
+5. Output pure JSON only. If no lanes are detected, return {"lanes": []}.
 """
 
 
@@ -858,6 +866,7 @@ def build_rectangle_mask_prompt(
     """Build the vision prompt for Policy A: Foreground Instances (14 classes).
 
     Requires BOTH tight bounding box (box_2d) and visible boundary perimeter contour (mask).
+    Enforces concise perimeter contours (~8-40 vertices) and contains zero mention of regions or lanes.
     """
     from core.taxonomy import BOX_MASK_LABELS
 
@@ -868,7 +877,7 @@ def build_rectangle_mask_prompt(
 
     return f"""Perform 2D object detection and instance segmentation for foreground traffic instances on this image.
 Detect all visible instances of the allowed classes.
-For every instance, you MUST provide BOTH a tight bounding box (box_2d) AND a closed visible perimeter contour (mask).
+For every instance, you MUST provide BOTH a tight bounding box (box_2d) AND a concise closed visible perimeter contour (mask).
 
 Allowed labels (choose ONLY from this list):
 {labels_formatted}
@@ -886,7 +895,7 @@ Output schema:
 
 Policy A Requirements:
 1. box_2d: Normalized integer coordinates [ymin, xmin, ymax, xmax] in [0, 1000] (0 <= ymin < ymax <= 1000, 0 <= xmin < xmax <= 1000).
-2. mask: A closed polygon contour boundary tracing the visible object perimeter [[x, y], ...] with at least 3 vertices normalized in [0, 1000] (x horizontal, y vertical).
+2. mask: A concise closed polygon contour boundary tracing the visible object perimeter [[x, y], ...] with 8 to 40 vertices per instance normalized in [0, 1000] (x horizontal, y vertical).
 3. Every detected object instance MUST have BOTH box_2d and mask. Never omit mask or box_2d.
 
 {shared_rules}"""
@@ -899,18 +908,17 @@ def build_polygon_mask_prompt(
     """Build the vision prompt for Policy B: Semantic Regions (10 classes).
 
     Delineates surface and infrastructure regions as polygon closed boundary contours.
-    Strictly suppresses bounding boxes.
+    Strictly suppresses bounding boxes and raster masks.
     """
     from core.taxonomy import POLYGON_MASK_LABELS
 
     labels = allowed_labels if allowed_labels is not None else list(POLYGON_MASK_LABELS)
     labels_formatted = "\n".join(f"  - {label}" for label in labels)
     conf_field = ',\n      "confidence": 0.95' if include_confidence else ""
-    shared_rules = format_shared_constraints(include_box=False, include_confidence=include_confidence, empty_fallback_key="regions")
 
     return f"""Perform semantic region segmentation for background infrastructure and surface classes on this image.
-Delineate all visible regions of the allowed classes.
-For every region, provide the precise boundary contour (polygon). Do NOT provide bounding boxes (box_2d) or masks (tool-cvat derives native CVAT mask from the same polygon).
+Delineate only prominent, continuous surface and structural regions of the allowed classes.
+Ignore microscopic fragments, tiny background patches, or distant blurry slivers.
 
 Allowed labels (choose ONLY from this list):
 {labels_formatted}
@@ -925,11 +933,23 @@ Output schema:
   ]
 }}
 
-Policy B Requirements:
-1. polygon: A closed boundary contour [[x, y], ...] with at least 3 vertices normalized in [0, 1000] (x horizontal, y vertical).
-2. Do NOT provide box_2d or mask for regions (tool-cvat derives native CVAT mask from the same polygon).
+Rules:
+1. Coordinates: All coordinates are normalized integers in [0, 1000] with point [x, y] (x horizontal 0-1000, y vertical 0-1000).
+2. Geometry Complexity: Delineate each region boundary with approximately 12 to 80 useful vertices. Capture meaningful curves without dense redundant coordinate spam along straight edges.
+3. Relevant Regions Only: Detect primary continuous surface/structural regions. Do NOT fragment large contiguous surfaces into dozens of micro-polygons.
+4. Allowed Labels: Select labels ONLY from the allowed list above. Match label strings EXACTLY, preserving exact casing, spaces, and underscores. Do not rename, substitute, or invent labels.
+5. Required Fields: Each region must have 'label', 'polygon' (closed contour >= 3 vertices), and 'confidence' (float between 0.0 and 1.0).
+6. Pure JSON: Strictly output valid JSON only (no markdown fences, no explanatory text). Do NOT provide bounding boxes (box_2d) or masks (tool-cvat derives native CVAT mask from the polygon). If no regions are detected, return {{"regions": []}}."""
 
-{shared_rules}"""
+
+# Policy B Polygon + Mask Optimization Constants
+POLYGON_MASK_MAX_TOKENS: int = 2500
+POLYGON_MASK_MAX_IMAGE_SIZE: int = 1280
+
+
+# Policy C Polyline Optimization Constants
+POLYLINE_MAX_TOKENS: int = 1200
+POLYLINE_MAX_IMAGE_SIZE: int = 1280
 
 
 def build_polyline_prompt(
@@ -946,10 +966,9 @@ def build_polyline_prompt(
     labels = allowed_labels if allowed_labels is not None else list(POLYLINE_LABELS)
     labels_formatted = "\n".join(f"  - {label}" for label in labels)
     conf_field = ',\n      "confidence": 0.95' if include_confidence else ""
-    shared_rules = format_shared_constraints(include_box=False, include_confidence=include_confidence, empty_fallback_key="lanes")
 
     return f"""Perform lane demarcation and road geometry delineation on this image.
-Trace all visible lane boundaries, divider lines, road curbs, and pedestrian crosswalks.
+Trace visible lane boundaries, divider lines, road curbs, and pedestrian crosswalks.
 For every lane marking and crosswalk, provide the ordered sequence of centerline/traversal path points (polyline).
 Do NOT provide polygon, mask, or bounding box (box_2d) for lanes.
 
@@ -967,10 +986,11 @@ Output schema:
 }}
 
 Policy C Requirements:
-1. polyline: An ordered sequence of points [[x, y], ...] along the lane or crosswalk path with at least 2 vertices normalized in [0, 1000] (x horizontal, y vertical).
-2. All lane markings and crosswalks MUST be polyline only. Do NOT provide polygon, mask, or box_2d.
-
-{shared_rules}"""
+1. polyline: Ordered sequence of points [[x, y], ...] along the lane or crosswalk path normalized in [0, 1000] (x horizontal, y vertical).
+2. Point conciseness: Use ~2-30 useful, ordered centerline/traversal points per line. Do not over-sample straight lines.
+3. All lane markings and crosswalks MUST be polyline only. Do NOT provide polygon, mask, or box_2d.
+4. Allowed labels: Strictly choose from the 7 allowed labels. Match string exactly.
+5. Output format: Strictly output raw, valid JSON only. If no lanes are detected, return {{"lanes": []}}."""
 
 
 def build_user_prompt(

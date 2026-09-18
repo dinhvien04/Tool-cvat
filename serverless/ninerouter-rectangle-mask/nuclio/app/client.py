@@ -40,10 +40,10 @@ logger = logging.getLogger(__name__)
 
 # Prioritized segmentation-capable models available via 9Router
 PREFERRED_SEGMENTATION_MODELS: Tuple[str, ...] = (
+    "ag/gemini-3.8-flash-low",
+    "ag/gemini-3.8-flash-medium",
     "ag/gemini-3.8-flash-high",
     "ag/gemini-3.8-flash",
-    "ag/gemini-3.8-flash-medium",
-    "ag/gemini-3.8-flash-low",
     "ag/gemini-3.7-flash-high",
     "ag/gemini-3.7-flash",
     "ag/gemini-3.7-flash-medium",
@@ -51,6 +51,33 @@ PREFERRED_SEGMENTATION_MODELS: Tuple[str, ...] = (
     "ag/gemini-3.6-flash-high",
     "ag/gemini-3.5-flash-high",
     "ag/claude-sonnet-4-6",
+)
+
+# Prioritized fast models for Policy C Polyline (fastest capable models)
+PREFERRED_POLYLINE_MODELS: Tuple[str, ...] = (
+    "ag/gemini-3.8-flash-low",
+    "ag/gemini-3.8-flash",
+    "ag/gemini-3.7-flash-low",
+    "ag/gemini-3.8-flash-medium",
+    "ag/gemini-3.8-flash-high",
+)
+
+# Prioritized fast models for Policy A Rectangle + Mask (fastest capable models with zero/low reasoning overhead)
+PREFERRED_RECTANGLE_MASK_MODELS: Tuple[str, ...] = (
+    "ag/gemini-3.8-flash-low",
+    "ag/gemini-3.8-flash",
+    "ag/gemini-3.7-flash-low",
+    "ag/gemini-3.8-flash-medium",
+    "ag/gemini-3.8-flash-high",
+)
+
+# Prioritized fast models for Policy B Polygon + Mask (fastest capable models with zero/low reasoning overhead)
+PREFERRED_POLYGON_MASK_MODELS: Tuple[str, ...] = (
+    "ag/gemini-3.8-flash-low",
+    "ag/gemini-3.8-flash",
+    "ag/gemini-3.7-flash-low",
+    "ag/gemini-3.8-flash-medium",
+    "ag/gemini-3.8-flash-high",
 )
 
 # In-memory capability cache to prevent redundant API calls during runtime inference
@@ -279,6 +306,93 @@ class NineRouterClient:
             )
 
         return available_ids[0]
+
+    def resolve_polyline_model(self, preferred_model: Optional[str] = None) -> str:
+        """Resolve the fastest capable vision model for Policy C Polyline lane detection.
+
+        Prioritizes fast flash-low models with minimal thinking overhead to keep
+        Polyline inference latency strictly under 5-10 seconds.
+        """
+        available_ids = self.get_vision_model_ids()
+        if not available_ids:
+            raise NineRouterError(
+                f"No vision-capable models found in 9Router at {self.base_url}."
+            )
+
+        if preferred_model and preferred_model.strip():
+            target = preferred_model.strip()
+            if target in available_ids:
+                return target
+            available_str = ", ".join(available_ids)
+            raise NineRouterError(
+                f"Requested polyline vision model '{target}' is not available in 9Router. "
+                f"Available vision models: {available_str}"
+            )
+
+        # Match against PREFERRED_POLYLINE_MODELS
+        for pref in PREFERRED_POLYLINE_MODELS:
+            if pref in available_ids:
+                return pref
+
+        return available_ids[0]
+
+    def resolve_rectangle_mask_model(self, preferred_model: Optional[str] = None) -> str:
+        """Resolve the fastest capable vision model for Policy A Rectangle + Mask detection.
+
+        Prioritizes fast flash-low models with zero reasoning tokens to eliminate
+        the 84.73s latency trap and keep inference latency under 4-5 seconds.
+        """
+        available_ids = self.get_vision_model_ids()
+        if not available_ids:
+            raise NineRouterError(
+                f"No vision-capable models found in 9Router at {self.base_url}."
+            )
+
+        if preferred_model and preferred_model.strip():
+            target = preferred_model.strip()
+            if target in available_ids:
+                return target
+            available_str = ", ".join(available_ids)
+            raise NineRouterError(
+                f"Requested rectangle_mask vision model '{target}' is not available in 9Router. "
+                f"Available vision models: {available_str}"
+            )
+
+        # Match against PREFERRED_RECTANGLE_MASK_MODELS
+        for pref in PREFERRED_RECTANGLE_MASK_MODELS:
+            if pref in available_ids:
+                return pref
+
+        return self.resolve_segmentation_model(preferred_model)
+
+    def resolve_polygon_mask_model(self, preferred_model: Optional[str] = None) -> str:
+        """Resolve the fastest capable vision model for Policy B Polygon + Mask detection.
+
+        Prioritizes fast flash-low models with zero reasoning tokens to eliminate
+        reasoning overhead and keep inference latency under 4 seconds.
+        """
+        available_ids = self.get_vision_model_ids()
+        if not available_ids:
+            raise NineRouterError(
+                f"No vision-capable models found in 9Router at {self.base_url}."
+            )
+
+        if preferred_model and preferred_model.strip():
+            target = preferred_model.strip()
+            if target in available_ids:
+                return target
+            available_str = ", ".join(available_ids)
+            raise NineRouterError(
+                f"Requested polygon_mask vision model '{target}' is not available in 9Router. "
+                f"Available vision models: {available_str}"
+            )
+
+        # Match against PREFERRED_POLYGON_MASK_MODELS
+        for pref in PREFERRED_POLYGON_MASK_MODELS:
+            if pref in available_ids:
+                return pref
+
+        return self.resolve_segmentation_model(preferred_model)
 
     def probe_segmentation_capability(
         self,

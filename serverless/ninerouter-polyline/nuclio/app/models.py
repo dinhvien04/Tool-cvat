@@ -15,8 +15,9 @@ from app.client import NineRouterClient, NineRouterError
 from app.config import DEFAULT_NINEROUTER_URL, AppConfig
 
 RECOMMENDED_MODELS = [
-    "ag/gemini-3.8-flash-high",
+    "ag/gemini-3.8-flash-low",
     "ag/gemini-3.8-flash-medium",
+    "ag/gemini-3.8-flash-high",
     "ag/gemini-3.8-flash",
     "ag/gemini-3.7-flash-high",
     "ag/claude-sonnet-4-6",
