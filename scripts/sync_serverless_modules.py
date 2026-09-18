@@ -14,14 +14,12 @@ from pathlib import Path
 from typing import List, Tuple
 
 MODULES_TO_SYNC = ("app", "core", "config")
+# Only the three active user-facing detectors are synchronized.
+# Historical serverless folders remain in git for reference but are no longer deploy/sync targets.
 SERVERLESS_TARGETS = (
     "serverless/ninerouter-rectangle-mask/nuclio",
     "serverless/ninerouter-polygon-mask/nuclio",
     "serverless/ninerouter-polyline/nuclio",
-    "serverless/ninerouter-vision-31/nuclio",
-    "serverless/ninerouter-vision-box-mask/nuclio",
-    "serverless/ninerouter-vision-mask/nuclio",
-    "serverless/ninerouter-vision/nuclio",
 )
 
 

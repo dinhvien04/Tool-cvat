@@ -1,6 +1,6 @@
 """Comprehensive Verification of Native CVAT Editability for All 3 Detector Output Types.
 
-This script tests Goal #2 against live local CVAT on Task 15, Job 15:
+This script tests Goal #2 against live local CVAT on the configured CVAT job:
 1. Shape specifications validation for:
    - Rectangle: xtl, ytl, xbr, ybr, occluded=False, z_order=0, unlocked, draggable, resizable
    - Mask: CVAT RLE format [...rle_counts, xtl, ytl, xbr, ybr], brush/eraser/polygon editable, unlocked
@@ -12,7 +12,7 @@ This script tests Goal #2 against live local CVAT on Task 15, Job 15:
    - Polyline atomic without group_id (Detector 3)
    - Independent editability: editing rectangle leaves mask untouched (no lock, no auto-reset)
    - Editing polygon leaves mask untouched
-3. Live Edit Round-trip on Job 15 (Task 15):
+3. Live Edit Round-trip on configured Job (Task 15):
    - POST /api/jobs/15/annotations?action=create test shapes
    - Verify live ingestion
    - PATCH /api/jobs/15/annotations?action=update with human-modified coordinates
@@ -20,6 +20,7 @@ This script tests Goal #2 against live local CVAT on Task 15, Job 15:
    - DELETE /api/jobs/15/annotations?action=delete to cleanly restore job state
 """
 
+import os
 import sys
 from pathlib import Path
 import requests
@@ -27,14 +28,32 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOKEN_FILE = REPO_ROOT / ".tool-cvat" / "cvat_token.txt"
 
-if not TOKEN_FILE.exists():
-    print(f"Error: Token file not found at {TOKEN_FILE}")
-    sys.exit(1)
+base_url = os.getenv("CVAT_URL", "http://localhost:18080").rstrip("/")
+job_id_raw = os.getenv("CVAT_JOB_ID", "").strip()
+if not job_id_raw:
+    print("Error: set CVAT_JOB_ID to a disposable/local verification job ID.")
+    sys.exit(2)
+try:
+    job_id = int(job_id_raw)
+except ValueError:
+    print("Error: CVAT_JOB_ID must be an integer.")
+    sys.exit(2)
 
-token = TOKEN_FILE.read_text(encoding="utf-8").strip()
-base_url = "http://localhost:18080"
+access_token = os.getenv("CVAT_ACCESS_TOKEN", "").strip()
+legacy_token = os.getenv("CVAT_TOKEN", "").strip()
+if access_token:
+    authorization = f"Bearer {access_token}"
+elif legacy_token:
+    authorization = f"Token {legacy_token}"
+elif TOKEN_FILE.exists():
+    # Backwards-compatible local-only legacy token file. .tool-cvat/ is gitignored.
+    authorization = f"Token {TOKEN_FILE.read_text(encoding='utf-8').strip()}"
+else:
+    print("Error: set CVAT_ACCESS_TOKEN (recommended) or CVAT_TOKEN.")
+    sys.exit(2)
+
 headers = {
-    "Authorization": f"Token {token}",
+    "Authorization": authorization,
     "Accept": "application/vnd.cvat+json",
     "Content-Type": "application/json",
 }
@@ -74,15 +93,15 @@ def rle2mask(rle, width, height):
 
 def run_verification():
     print("=" * 70)
-    print(" Native CVAT Editability Verification: Task 15, Job 15")
+    print(f" Native CVAT Editability Verification: Job {job_id}")
     print("=" * 70)
 
-    # 1. Verify CVAT connection and Job 15
-    resp_job = requests.get(f"{base_url}/api/jobs/15", headers=headers, timeout=15)
-    assert resp_job.status_code == 200, f"Failed to get Job 15: {resp_job.text}"
+    # 1. Verify CVAT connection and configured Job
+    resp_job = requests.get(f"{base_url}/api/jobs/{job_id}", headers=headers, timeout=15)
+    assert resp_job.status_code == 200, f"Failed to get configured Job: {resp_job.text}"
     job_info = resp_job.json()
     task_id = job_info["task_id"]
-    print(f"[OK] Connected to Job 15 (Task ID: {task_id}, Stage: {job_info.get('stage')}, State: {job_info.get('state')})")
+    print(f"[OK] Connected to configured Job (Task ID: {task_id}, Stage: {job_info.get('stage')}, State: {job_info.get('state')})")
 
     # Fetch labels
     resp_labels = requests.get(f"{base_url}/api/labels?task_id={task_id}&page_size=100", headers=headers, timeout=15)
@@ -94,11 +113,11 @@ def run_verification():
     lane_label_id = labels["lane/single white"]
 
     # 2. Inspect initial job annotations
-    resp_initial = requests.get(f"{base_url}/api/jobs/15/annotations", headers=headers, timeout=15)
+    resp_initial = requests.get(f"{base_url}/api/jobs/{job_id}/annotations", headers=headers, timeout=15)
     assert resp_initial.status_code == 200, f"Failed to get initial annotations: {resp_initial.text}"
     initial_annos = resp_initial.json()
     initial_shape_count = len(initial_annos.get("shapes", []))
-    print(f"[INFO] Initial shape count on Job 15: {initial_shape_count}")
+    print(f"[INFO] Initial shape count on configured Job: {initial_shape_count}")
 
     # 3. Construct Test Shapes representing all 3 detector types
     # Group 801: Detector 1 (Rectangle + Mask) - Paired
@@ -179,7 +198,7 @@ def run_verification():
         "attributes": [],
     }
 
-    # 4. Inject test shapes into Job 15 via PATCH ?action=create
+    # 4. Inject test shapes into configured Job via PATCH ?action=create
     print("\n--- STEP 1: Ingesting Shapes for all 3 Detectors ---")
     create_payload = {
         "shapes": [test_rect, test_mask1, test_poly, test_mask2, test_line],
@@ -187,7 +206,7 @@ def run_verification():
         "tags": [],
     }
     resp_create = requests.patch(
-        f"{base_url}/api/jobs/15/annotations?action=create",
+        f"{base_url}/api/jobs/{job_id}/annotations?action=create",
         json=create_payload,
         headers=headers,
         timeout=15,
@@ -195,7 +214,7 @@ def run_verification():
     assert resp_create.status_code in (200, 201), f"Create failed: {resp_create.text}"
     created_data = resp_create.json()
     created_shapes = created_data.get("shapes", [])
-    print(f"[OK] Ingested {len(created_shapes)} shapes into Job 15")
+    print(f"[OK] Ingested {len(created_shapes)} shapes into configured Job")
 
     # Map created shapes by group & type
     created_rect = next(s for s in created_shapes if s["type"] == "rectangle" and s["group"] == 801)
@@ -289,7 +308,7 @@ def run_verification():
             "tags": [],
         }
         resp_update = requests.patch(
-            f"{base_url}/api/jobs/15/annotations?action=update",
+            f"{base_url}/api/jobs/{job_id}/annotations?action=update",
             json=update_payload,
             headers=headers,
             timeout=15,
@@ -299,7 +318,7 @@ def run_verification():
 
         # 8. Reload and Verify Persistence
         print("\n--- STEP 5: Reloading Annotations and Verifying Exact Round-trip Persistence ---")
-        resp_reloaded = requests.get(f"{base_url}/api/jobs/15/annotations", headers=headers, timeout=15)
+        resp_reloaded = requests.get(f"{base_url}/api/jobs/{job_id}/annotations", headers=headers, timeout=15)
         assert resp_reloaded.status_code == 200
         reloaded_annos = resp_reloaded.json()
         reloaded_shapes_map = {s["id"]: s for s in reloaded_annos.get("shapes", [])}
@@ -344,14 +363,14 @@ def run_verification():
         edited_line_del["points"] = truncated_line_points
 
         resp_del_pt = requests.patch(
-            f"{base_url}/api/jobs/15/annotations?action=update",
+            f"{base_url}/api/jobs/{job_id}/annotations?action=update",
             json={"shapes": [edited_line_del], "tracks": [], "tags": []},
             headers=headers,
             timeout=15,
         )
         assert resp_del_pt.status_code in (200, 204)
 
-        resp_del_verify = requests.get(f"{base_url}/api/jobs/15/annotations", headers=headers, timeout=15)
+        resp_del_verify = requests.get(f"{base_url}/api/jobs/{job_id}/annotations", headers=headers, timeout=15)
         r_line_del = {s["id"]: s for s in resp_del_verify.json()["shapes"]}[line_id]
         assert r_line_del["points"] == truncated_line_points
         assert len(r_line_del["points"]) == 6
@@ -361,7 +380,7 @@ def run_verification():
         # 10. Clean up test shapes via DELETE action
         print("\n--- STEP 7: Cleaning Up Test Shapes ---")
         # Fetch current shape objects for the test IDs so all required serializer fields are populated
-        resp_current = requests.get(f"{base_url}/api/jobs/15/annotations", headers=headers, timeout=15)
+        resp_current = requests.get(f"{base_url}/api/jobs/{job_id}/annotations", headers=headers, timeout=15)
         current_shapes = {s["id"]: s for s in resp_current.json().get("shapes", [])}
         shapes_to_delete = [current_shapes[sid] for sid in all_test_ids if sid in current_shapes]
 
@@ -371,7 +390,7 @@ def run_verification():
             "tags": [],
         }
         resp_del = requests.patch(
-            f"{base_url}/api/jobs/15/annotations?action=delete",
+            f"{base_url}/api/jobs/{job_id}/annotations?action=delete",
             json=delete_payload,
             headers=headers,
             timeout=15,
@@ -379,10 +398,10 @@ def run_verification():
         assert resp_del.status_code in (200, 204), f"Cleanup failed: {resp_del.text}"
 
         # Verify restoration of original count
-        resp_final = requests.get(f"{base_url}/api/jobs/15/annotations", headers=headers, timeout=15)
+        resp_final = requests.get(f"{base_url}/api/jobs/{job_id}/annotations", headers=headers, timeout=15)
         final_shapes = resp_final.json().get("shapes", [])
         assert len(final_shapes) == initial_shape_count, f"Cleanup mismatch: expected {initial_shape_count}, got {len(final_shapes)}"
-        print(f"[OK] Cleaned up all test shapes. Job 15 restored to {len(final_shapes)} shapes.")
+        print(f"[OK] Cleaned up all test shapes. configured Job restored to {len(final_shapes)} shapes.")
 
     print("\n" + "=" * 70)
     print(" ALL EDITABILITY VERIFICATION CHECKS PASSED PERFECTLY!")

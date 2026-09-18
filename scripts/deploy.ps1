@@ -42,7 +42,7 @@ param (
     [string]$NineRouterKey = $env:NINEROUTER_KEY,
 
     [Parameter(Mandatory = $false)]
-    [string]$NineRouterTimeout = "180.0",
+    [string]$NineRouterTimeout = "45.0",
 
     [Parameter(Mandatory = $false)]
     [string]$CvatWebhookSecret = $env:CVAT_WEBHOOK_SECRET

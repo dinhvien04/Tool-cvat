@@ -22,7 +22,7 @@ spec:
   description: 9Router Polygon + Mask Detector (10 Semantic Surface & Infrastructure Regions via local 9Router)
   runtime: 'python:3.11'
   handler: main:handler
-  eventTimeout: 240s
+  eventTimeout: 60s
 
   env:
     - name: NINEROUTER_URL
@@ -34,7 +34,7 @@ spec:
     - name: DETECTION_MODE
       value: 'polygon_mask'
     - name: NINEROUTER_TIMEOUT
-      value: '180.0'
+      value: '45.0'
     - name: MAX_IMAGE_SIZE
       value: '1280'
     - name: POLYGON_MASK_MAX_IMAGE_SIZE
