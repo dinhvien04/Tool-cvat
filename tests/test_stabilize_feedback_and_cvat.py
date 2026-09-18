@@ -410,7 +410,11 @@ class TestFewShotSchemaRouting:
             "ai_label": "car",
             "human_label": "truck",
             "crop_path": str(crop_path),
-            "details_json": json.dumps({"crop_coords": [0, 0, 64, 64]}),
+            "details_json": json.dumps({
+                "crop_coords": [0, 0, 64, 64],
+                "human_rect": {"type": "rectangle", "points": [10, 10, 50, 50]},
+                "human_mask": {"type": "mask", "points": [10, 10, 50, 10, 50, 50, 10, 50]},
+            }),
             "human_shape_json": json.dumps({
                 "type": "rectangle",
                 "label": "truck",
@@ -437,12 +441,13 @@ class TestFewShotSchemaRouting:
         vex = res.visual_examples[0]
         out = vex["expected_output"]
 
-        # Must route exclusively to objects[] with box_2d
+        # Must route exclusively to objects[] with atomic box_2d and mask per Policy A
         assert len(out["objects"]) == 1
         assert len(out["regions"]) == 0
         assert len(out["lanes"]) == 0
         assert out["objects"][0]["label"] == "truck"
         assert "box_2d" in out["objects"][0]
+        assert "mask" in out["objects"][0]
 
     def test_semantic_region_routes_to_regions_without_box_2d(self, tmp_path: Path):
         db = FeedbackDatabase(

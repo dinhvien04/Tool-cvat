@@ -29,6 +29,13 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 from PIL import Image, ImageChops, ImageDraw
 
 from core.geometry import calculate_box_iou, cvat_mask_to_binary_image, extract_shape_bbox
+from core.line_geometry import (
+    DEFAULT_LANE_COMPARE_WIDTH_PX,
+    DEFAULT_LANE_MAX_MATCH_DIST_PX,
+    DEFAULT_LANE_TOLERANCE_PX,
+    compute_polyline_distance,
+    extract_polyline_points,
+)
 from core.taxonomy import (
     GROUP_INSTANCE,
     GROUP_LANE,
@@ -41,6 +48,11 @@ from core.taxonomy import (
 )
 
 ALL_31_LABELS = list(MASTER_31_LABELS)
+
+# Configurable Lane Comparison Constants
+LANE_COMPARE_WIDTH_PX: int = DEFAULT_LANE_COMPARE_WIDTH_PX
+LANE_TOLERANCE_PX: float = DEFAULT_LANE_TOLERANCE_PX
+LANE_MAX_MATCH_DIST_PX: float = DEFAULT_LANE_MAX_MATCH_DIST_PX
 
 # Correction Classification Types
 CORRECTION_RELABEL = "RELABEL"
@@ -262,10 +274,11 @@ def _compute_shape_iou(
     if mask_a is None or mask_b is None:
         return calculate_box_iou(bbox_a, bbox_b)
 
-    ux1 = max(0, int(math.floor(min(bbox_a[0], bbox_b[0]))))
-    uy1 = max(0, int(math.floor(min(bbox_a[1], bbox_b[1]))))
-    ux2 = min(width - 1, int(math.ceil(max(bbox_a[2], bbox_b[2]))))
-    uy2 = min(height - 1, int(math.ceil(max(bbox_a[3], bbox_b[3]))))
+    pad = max(int(line_width * 2), 4)
+    ux1 = max(0, int(math.floor(min(bbox_a[0], bbox_b[0]))) - pad)
+    uy1 = max(0, int(math.floor(min(bbox_a[1], bbox_b[1]))) - pad)
+    ux2 = min(width - 1, int(math.ceil(max(bbox_a[2], bbox_b[2]))) + pad)
+    uy2 = min(height - 1, int(math.ceil(max(bbox_a[3], bbox_b[3]))) + pad)
 
     if ux1 <= ux2 and uy1 <= uy2:
         crop_a = mask_a.crop((ux1, uy1, ux2 + 1, uy2 + 1))
@@ -296,6 +309,9 @@ class CorrectionDiffItem:
         return asdict(self)
 
 
+LANE_COMPARE_WIDTH_PX: int = 5
+
+
 class CorrectionDiffEngine:
     """Bipartite matching engine comparing AI baseline shapes vs human shapes.
 
@@ -315,10 +331,16 @@ class CorrectionDiffEngine:
         min_iou_relabel: float = 0.60,
         min_iou_match: float = 0.30,
         taxonomy: Optional[Taxonomy] = None,
+        lane_compare_width_px: int = LANE_COMPARE_WIDTH_PX,
+        lane_tolerance_px: float = LANE_TOLERANCE_PX,
+        lane_match_max_dist_px: float = LANE_MAX_MATCH_DIST_PX,
     ):
         self.min_iou_relabel = float(min_iou_relabel)
         self.min_iou_match = float(min_iou_match)
         self.taxonomy = taxonomy or Taxonomy()
+        self.lane_compare_width_px = int(lane_compare_width_px)
+        self.lane_tolerance_px = float(lane_tolerance_px)
+        self.lane_match_max_dist_px = float(lane_match_max_dist_px)
 
     def _group_shapes(self, shapes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Group paired CVAT shapes sharing the same group_id into composite semantic annotations.
@@ -403,6 +425,333 @@ class CorrectionDiffEngine:
 
         return annotations
 
+    def _populate_shape_details(
+        self,
+        entry: Optional[Dict[str, Any]],
+        prefix: str,
+        details: Dict[str, Any],
+    ) -> None:
+        """Populate details dictionary with paired sub-shapes for an annotation entry."""
+        if not entry:
+            return
+        if entry.get("rect_shape"):
+            details[f"{prefix}_rect"] = entry["rect_shape"]
+        if entry.get("mask_shape"):
+            details[f"{prefix}_mask"] = entry["mask_shape"]
+        if entry.get("poly_shape"):
+            details[f"{prefix}_poly"] = entry["poly_shape"]
+        if entry.get("polyline_shape"):
+            details[f"{prefix}_polyline"] = entry["polyline_shape"]
+        if entry.get("sub_shapes"):
+            details[f"{prefix}_sub_shapes"] = entry["sub_shapes"]
+
+    def _compute_candidate_similarity(
+        self,
+        a: Dict[str, Any],
+        h: Dict[str, Any],
+        image_width: int,
+        image_height: int,
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Compute policy-specific candidate similarity and diagnostic metrics.
+
+        Policy-Specific Candidate Matching:
+        - POLICY A (Instance / box_mask): uses bounding-box IoU prefilter, returning box IoU.
+        - POLICY B (Region / polygon_mask): prioritizes true rasterized shape IoU (polygon/mask overlap).
+        - POLICY C (Lane / polyline): uses polyline-aware similarity (symmetric average distance
+          and rasterized stroke IoU with configurable lane_compare_width_px), NOT high bbox IoU.
+        """
+        policy_a = a.get("policy")
+        policy_h = h.get("policy")
+        group_a = a.get("group")
+        group_h = h.get("group")
+        lbl_a = a.get("label", "")
+        lbl_h = h.get("label", "")
+
+        is_lane_a = (
+            policy_a == POLICY_POLYLINE
+            or group_a == GROUP_LANE
+            or lbl_a.startswith("lane/")
+            or a.get("type") == "polyline"
+        )
+        is_lane_h = (
+            policy_h == POLICY_POLYLINE
+            or group_h == GROUP_LANE
+            or lbl_h.startswith("lane/")
+            or h.get("type") == "polyline"
+        )
+
+        is_region_a = (
+            policy_a == POLICY_POLYGON_MASK
+            or group_a == GROUP_REGION
+            or "area/" in lbl_a
+            or a.get("type") in ("polygon", "mask")
+        )
+        is_region_h = (
+            policy_h == POLICY_POLYGON_MASK
+            or group_h == GROUP_REGION
+            or "area/" in lbl_h
+            or h.get("type") in ("polygon", "mask")
+        )
+
+        # ----------------------------------------------------------------------
+        # 1. POLICY C: Polyline Lane Matching (distance & stroke aware)
+        # ----------------------------------------------------------------------
+        if is_lane_a and is_lane_h:
+            a_line = a.get("polyline_shape") or a["shape"]
+            h_line = h.get("polyline_shape") or h["shape"]
+            pts_a = extract_polyline_points(a_line)
+            pts_h = extract_polyline_points(h_line)
+            if len(pts_a) < 2 or len(pts_h) < 2:
+                return 0.0, {}
+
+            # Symmetric average distance in pixels (pure Python, O(N))
+            avg_dist = compute_polyline_distance(pts_a, pts_h)
+            # Dilated line stroke IoU with configurable stroke width
+            stroke_iou = _compute_shape_iou(
+                a_line,
+                h_line,
+                width=image_width,
+                height=image_height,
+                line_width=self.lane_compare_width_px,
+            )
+            bbox_iou = calculate_box_iou(a["bbox"], h["bbox"]) if (a.get("bbox") and h.get("bbox")) else 0.0
+
+            metrics = {
+                "avg_dist": avg_dist,
+                "stroke_iou": stroke_iou,
+                "bbox_iou": bbox_iou,
+                "policy": POLICY_POLYLINE,
+            }
+
+            # Distance-based normalized similarity
+            dist_sim = max(0.0, 1.0 - avg_dist / self.lane_match_max_dist_px)
+            if avg_dist <= self.lane_match_max_dist_px:
+                sim = max(dist_sim, stroke_iou)
+            else:
+                sim = stroke_iou
+
+            # Special case: crossing / realigned lines sharing same corridor
+            if bbox_iou >= 0.50 and stroke_iou > 0.0:
+                sim = max(sim, bbox_iou * 0.5)
+
+            return sim, metrics
+
+        # Cross-policy isolation: polyline cannot match box or region
+        if is_lane_a != is_lane_h:
+            return 0.0, {}
+
+        # ----------------------------------------------------------------------
+        # 2. POLICY B: Semantic Region Matching (true rasterized shape IoU)
+        # ----------------------------------------------------------------------
+        if is_region_a and is_region_h:
+            bbox_a = a.get("bbox")
+            bbox_h = h.get("bbox")
+            # Coarse bbox prefilter: zero intersection implies zero raster IoU
+            if bbox_a and bbox_h:
+                if (
+                    bbox_a[2] < bbox_h[0]
+                    or bbox_h[2] < bbox_a[0]
+                    or bbox_a[3] < bbox_h[1]
+                    or bbox_h[3] < bbox_a[1]
+                ):
+                    return 0.0, {}
+
+            a_region = a.get("poly_shape") or a.get("mask_shape") or a["shape"]
+            h_region = h.get("poly_shape") or h.get("mask_shape") or h["shape"]
+            shape_iou = _compute_shape_iou(
+                a_region,
+                h_region,
+                width=image_width,
+                height=image_height,
+            )
+            bbox_iou = calculate_box_iou(bbox_a, bbox_h) if (bbox_a and bbox_h) else 0.0
+
+            metrics = {
+                "shape_iou": shape_iou,
+                "bbox_iou": bbox_iou,
+                "policy": POLICY_POLYGON_MASK,
+            }
+            return shape_iou, metrics
+
+        # Cross-policy isolation: region cannot match box
+        if is_region_a != is_region_h:
+            return 0.0, {}
+
+        # ----------------------------------------------------------------------
+        # 3. POLICY A: Instance Matching (bounding-box IoU prefilter)
+        # ----------------------------------------------------------------------
+        bbox_a = a.get("bbox")
+        bbox_h = h.get("bbox")
+        if not bbox_a or not bbox_h:
+            return 0.0, {}
+
+        if (
+            bbox_a[2] < bbox_h[0]
+            or bbox_h[2] < bbox_a[0]
+            or bbox_a[3] < bbox_h[1]
+            or bbox_h[3] < bbox_a[1]
+        ):
+            return 0.0, {}
+
+        box_iou = calculate_box_iou(bbox_a, bbox_h)
+        metrics = {
+            "box_iou": box_iou,
+            "policy": POLICY_BOX_MASK,
+        }
+        return box_iou, metrics
+
+    def _pair_annotations(
+        self,
+        ai_entries: List[Dict[str, Any]],
+        human_entries: List[Dict[str, Any]],
+        image_width: int = 1280,
+        image_height: int = 720,
+    ) -> Tuple[List[CorrectionDiffItem], Set[int], Set[int]]:
+        """Match AI predicted annotations against human annotations using policy-specific metrics.
+
+        Enforces:
+        - Policy A: bbox IoU prefilter, box + mask comparison
+        - Policy B: true rasterized shape IoU (polygon/mask overlap)
+        - Policy C: polyline-aware similarity (symmetric distance and line stroke IoU)
+
+        Returns:
+            (results, matched_ai_indices, matched_human_indices)
+        """
+        results: List[CorrectionDiffItem] = []
+        matched_ai: Set[int] = set()
+        matched_human: Set[int] = set()
+
+        candidates = []
+        for a in ai_entries:
+            for h in human_entries:
+                sim, metrics = self._compute_candidate_similarity(a, h, image_width, image_height)
+                if sim > 0.0:
+                    candidates.append((sim, a["idx"], h["idx"], metrics))
+
+        # Sort candidates descending by similarity score
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        # ----------------------------------------------------------------------
+        # Pass 1: Same-label candidate matching
+        # ----------------------------------------------------------------------
+        for sim, a_idx, h_idx, metrics in candidates:
+            if a_idx in matched_ai or h_idx in matched_human:
+                continue
+
+            a = ai_entries[a_idx]
+            h = human_entries[h_idx]
+            if a["label"] == h["label"]:
+                policy = metrics.get("policy")
+                matched = False
+                if policy == POLICY_POLYLINE:
+                    avg_dist = metrics.get("avg_dist", 999.0)
+                    stroke_iou = metrics.get("stroke_iou", 0.0)
+                    bbox_iou = metrics.get("bbox_iou", 0.0)
+                    if (
+                        avg_dist <= self.lane_match_max_dist_px
+                        or sim >= self.min_iou_match
+                        or stroke_iou > 0.05
+                        or (bbox_iou >= 0.5 and stroke_iou > 0.0)
+                    ):
+                        matched = True
+                elif policy == POLICY_POLYGON_MASK:
+                    shape_iou = metrics.get("shape_iou", 0.0)
+                    if shape_iou >= self.min_iou_match:
+                        matched = True
+                else:
+                    box_iou = metrics.get("box_iou", 0.0)
+                    if box_iou >= self.min_iou_match:
+                        matched = True
+
+                if matched:
+                    item = self._classify_same_label(
+                        a, h, sim, image_width, image_height, metrics=metrics
+                    )
+                    results.append(item)
+                    matched_ai.add(a_idx)
+                    matched_human.add(h_idx)
+
+        # ----------------------------------------------------------------------
+        # Pass 2: Cross-label relabel matching
+        # ----------------------------------------------------------------------
+        for sim, a_idx, h_idx, metrics in candidates:
+            if a_idx in matched_ai or h_idx in matched_human:
+                continue
+
+            a = ai_entries[a_idx]
+            h = human_entries[h_idx]
+            if a["label"] != h["label"]:
+                ai_lbl = a["label"]
+                human_lbl = h["label"]
+                policy = metrics.get("policy")
+                is_relabel = False
+                relabel_iou = sim
+                reason = ""
+
+                if policy == POLICY_POLYLINE:
+                    # Policy C relabel: line stroke IoU or near-zero shift
+                    stroke_iou = metrics.get("stroke_iou", 0.0)
+                    avg_dist = metrics.get("avg_dist", 999.0)
+                    if stroke_iou >= self.min_iou_relabel or (
+                        avg_dist <= self.lane_tolerance_px and sim >= self.min_iou_relabel
+                    ):
+                        is_relabel = True
+                        relabel_iou = stroke_iou if stroke_iou > 0 else sim
+                        reason = f"Annotator relabeled '{ai_lbl}' to '{human_lbl}' (lane stroke IoU {relabel_iou:.2f})"
+                elif policy == POLICY_POLYGON_MASK:
+                    # Policy B relabel: true rasterized shape IoU
+                    shape_iou = metrics.get("shape_iou", 0.0)
+                    if shape_iou >= self.min_iou_relabel:
+                        is_relabel = True
+                        relabel_iou = shape_iou
+                        reason = f"Annotator relabeled '{ai_lbl}' to '{human_lbl}' (shape IoU {shape_iou:.2f})"
+                else:
+                    # Policy A relabel: bounding-box IoU
+                    box_iou = metrics.get("box_iou", 0.0)
+                    if box_iou >= self.min_iou_relabel:
+                        is_relabel = True
+                        relabel_iou = box_iou
+                        reason = f"Annotator relabeled '{ai_lbl}' to '{human_lbl}' (IoU {box_iou:.2f})"
+
+                if is_relabel:
+                    relabel_details = {
+                        "reason": reason,
+                        "ai_bbox": a["bbox"],
+                        "human_bbox": h["bbox"],
+                        "ai_group_id": a.get("group_id"),
+                        "human_group_id": h.get("group_id"),
+                    }
+                    if policy == POLICY_POLYLINE:
+                        relabel_details["lane_iou"] = round(relabel_iou, 4)
+                        relabel_details["stroke_iou"] = round(relabel_iou, 4)
+                        relabel_details["lane_shift_px"] = round(metrics.get("avg_dist", 0.0), 2)
+                    elif policy == POLICY_POLYGON_MASK:
+                        relabel_details["shape_iou"] = round(relabel_iou, 4)
+                        relabel_details["mask_iou"] = round(relabel_iou, 4)
+                        relabel_details["polygon_mask_iou"] = round(relabel_iou, 4)
+                    else:
+                        relabel_details["box_iou"] = round(relabel_iou, 4)
+
+                    self._populate_shape_details(h, "human", relabel_details)
+                    self._populate_shape_details(a, "ai", relabel_details)
+                    item = CorrectionDiffItem(
+                        correction_type=CORRECTION_RELABEL,
+                        ai_label=ai_lbl,
+                        human_label=human_lbl,
+                        ai_shape=a["shape"],
+                        human_shape=h["shape"],
+                        iou=round(relabel_iou, 4),
+                        details=relabel_details,
+                    )
+                    results.append(item)
+                    matched_ai.add(a_idx)
+                    matched_human.add(h_idx)
+
+        return results, matched_ai, matched_human
+
+    # Alias for audit and backward compatibility
+    _match_shapes = _pair_annotations
+
     def diff(
         self,
         ai_shapes: List[Dict[str, Any]],
@@ -435,65 +784,21 @@ class CorrectionDiffEngine:
         for idx, h in enumerate(human_entries):
             h["idx"] = idx
 
-        matched_ai: Set[int] = set()
-        matched_human: Set[int] = set()
+        # 2. Match annotations using policy-specific candidate pairing
+        results, matched_ai, matched_human = self._pair_annotations(
+            ai_entries, human_entries, image_width=image_width, image_height=image_height
+        )
 
-        # 2. Compute pairwise IoU candidates
-        candidates = []
-        for a in ai_entries:
-            if a["bbox"] is None:
-                continue
-            for h in human_entries:
-                if h["bbox"] is None:
-                    continue
-                iou = calculate_box_iou(a["bbox"], h["bbox"])
-                if iou > 0.0:
-                    candidates.append((iou, a["idx"], h["idx"]))
-
-        # Sort candidate pairs by IoU descending (greedy bipartite matching)
-        candidates.sort(key=lambda x: x[0], reverse=True)
-
-        # 3. First pass: Match same-label or cross-label pairs
-        for iou, a_idx, h_idx in candidates:
-            if a_idx in matched_ai or h_idx in matched_human:
-                continue
-
-            a = ai_entries[a_idx]
-            h = human_entries[h_idx]
-            ai_lbl = a["label"]
-            human_lbl = h["label"]
-
-            if ai_lbl == human_lbl:
-                if iou >= self.min_iou_match:
-                    item = self._classify_same_label(a, h, iou, image_width, image_height)
-                    results.append(item)
-                    matched_ai.add(a_idx)
-                    matched_human.add(h_idx)
-            else:
-                # Cross-label candidate: requires higher IoU threshold to avoid false match
-                if iou >= self.min_iou_relabel:
-                    item = CorrectionDiffItem(
-                        correction_type=CORRECTION_RELABEL,
-                        ai_label=ai_lbl,
-                        human_label=human_lbl,
-                        ai_shape=a["shape"],
-                        human_shape=h["shape"],
-                        iou=round(iou, 4),
-                        details={
-                            "reason": f"Annotator relabeled '{ai_lbl}' to '{human_lbl}' (IoU {iou:.2f})",
-                            "ai_bbox": a["bbox"],
-                            "human_bbox": h["bbox"],
-                            "ai_group_id": a.get("group_id"),
-                            "human_group_id": h.get("group_id"),
-                        },
-                    )
-                    results.append(item)
-                    matched_ai.add(a_idx)
-                    matched_human.add(h_idx)
-
-        # 4. Remaining unmatched AI annotations -> False Positives (Annotator deleted AI prediction)
+        # 3. Remaining unmatched AI annotations -> False Positives (Annotator deleted AI prediction)
         for a in ai_entries:
             if a["idx"] not in matched_ai:
+                fp_details = {
+                    "reason": f"AI predicted '{a['label']}' which was deleted or rejected by annotator",
+                    "ai_bbox": a["bbox"],
+                    "group_id": a.get("group_id"),
+                    "sub_shapes_count": len(a.get("sub_shapes", [])),
+                }
+                self._populate_shape_details(a, "ai", fp_details)
                 results.append(
                     CorrectionDiffItem(
                         correction_type=CORRECTION_DELETE_FALSE_POSITIVE,
@@ -502,18 +807,20 @@ class CorrectionDiffEngine:
                         ai_shape=a["shape"],
                         human_shape=None,
                         iou=0.0,
-                        details={
-                            "reason": f"AI predicted '{a['label']}' which was deleted or rejected by annotator",
-                            "ai_bbox": a["bbox"],
-                            "group_id": a.get("group_id"),
-                            "sub_shapes_count": len(a.get("sub_shapes", [])),
-                        },
+                        details=fp_details,
                     )
                 )
 
-        # 5. Remaining unmatched Human annotations -> False Negatives (Annotator added missing object)
+        # 4. Remaining unmatched Human annotations -> False Negatives (Annotator added missing object)
         for h in human_entries:
             if h["idx"] not in matched_human:
+                fn_details = {
+                    "reason": f"Annotator manually added missing '{h['label']}'",
+                    "human_bbox": h["bbox"],
+                    "group_id": h.get("group_id"),
+                    "sub_shapes_count": len(h.get("sub_shapes", [])),
+                }
+                self._populate_shape_details(h, "human", fn_details)
                 results.append(
                     CorrectionDiffItem(
                         correction_type=CORRECTION_ADD_MISSING,
@@ -522,12 +829,7 @@ class CorrectionDiffEngine:
                         ai_shape=None,
                         human_shape=h["shape"],
                         iou=0.0,
-                        details={
-                            "reason": f"Annotator manually added missing '{h['label']}'",
-                            "human_bbox": h["bbox"],
-                            "group_id": h.get("group_id"),
-                            "sub_shapes_count": len(h.get("sub_shapes", [])),
-                        },
+                        details=fn_details,
                     )
                 )
 
@@ -540,6 +842,7 @@ class CorrectionDiffEngine:
         iou: float,
         img_w: int,
         img_h: int,
+        metrics: Optional[Dict[str, Any]] = None,
     ) -> CorrectionDiffItem:
         """Classify shape difference when AI and human share the same label.
 
@@ -566,18 +869,8 @@ class CorrectionDiffEngine:
             "ai_bbox": a_bbox,
             "human_bbox": h_bbox,
         }
-        if h.get("rect_shape"):
-            details["human_rect"] = h["rect_shape"]
-        if h.get("mask_shape"):
-            details["human_mask"] = h["mask_shape"]
-        if h.get("poly_shape"):
-            details["human_poly"] = h["poly_shape"]
-        if a.get("rect_shape"):
-            details["ai_rect"] = a["rect_shape"]
-        if a.get("mask_shape"):
-            details["ai_mask"] = a["mask_shape"]
-        if a.get("poly_shape"):
-            details["ai_poly"] = a["poly_shape"]
+        self._populate_shape_details(h, "human", details)
+        self._populate_shape_details(a, "ai", details)
 
         # ----------------------------------------------------------------------
         # 1. POLICY_BOX_MASK (14 Instance Labels): Compare BOTH box & mask
@@ -590,6 +883,8 @@ class CorrectionDiffEngine:
 
             box_iou = calculate_box_iou(a_box, h_box) if (a_box and h_box) else iou
             box_changed = False
+            box_moved = False
+            box_resized = False
             box_change_type: Optional[str] = None
             shift_x = 0.0
             shift_y = 0.0
@@ -609,11 +904,21 @@ class CorrectionDiffEngine:
                 dh = abs(ah - hh) / max(ah, hh, 1.0)
 
                 if dw > 0.15 or dh > 0.15:
+                    box_resized = True
+                if shift_x > 5.0 or shift_y > 5.0 or box_iou < 0.90:
+                    box_moved = True
+
+                if box_resized:
                     box_changed = True
                     box_change_type = CORRECTION_BOX_RESIZE
-                elif shift_x > 5.0 or shift_y > 5.0 or box_iou < 0.90:
+                elif box_moved:
                     box_changed = True
                     box_change_type = CORRECTION_BOX_MOVE
+            elif (a_rect is not None) ^ (h_rect is not None):
+                box_changed = True
+                box_moved = True
+                box_change_type = CORRECTION_BOX_MOVE
+                box_iou = 0.0
 
             # Mask geometry comparison
             a_mask = a.get("mask_shape") or (a["shape"] if a["shape"].get("type") == "mask" else None)
@@ -634,7 +939,11 @@ class CorrectionDiffEngine:
             details["shift"] = {"dx": round(shift_x, 2), "dy": round(shift_y, 2)}
             details["size_diff"] = {"dw": round(dw, 3), "dh": round(dh, 3)}
             details["box_changed"] = box_changed
+            details["box_moved"] = box_moved
+            details["box_resized"] = box_resized
             details["mask_changed"] = mask_changed
+            if box_change_type:
+                details["box_change_type"] = box_change_type
 
             if box_changed and not mask_changed:
                 corr_type = box_change_type or CORRECTION_BOX_MOVE
@@ -661,21 +970,75 @@ class CorrectionDiffEngine:
             )
 
         # ----------------------------------------------------------------------
-        # 2. POLICY_POLYGON_MASK (10 Region Labels): Compare true shape overlap
+        # 2. POLICY_POLYGON_MASK (10 Region Labels): Compare BOTH polygon & mask
         # ----------------------------------------------------------------------
         if policy == POLICY_POLYGON_MASK or group == GROUP_REGION or "area/" in lbl:
-            a_poly_mask = a.get("mask_shape") or a.get("poly_shape") or a["shape"]
-            h_poly_mask = h.get("mask_shape") or h.get("poly_shape") or h["shape"]
-            true_iou = _compute_shape_iou(a_poly_mask, h_poly_mask, img_w, img_h)
+            a_poly = a.get("poly_shape") or (a["shape"] if a["shape"].get("type") == "polygon" else None)
+            h_poly = h.get("poly_shape") or (h["shape"] if h["shape"].get("type") == "polygon" else None)
+            a_mask = a.get("mask_shape") or (a["shape"] if a["shape"].get("type") == "mask" else None)
+            h_mask = h.get("mask_shape") or (h["shape"] if h["shape"].get("type") == "mask" else None)
+
+            # Fallback for standalone/unpaired shapes
+            if not a_poly and not a_mask:
+                if a["shape"].get("type") == "polygon" or len(a["shape"].get("points") or []) >= 6:
+                    a_poly = a["shape"]
+                else:
+                    a_mask = a["shape"]
+            if not h_poly and not h_mask:
+                if h["shape"].get("type") == "polygon" or len(h["shape"].get("points") or []) >= 6:
+                    h_poly = h["shape"]
+                else:
+                    h_mask = h["shape"]
+
+            # Independent polygon similarity / shape IoU
+            if a_poly and h_poly:
+                poly_iou = _compute_shape_iou(a_poly, h_poly, img_w, img_h)
+                polygon_changed = (poly_iou < 0.92)
+            elif (a_poly is not None) ^ (h_poly is not None):
+                polygon_changed = True
+                poly_iou = 0.0
+            else:
+                polygon_changed = False
+                poly_iou = 1.0
+
+            # Independent mask IoU
+            if a_mask and h_mask:
+                mask_iou = _compute_shape_iou(a_mask, h_mask, img_w, img_h)
+                mask_changed = (mask_iou < 0.92)
+            elif (a_mask is not None) ^ (h_mask is not None):
+                mask_changed = True
+                mask_iou = 0.0
+            else:
+                mask_changed = False
+                mask_iou = 1.0
+
+            # Diagnostic BBox IoU
             bbox_iou = calculate_box_iou(a_bbox, h_bbox) if (a_bbox and h_bbox) else 0.0
 
-            details["polygon_mask_iou"] = round(true_iou, 4)
-            details["mask_iou"] = round(true_iou, 4)
-            details["shape_iou"] = round(true_iou, 4)
+            # Composite IoU across active geometries
+            active_ious = []
+            if a_poly and h_poly:
+                active_ious.append(poly_iou)
+            if a_mask and h_mask:
+                active_ious.append(mask_iou)
+            composite_iou = min(active_ious) if active_ious else min(poly_iou, mask_iou)
+
+            details["polygon_changed"] = polygon_changed
+            details["mask_changed"] = mask_changed
+            details["polygon_iou"] = round(poly_iou, 4)
+            details["shape_iou"] = round(poly_iou, 4)
+            details["polygon_similarity"] = round(poly_iou, 4)
+            details["mask_iou"] = round(mask_iou, 4)
+            details["polygon_mask_iou"] = round(composite_iou, 4)
             details["bbox_iou_diagnostic"] = round(bbox_iou, 4)
             details["bbox_iou"] = round(bbox_iou, 4)
 
-            if true_iou >= 0.92:
+            # Expected behavior:
+            # polygon unchanged, mask unchanged -> NO_CHANGE
+            # polygon changed, mask unchanged -> REGION_EDIT
+            # polygon unchanged, mask changed -> REGION_EDIT
+            # both changed -> REGION_EDIT
+            if not polygon_changed and not mask_changed:
                 details["status"] = "Region accepted with negligible change"
                 return CorrectionDiffItem(
                     correction_type=CORRECTION_NO_CHANGE,
@@ -683,17 +1046,24 @@ class CorrectionDiffEngine:
                     human_label=lbl,
                     ai_shape=a["shape"],
                     human_shape=h["shape"],
-                    iou=round(true_iou, 4),
+                    iou=round(composite_iou, 4),
                     details=details,
                 )
-            details["reason"] = f"Semantic region '{lbl}' contour edited by annotator (shape IoU {true_iou:.2f})"
+
+            if polygon_changed and not mask_changed:
+                details["reason"] = f"Semantic region '{lbl}' polygon contour edited by annotator (polygon IoU {poly_iou:.2f})"
+            elif not polygon_changed and mask_changed:
+                details["reason"] = f"Semantic region '{lbl}' mask boundary edited by annotator (mask IoU {mask_iou:.2f})"
+            else:
+                details["reason"] = f"Semantic region '{lbl}' both polygon (IoU {poly_iou:.2f}) and mask (IoU {mask_iou:.2f}) edited by annotator"
+
             return CorrectionDiffItem(
                 correction_type=CORRECTION_REGION_EDIT,
                 ai_label=lbl,
                 human_label=lbl,
                 ai_shape=a["shape"],
                 human_shape=h["shape"],
-                iou=round(true_iou, 4),
+                iou=round(composite_iou, 4),
                 details=details,
             )
 
@@ -703,15 +1073,38 @@ class CorrectionDiffEngine:
         if policy == POLICY_POLYLINE or group == GROUP_LANE or lbl.startswith("lane/"):
             a_line = a.get("polyline_shape") or a["shape"]
             h_line = h.get("polyline_shape") or h["shape"]
-            true_iou = _compute_shape_iou(a_line, h_line, img_w, img_h, line_width=4)
-            bbox_iou = calculate_box_iou(a_bbox, h_bbox) if (a_bbox and h_bbox) else 0.0
+            pts_a = extract_polyline_points(a_line)
+            pts_h = extract_polyline_points(h_line)
+
+            if metrics and "avg_dist" in metrics:
+                avg_dist = metrics["avg_dist"]
+            elif pts_a and pts_h:
+                avg_dist = compute_polyline_distance(pts_a, pts_h)
+            else:
+                avg_dist = 0.0
+
+            if metrics and "stroke_iou" in metrics:
+                true_iou = metrics["stroke_iou"]
+            else:
+                true_iou = _compute_shape_iou(
+                    a_line, h_line, img_w, img_h, line_width=self.lane_compare_width_px
+                )
+
+            if metrics and "bbox_iou" in metrics:
+                bbox_iou = metrics["bbox_iou"]
+            else:
+                bbox_iou = calculate_box_iou(a_bbox, h_bbox) if (a_bbox and h_bbox) else 0.0
 
             details["lane_iou"] = round(true_iou, 4)
+            details["stroke_iou"] = round(true_iou, 4)
+            details["lane_shift_px"] = round(avg_dist, 2)
+            details["avg_dist"] = round(avg_dist, 2)
             details["bbox_iou_diagnostic"] = round(bbox_iou, 4)
             details["bbox_iou"] = round(bbox_iou, 4)
 
-            if true_iou >= 0.90:
-                details["status"] = "Lane marking accepted"
+            # Tolerance check: negligible jitter / tiny change (<= lane_tolerance_px) or very high stroke IoU
+            if avg_dist <= self.lane_tolerance_px or true_iou >= 0.90:
+                details["status"] = "Lane marking accepted with negligible change"
                 return CorrectionDiffItem(
                     correction_type=CORRECTION_NO_CHANGE,
                     ai_label=lbl,
@@ -721,7 +1114,7 @@ class CorrectionDiffEngine:
                     iou=round(true_iou, 4),
                     details=details,
                 )
-            details["reason"] = f"Lane marking '{lbl}' geometry edited by annotator (lane IoU {true_iou:.2f})"
+            details["reason"] = f"Lane marking '{lbl}' geometry edited by annotator (lane stroke IoU {true_iou:.2f}, avg shift {avg_dist:.1f}px)"
             return CorrectionDiffItem(
                 correction_type=CORRECTION_LANE_EDIT,
                 ai_label=lbl,
@@ -1232,9 +1625,9 @@ class FeedbackDatabase:
                 return None
 
             img_w, img_h = image.size
-            # Add 12% padding around bounding box for context
-            pad_x = w * 0.12
-            pad_y = h * 0.12
+            # Add padding around bounding box for context (minimum 16px to protect thin lane polylines)
+            pad_x = max(w * 0.12, 16.0)
+            pad_y = max(h * 0.12, 16.0)
             crop_x1 = max(0, int(math.floor(x1 - pad_x)))
             crop_y1 = max(0, int(math.floor(y1 - pad_y)))
             crop_x2 = min(img_w, int(math.ceil(x2 + pad_x)))
@@ -1624,3 +2017,79 @@ class FeedbackDatabase:
                     p.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    @staticmethod
+    def reconstruct_shapes(
+        correction_record: Dict[str, Any],
+        target: str = "human",
+    ) -> List[Dict[str, Any]]:
+        """Reconstruct both member shapes from a stored correction record.
+
+        Supports Policy A (human_rect + human_mask), Policy B (human_poly + human_mask),
+        and Policy C (human_polyline), with fallback to human_shape_json.
+
+        Args:
+            correction_record: Row dictionary from corrections table or CorrectionDiffItem dict.
+            target: 'human' or 'ai'.
+
+        Returns:
+            List of CVAT shape dictionaries representing the full composite annotation.
+        """
+        details: Dict[str, Any] = {}
+        raw_details = correction_record.get("details_json") or correction_record.get("details")
+        if isinstance(raw_details, str):
+            try:
+                details = json.loads(raw_details)
+            except Exception:
+                details = {}
+        elif isinstance(raw_details, dict):
+            details = raw_details
+
+        # 1. Exact sub_shapes stored in details
+        sub_shapes_key = f"{target}_sub_shapes"
+        if details.get(sub_shapes_key) and isinstance(details[sub_shapes_key], list):
+            return details[sub_shapes_key]
+
+        # 2. Structured paired member shapes from details
+        shapes: List[Dict[str, Any]] = []
+        rect_shape = details.get(f"{target}_rect")
+        poly_shape = details.get(f"{target}_poly")
+        mask_shape = details.get(f"{target}_mask")
+        polyline_shape = details.get(f"{target}_polyline")
+
+        if rect_shape:
+            shapes.append(rect_shape)
+        if poly_shape:
+            shapes.append(poly_shape)
+        if mask_shape:
+            shapes.append(mask_shape)
+        if polyline_shape:
+            shapes.append(polyline_shape)
+
+        if shapes:
+            return shapes
+
+        # 3. Fallback to single primary shape in human_shape_json / ai_shape_json
+        shape_key = f"{target}_shape_json" if f"{target}_shape_json" in correction_record else f"{target}_shape"
+        raw_shape = correction_record.get(shape_key)
+        if isinstance(raw_shape, str):
+            try:
+                parsed = json.loads(raw_shape)
+                if isinstance(parsed, dict):
+                    return [parsed]
+                elif isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                pass
+        elif isinstance(raw_shape, dict):
+            return [raw_shape]
+        elif isinstance(raw_shape, list):
+            return raw_shape
+
+        return []
+
+
+# Aliases for feedback correction storage repository and shape reconstruction
+CorrectionDatabase = FeedbackDatabase
+reconstruct_shapes = FeedbackDatabase.reconstruct_shapes
+

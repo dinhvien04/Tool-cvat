@@ -52,6 +52,11 @@ DEFAULT_NUM_SAMPLES: int = 15
 DEFAULT_SIMPLIFY_EPSILON: float = 1.5
 MIN_POLYLINE_POINTS: int = 2
 
+# Policy C Line Comparison & Matching Defaults
+DEFAULT_LANE_COMPARE_WIDTH_PX: int = 8
+DEFAULT_LANE_TOLERANCE_PX: float = 3.0
+DEFAULT_LANE_MAX_MATCH_DIST_PX: float = 25.0
+
 
 def calculate_polygon_aspect_ratio(
     pixel_points: Sequence[Sequence[Union[int, float]]],
@@ -490,3 +495,101 @@ def lane_shape_pipeline(
         simplify_epsilon=simplify_epsilon,
         min_aspect_ratio=min_aspect_ratio,
     )
+
+
+def extract_polyline_points(
+    shape: Dict[str, Any],
+) -> List[Tuple[float, float]]:
+    """Extract ordered (x, y) float vertex coordinates from a CVAT polyline shape dictionary.
+
+    Supports flat 'points' list [x0, y0, x1, y1, ...] or list of [x, y] / (x, y) coordinates.
+    """
+    pts = shape.get("points") or []
+    if not pts:
+        return []
+    if isinstance(pts[0], (int, float)):
+        return [
+            (float(pts[i]), float(pts[i + 1]))
+            for i in range(0, len(pts) - 1, 2)
+        ]
+    if isinstance(pts[0], (list, tuple)):
+        return [(float(p[0]), float(p[1])) for p in pts if len(p) >= 2]
+    return []
+
+
+def point_to_segment_distance(
+    px: float, py: float, x1: float, y1: float, x2: float, y2: float
+) -> float:
+    """Compute Euclidean distance from point (px, py) to line segment ((x1, y1), (x2, y2))."""
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0.0 and dy == 0.0:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    return math.hypot(px - proj_x, py - proj_y)
+
+
+def polyline_point_min_distance(
+    px: float, py: float, poly_pts: Sequence[Tuple[float, float]]
+) -> float:
+    """Find minimum distance from point (px, py) to any segment of a polyline."""
+    if not poly_pts:
+        return float("inf")
+    if len(poly_pts) == 1:
+        return math.hypot(px - poly_pts[0][0], py - poly_pts[0][1])
+    min_d = float("inf")
+    for i in range(len(poly_pts) - 1):
+        d = point_to_segment_distance(
+            px, py, poly_pts[i][0], poly_pts[i][1], poly_pts[i + 1][0], poly_pts[i + 1][1]
+        )
+        if d < min_d:
+            min_d = d
+            if min_d < 1e-4:
+                return 0.0
+    return min_d
+
+
+def sample_polyline_points(
+    poly_pts: Sequence[Tuple[float, float]],
+    sample_step: float = 5.0,
+) -> List[Tuple[float, float]]:
+    """Sample points along a polyline at approximately uniform step intervals."""
+    if len(poly_pts) <= 1:
+        return [(float(p[0]), float(p[1])) for p in poly_pts]
+    samples: List[Tuple[float, float]] = []
+    for i in range(len(poly_pts) - 1):
+        x1, y1 = float(poly_pts[i][0]), float(poly_pts[i][1])
+        x2, y2 = float(poly_pts[i + 1][0]), float(poly_pts[i + 1][1])
+        seg_len = math.hypot(x2 - x1, y2 - y1)
+        if seg_len < 1e-6:
+            samples.append((x1, y1))
+            continue
+        n_steps = max(1, int(math.ceil(seg_len / sample_step)))
+        for s in range(n_steps):
+            alpha = s / n_steps
+            samples.append((x1 + alpha * (x2 - x1), y1 + alpha * (y2 - y1)))
+    samples.append((float(poly_pts[-1][0]), float(poly_pts[-1][1])))
+    return samples
+
+
+def compute_polyline_distance(
+    pts_a: Sequence[Tuple[float, float]],
+    pts_b: Sequence[Tuple[float, float]],
+    sample_step: float = 5.0,
+) -> float:
+    """Compute symmetric average Euclidean distance (in pixels) between two polylines.
+
+    Returns 0.0 for identical or reversed identical lines.
+    Symmetric and independent of vertex ordering or vertex counts.
+    """
+    if not pts_a or not pts_b:
+        return float("inf")
+    samples_a = sample_polyline_points(pts_a, sample_step)
+    samples_b = sample_polyline_points(pts_b, sample_step)
+    d_a_to_b = sum(polyline_point_min_distance(x, y, pts_b) for x, y in samples_a) / len(samples_a)
+    d_b_to_a = sum(polyline_point_min_distance(x, y, pts_a) for x, y in samples_b) / len(samples_b)
+    return (d_a_to_b + d_b_to_a) / 2.0
+

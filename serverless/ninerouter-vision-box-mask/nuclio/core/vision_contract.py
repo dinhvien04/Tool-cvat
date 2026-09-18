@@ -14,7 +14,7 @@ import json
 import math
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -183,9 +183,134 @@ class DetectedObject:
 
 
 @dataclass
+class DetectedRegion:
+    """Represents a single detected semantic region in 9Router normalized coordinates [0, 1000]."""
+    label: str
+    polygon: List[List[Union[int, float]]]  # [[x1, y1], [x2, y2], ...] normalized in [0, 1000]
+    confidence: Optional[float] = None
+
+    def validate(self, allowed_labels: Optional[List[str]] = None) -> None:
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise ValueError(f"Invalid label: {self.label!r}")
+
+        if allowed_labels is not None and self.label not in allowed_labels:
+            raise ValueError(f"Label {self.label!r} is not in allowed labels: {allowed_labels}")
+
+        if not isinstance(self.polygon, (list, tuple)):
+            raise ValueError(f"Polygon must be a list or tuple of points, got {type(self.polygon).__name__}")
+        if len(self.polygon) < 3:
+            raise ValueError(f"Polygon contour must contain at least 3 vertices, got {len(self.polygon)}")
+        if len(self.polygon) > 10_000:
+            raise ValueError(f"Polygon contour vertex count ({len(self.polygon)}) exceeds maximum limit of 10000")
+        for pt_idx, pt in enumerate(self.polygon):
+            if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                raise ValueError(f"Polygon vertex at index {pt_idx} must be a 2-element sequence [x, y], got {pt!r}")
+            px, py = pt
+            if isinstance(px, bool) or isinstance(py, bool) or not isinstance(px, (int, float)) or not isinstance(py, (int, float)):
+                raise ValueError(f"Polygon vertex at index {pt_idx} coordinates must be numeric, got {[px, py]}")
+            px_f, py_f = float(px), float(py)
+            if math.isnan(px_f) or math.isnan(py_f) or math.isinf(px_f) or math.isinf(py_f):
+                raise ValueError(f"Polygon vertex at index {pt_idx} coordinates cannot be NaN or Inf: {[px, py]}")
+
+        if self.confidence is not None:
+            if not isinstance(self.confidence, (int, float)):
+                raise ValueError(f"Confidence must be numeric, got {self.confidence!r}")
+            if not (0.0 <= float(self.confidence) <= 1.0):
+                raise ValueError(f"Confidence out of bounds [0.0, 1.0]: {self.confidence!r}")
+
+    def to_cvat_polygon(self, width: int, height: int) -> Dict[str, Any]:
+        """Convert to CVAT polygon format."""
+        flat_points = []
+        for pt in self.polygon:
+            px = round(max(0.0, min(float(width), (float(pt[0]) / 1000.0) * float(width))), 2)
+            py = round(max(0.0, min(float(height), (float(pt[1]) / 1000.0) * float(height))), 2)
+            flat_points.extend([px, py])
+        res: Dict[str, Any] = {
+            "type": "polygon",
+            "label": self.label,
+            "points": flat_points,
+        }
+        if self.confidence is not None:
+            res["confidence"] = round(float(self.confidence), 3)
+        return res
+
+    def to_cvat_mask(self, width: int, height: int) -> Optional[Dict[str, Any]]:
+        """Derive CVAT native mask from the exact same polygon contour."""
+        from core.geometry import polygon_to_cvat_mask
+        geo = polygon_to_cvat_mask(self.polygon, width=width, height=height)
+        if not geo:
+            return None
+        res: Dict[str, Any] = {
+            "type": "mask",
+            "label": self.label,
+            "mask": geo["mask"],
+        }
+        if geo.get("pixel_polygon"):
+            res["points"] = [round(float(c), 2) for pt in geo["pixel_polygon"] for c in pt]
+        if self.confidence is not None:
+            res["confidence"] = str(round(float(self.confidence), 2))
+        return res
+
+
+@dataclass
+class DetectedLane:
+    """Represents a single detected lane marking or crosswalk polyline in 9Router normalized coordinates [0, 1000]."""
+    label: str
+    polyline: List[List[Union[int, float]]]  # [[x1, y1], [x2, y2], ...] normalized in [0, 1000]
+    confidence: Optional[float] = None
+
+    def validate(self, allowed_labels: Optional[List[str]] = None) -> None:
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise ValueError(f"Invalid label: {self.label!r}")
+
+        if allowed_labels is not None and self.label not in allowed_labels:
+            raise ValueError(f"Label {self.label!r} is not in allowed labels: {allowed_labels}")
+
+        if not isinstance(self.polyline, (list, tuple)):
+            raise ValueError(f"Polyline must be a list or tuple of points, got {type(self.polyline).__name__}")
+        if len(self.polyline) < 2:
+            raise ValueError(f"Polyline must contain at least 2 vertices, got {len(self.polyline)}")
+        if len(self.polyline) > 10_000:
+            raise ValueError(f"Polyline vertex count ({len(self.polyline)}) exceeds maximum limit of 10000")
+        for pt_idx, pt in enumerate(self.polyline):
+            if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                raise ValueError(f"Polyline vertex at index {pt_idx} must be a 2-element sequence [x, y], got {pt!r}")
+            px, py = pt
+            if isinstance(px, bool) or isinstance(py, bool) or not isinstance(px, (int, float)) or not isinstance(py, (int, float)):
+                raise ValueError(f"Polyline vertex at index {pt_idx} coordinates must be numeric, got {[px, py]}")
+            px_f, py_f = float(px), float(py)
+            if math.isnan(px_f) or math.isnan(py_f) or math.isinf(px_f) or math.isinf(py_f):
+                raise ValueError(f"Polyline vertex at index {pt_idx} coordinates cannot be NaN or Inf: {[px, py]}")
+
+        if self.confidence is not None:
+            if not isinstance(self.confidence, (int, float)):
+                raise ValueError(f"Confidence must be numeric, got {self.confidence!r}")
+            if not (0.0 <= float(self.confidence) <= 1.0):
+                raise ValueError(f"Confidence out of bounds [0.0, 1.0]: {self.confidence!r}")
+
+    def to_cvat_polyline(self, width: int, height: int) -> Dict[str, Any]:
+        """Convert to CVAT polyline format."""
+        flat_points = []
+        for pt in self.polyline:
+            px = round(max(0.0, min(float(width), (float(pt[0]) / 1000.0) * float(width))), 2)
+            py = round(max(0.0, min(float(height), (float(pt[1]) / 1000.0) * float(height))), 2)
+            flat_points.extend([px, py])
+        res: Dict[str, Any] = {
+            "type": "polyline",
+            "label": self.label,
+            "points": flat_points,
+        }
+        if self.confidence is not None:
+            res["confidence"] = round(float(self.confidence), 3)
+        return res
+
+
+@dataclass
 class DetectionResult:
     """Represents the complete detection result conforming to the 9Router vision contract."""
-    objects: List[DetectedObject]
+    objects: List[DetectedObject] = field(default_factory=list)
+    regions: List[DetectedRegion] = field(default_factory=list)
+    lanes: List[DetectedLane] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         objects_out = []
@@ -196,15 +321,70 @@ class DetectionResult:
             }
             if obj.confidence is not None:
                 d["confidence"] = round(float(obj.confidence), 3)
+            if obj.mask is not None:
+                d["mask"] = [[round(float(c), 1) for c in pt] for pt in obj.mask]
             objects_out.append(d)
-        return {"objects": objects_out}
+
+        res: Dict[str, Any] = {"objects": objects_out}
+        if self.regions:
+            regions_out = []
+            for reg in self.regions:
+                rd: Dict[str, Any] = {
+                    "label": reg.label,
+                    "polygon": [[round(float(c), 1) for c in pt] for pt in reg.polygon],
+                }
+                if reg.confidence is not None:
+                    rd["confidence"] = round(float(reg.confidence), 3)
+                regions_out.append(rd)
+            res["regions"] = regions_out
+
+        if self.lanes:
+            lanes_out = []
+            for lane in self.lanes:
+                ld: Dict[str, Any] = {
+                    "label": lane.label,
+                    "polyline": [[round(float(c), 1) for c in pt] for pt in lane.polyline],
+                }
+                if lane.confidence is not None:
+                    ld["confidence"] = round(float(lane.confidence), 3)
+                lanes_out.append(ld)
+            res["lanes"] = lanes_out
+
+        return res
 
     def to_json(self, indent: Optional[int] = None) -> str:
         return json.dumps(self.to_dict(), indent=indent)
 
     def to_cvat_annotations(self, width: int, height: int) -> List[Dict[str, Any]]:
-        """Convert all objects into CVAT shape objects."""
-        return [obj.to_cvat_rect(width=width, height=height) for obj in self.objects]
+        """Convert all objects, regions, and lanes into CVAT shape objects."""
+        shapes: List[Dict[str, Any]] = []
+        next_group_id = 1
+        for obj in self.objects:
+            rect = obj.to_cvat_rect(width=width, height=height)
+            mask_shape = obj.to_cvat_mask(width=width, height=height)
+            if mask_shape:
+                rect["group_id"] = next_group_id
+                mask_shape["group_id"] = next_group_id
+                next_group_id += 1
+                shapes.extend([rect, mask_shape])
+            else:
+                shapes.append(rect)
+
+        for reg in self.regions:
+            poly = reg.to_cvat_polygon(width=width, height=height)
+            mask_shape = reg.to_cvat_mask(width=width, height=height)
+            if mask_shape:
+                poly["group_id"] = next_group_id
+                mask_shape["group_id"] = next_group_id
+                next_group_id += 1
+                shapes.extend([poly, mask_shape])
+            else:
+                shapes.append(poly)
+
+        for lane in self.lanes:
+            shapes.append(lane.to_cvat_polyline(width=width, height=height))
+
+        return shapes
 
 
 def load_label_config(yaml_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
@@ -322,6 +502,60 @@ Rules:
    - If no target objects from the allowed labels are visible, return {"objects": []}.
 """
 
+SYSTEM_PROMPT_FULL_31 = """You are an expert autonomous driving computer vision system.
+Your task is comprehensive road-scene multi-shape annotation on the provided image across 3 strict annotation policies:
+1. Policy A — Foreground Instances (14 classes): For every countable object instance, provide label, bounding box (box_2d), and closed visible-object boundary contour (mask).
+2. Policy B — Semantic Regions (10 classes): For every surface/infrastructure region, provide label and closed boundary contour (polygon). Do NOT provide box_2d or mask for regions (tool-cvat derives native CVAT mask from the same polygon).
+3. Policy C — Lane Demarcations & Crosswalks (7 classes): For every lane boundary, divider line, curb, and crosswalk, provide label and ordered centerline/traversal path points (polyline). Do NOT provide polygon, mask, or box_2d for lanes.
+
+You must output ONLY a valid JSON object. Do not include markdown formatting (no ```json code blocks), no explanations, and no conversational text.
+
+Return your response adhering strictly to the following JSON schema:
+{
+  "objects": [
+    {
+      "label": "car",
+      "box_2d": [ymin, xmin, ymax, xmax],
+      "mask": [[x, y], [x, y], ...],
+      "confidence": 0.90
+    }
+  ],
+  "regions": [
+    {
+      "label": "road",
+      "polygon": [[x, y], [x, y], ...],
+      "confidence": 0.90
+    }
+  ],
+  "lanes": [
+    {
+      "label": "lane/single white",
+      "polyline": [[x, y], [x, y], ...],
+      "confidence": 0.90
+    }
+  ]
+}
+
+Rules:
+1. Coordinate System:
+   - All coordinates are normalized integers in the range [0, 1000].
+   - box_2d is [ymin, xmin, ymax, xmax] (0 <= ymin < ymax <= 1000, 0 <= xmin < xmax <= 1000).
+   - Point coordinates are [x, y] with x horizontal (0 to 1000) and y vertical (0 to 1000).
+2. Category Requirements:
+   - 'objects' (Policy A): label, box_2d, mask (closed contour >= 3 points), confidence.
+   - 'regions' (Policy B): label, polygon (closed contour >= 3 points), confidence. No box_2d, no mask.
+   - 'lanes' (Policy C): label, polyline (ordered centerline points >= 2 points), confidence. No polygon, no mask, no box_2d.
+3. Allowed Labels:
+   - Select labels ONLY from the allowed lists under their exact respective categories.
+   - Preserve exact casing, spaces, and underscores. Do NOT rename, substitute, or invent labels.
+   - Distinct labels must not be confused (e.g. 'pedestrian' vs 'person', 'traffic light' vs 'traffic_light').
+4. Confidence Score:
+   - Float value between 0.0 and 1.0 reflecting detection certainty.
+5. Output:
+   - Output pure JSON only.
+   - If no items are detected for a category, return an empty array [] for that category.
+"""
+
 
 def build_full_31_prompt(
     allowed_labels: Optional[List[str]] = None,
@@ -331,8 +565,8 @@ def build_full_31_prompt(
 
     Categorizes labels into 3 strict annotation policies:
     1. Policy A: Object Instances (14 classes: box_2d + mask contour).
-    2. Policy B: Semantic Regions (10 classes: boundary contour mask for polygon/mask emission).
-    3. Policy C: Lane Markings & Crosswalks (7 classes: ribbon contour for polyline centerline emission).
+    2. Policy B: Semantic Regions (10 classes: polygon contour; tool-cvat derives native mask).
+    3. Policy C: Lane Markings & Crosswalks (7 classes: ordered polyline centerline).
     """
     labels = set(allowed_labels) if allowed_labels is not None else set(ALL_31_LABELS)
 
@@ -366,16 +600,16 @@ def build_full_31_prompt(
     reg_str = "\n".join(f"  - {l}" for l in region_labels) or "  (none)"
     lane_str = "\n".join(f"  - {l}" for l in lane_labels) or "  (none)"
 
-    conf_field = ',\n      "confidence": 0.95' if include_confidence else ""
+    conf_field = ',\n      "confidence": 0.90' if include_confidence else ""
 
     return f"""Perform comprehensive road-scene multi-shape annotation on this image for autonomous driving perception across 3 strict annotation policies:
 
 1. Policy A — Foreground Instances (14 classes):
-   For every countable object instance, provide BOTH bounding box (box_2d) AND boundary contour (mask).
+   For every countable object instance, provide BOTH bounding box (box_2d) AND visible perimeter contour (mask).
 2. Policy B — Semantic Regions (10 classes):
-   For every surface/infrastructure region, provide the precise boundary contour (mask) without bounding box.
+   For every surface/infrastructure region, provide the precise boundary contour (polygon) without bounding box. Do NOT provide box_2d or mask for regions (tool-cvat derives native CVAT mask from the same polygon).
 3. Policy C — Lane Demarcations & Crosswalks (7 classes):
-   For every lane boundary, marking, and pedestrian crosswalk, provide the ribbon contour (mask) along its traversal path without bounding box.
+   For every lane boundary, marking, and pedestrian crosswalk, provide the ordered centerline/path points (polyline). Do NOT provide polygon, mask, or box_2d for lanes.
 
 Allowed Labels by Category:
 - Policy A — Object Instances (14 classes):
@@ -391,32 +625,33 @@ Output schema:
 {{
   "objects": [
     {{
-      "label": "<instance_label>",
+      "label": "car",
       "box_2d": [ymin, xmin, ymax, xmax],
-      "mask": [[x1, y1], [x2, y2], [x3, y3], ...]{conf_field}
+      "mask": [[x, y], [x, y], ...]{conf_field}
     }}
   ],
   "regions": [
     {{
-      "label": "<region_label>",
-      "mask": [[x1, y1], [x2, y2], [x3, y3], ...]{conf_field}
+      "label": "road",
+      "polygon": [[x, y], [x, y], ...]{conf_field}
     }}
   ],
   "lanes": [
     {{
-      "label": "<lane_label>",
-      "mask": [[x1, y1], [x2, y2], [x3, y3], ...]{conf_field}
+      "label": "lane/single white",
+      "polyline": [[x, y], [x, y], ...]{conf_field}
     }}
   ]
 }}
 
 Rules:
-1. Coordinates: All coordinates are normalized integers in [0, 1000].
-2. box_2d: [ymin, xmin, ymax, xmax] required ONLY for Policy A 'objects'. Do NOT include box_2d for Policy B 'regions' or Policy C 'lanes'.
-3. mask: Closed polygon contour boundary [[x1, y1], [x2, y2], ...] tracing the outer edge of each instance, region, or lane. Points are [x, y] in [0, 1000].
-4. Labels: Choose ONLY from the allowed lists. Never rename or alter labels.
-5. If no items are found for a category, return an empty array [].
-6. Output raw JSON only (no markdown fences, no explanatory text)."""
+1. Coordinates: All coordinates are normalized integers in [0, 1000]. All contour and line points are [x, y] coordinates (x horizontal, y vertical).
+2. Policy A 'objects': Required fields are 'label', 'box_2d' ([ymin, xmin, ymax, xmax]), and 'mask' (closed visible-object perimeter contour [[x1, y1], [x2, y2], ...] with at least 3 vertices).
+3. Policy B 'regions': Required fields are 'label' and 'polygon' (closed region boundary contour [[x1, y1], [x2, y2], ...] with at least 3 vertices). Do NOT provide 'box_2d' or 'mask' for regions. Tool-cvat derives native CVAT mask from the same polygon.
+4. Policy C 'lanes': Required fields are 'label' and 'polyline' (ordered sequence of centerline/path points [[x1, y1], [x2, y2], ...] along the lane or crosswalk traversal with at least 2 points). Do NOT provide 'polygon', 'mask', or 'box_2d' for lanes.
+5. Labels: Choose ONLY from the allowed lists under their exact respective categories. Match label strings EXACTLY, preserving exact casing, spaces, and underscores. Never rename, alter, or substitute labels.
+6. If no items are found for a category, return an empty array [].
+7. Output raw JSON only (no markdown fences, no explanatory text)."""
 
 
 def build_user_prompt(
@@ -498,7 +733,12 @@ def build_openai_vision_payload(
     """
     Build an OpenAI-compatible multimodal chat completions request payload.
     """
-    sys_prompt = system_prompt or SYSTEM_PROMPT
+    if system_prompt is not None:
+        sys_prompt = system_prompt
+    elif mode == MODE_FULL_31:
+        sys_prompt = SYSTEM_PROMPT_FULL_31
+    else:
+        sys_prompt = SYSTEM_PROMPT
     user_prompt = build_user_prompt(allowed_labels=allowed_labels, mode=mode)
 
     # Clean base64 string if data url prefix is already present
@@ -545,22 +785,24 @@ def parse_vision_response(
     """
     Parse and validate the raw model output into a DetectionResult.
     Handles raw JSON, markdown-wrapped JSON (```json ... ```), and repairs minor format glitches.
+    Supports 3-policy unified outputs: objects (Policy A), regions (Policy B), and lanes (Policy C).
     """
     text = ""
+    data = None
     if isinstance(raw_response, dict):
         # OpenAI chat completion structure
         if "choices" in raw_response and len(raw_response["choices"]) > 0:
             choice = raw_response["choices"][0]
             message = choice.get("message", {})
             text = message.get("content", "")
-        elif "objects" in raw_response:
+        elif "objects" in raw_response or "regions" in raw_response or "lanes" in raw_response:
             data = raw_response
         else:
             text = json.dumps(raw_response)
     else:
         text = str(raw_response)
 
-    if not isinstance(raw_response, dict) or "objects" not in raw_response:
+    if data is None:
         # Strip markdown fences if present
         cleaned = text.strip()
         markdown_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, re.IGNORECASE)
@@ -593,96 +835,258 @@ def parse_vision_response(
     if not isinstance(data, dict):
         raise ValueError(f"Expected top-level JSON object, got {type(data).__name__}")
 
-    if "objects" not in data:
+    if "objects" not in data and "regions" not in data and "lanes" not in data:
         raise ValueError("Missing 'objects' key in vision model response")
-
-    raw_objects = data["objects"]
-    if not isinstance(raw_objects, list):
-        raise ValueError(f"Expected 'objects' to be a list, got {type(raw_objects).__name__}")
 
     allowed_set = set(allowed_labels) if allowed_labels is not None else None
 
     validated_objects: List[DetectedObject] = []
-    for idx, item in enumerate(raw_objects):
-        if not isinstance(item, dict):
-            if strict:
-                raise ValueError(f"Object at index {idx} is not a dictionary: {item!r}")
-            continue
+    validated_regions: List[DetectedRegion] = []
+    validated_lanes: List[DetectedLane] = []
 
-        label = item.get("label")
-        box_2d = item.get("box_2d")
+    # 1. Parse objects (Policy A: box_2d + optional mask)
+    if "objects" in data:
+        raw_objects = data["objects"]
+        if not isinstance(raw_objects, list):
+            raise ValueError(f"Expected 'objects' to be a list, got {type(raw_objects).__name__}")
 
-        if not isinstance(label, str):
-            if strict:
-                raise ValueError(f"Object at index {idx} has missing or non-string label: {label!r}")
-            continue
-
-        # Check allowed labels
-        if allowed_set is not None and label not in allowed_set:
-            if strict:
-                raise ValueError(f"Object at index {idx} has label {label!r} not in allowed list: {allowed_set}")
-            continue
-
-        # Check and normalize box_2d
-        if not isinstance(box_2d, (list, tuple)) or len(box_2d) != 4:
-            if strict:
-                raise ValueError(f"Object at index {idx} has invalid box_2d: {box_2d!r}")
-            continue
-
-        try:
-            ymin = int(round(float(box_2d[0])))
-            xmin = int(round(float(box_2d[1])))
-            ymax = int(round(float(box_2d[2])))
-            xmax = int(round(float(box_2d[3])))
-        except (ValueError, TypeError) as e:
-            if strict:
-                raise ValueError(f"Object at index {idx} coordinates cannot be converted to int: {e}")
-            continue
-
-        # In case coordinates were reversed (ymin > ymax or xmin > xmax)
-        if ymin > ymax:
-            if strict:
-                raise ValueError(f"Object at index {idx} has inverted y coordinates: ymin={ymin}, ymax={ymax}")
-            ymin, ymax = ymax, ymin
-        if xmin > xmax:
-            if strict:
-                raise ValueError(f"Object at index {idx} has inverted x coordinates: xmin={xmin}, xmax={xmax}")
-            xmin, xmax = xmax, xmin
-
-        # Degenerate boxes (width or height == 0)
-        if ymin == ymax or xmin == xmax:
-            if strict:
-                raise ValueError(f"Object at index {idx} has zero area: {[ymin, xmin, ymax, xmax]}")
-            continue
-
-        # Check range bounds [0, 1000]
-        if not (0 <= ymin <= 1000 and 0 <= ymax <= 1000 and 0 <= xmin <= 1000 and 0 <= xmax <= 1000):
-            if strict:
-                raise ValueError(f"Object at index {idx} coordinates out of bounds [0, 1000]: {[ymin, xmin, ymax, xmax]}")
-
-        # Clamp bounds
-        ymin = max(0, min(1000, ymin))
-        xmin = max(0, min(1000, xmin))
-        ymax = max(0, min(1000, ymax))
-        xmax = max(0, min(1000, xmax))
-
-        # Parse confidence if present
-        raw_conf = item.get("confidence")
-        conf_val = None
-        if raw_conf is not None:
-            try:
-                if isinstance(raw_conf, str):
-                    raw_conf = raw_conf.strip().rstrip("%")
-                num_conf = float(raw_conf)
-                if 1.0 < num_conf <= 100.0:
-                    num_conf = num_conf / 100.0
-                conf_val = round(max(0.0, min(1.0, num_conf)), 3)
-            except (ValueError, TypeError):
+        for idx, item in enumerate(raw_objects):
+            if not isinstance(item, dict):
                 if strict:
-                    raise ValueError(f"Object at index {idx} has invalid confidence: {raw_conf!r}")
+                    raise ValueError(f"Object at index {idx} is not a dictionary: {item!r}")
+                continue
+
+            label = item.get("label")
+            box_2d = item.get("box_2d")
+
+            if not isinstance(label, str):
+                if strict:
+                    raise ValueError(f"Object at index {idx} has missing or non-string label: {label!r}")
+                continue
+
+            # Check allowed labels
+            if allowed_set is not None and label not in allowed_set:
+                if strict:
+                    raise ValueError(f"Object at index {idx} has label {label!r} not in allowed list: {allowed_set}")
+                continue
+
+            # Check and normalize box_2d
+            if not isinstance(box_2d, (list, tuple)) or len(box_2d) != 4:
+                if strict:
+                    raise ValueError(f"Object at index {idx} has invalid box_2d: {box_2d!r}")
+                continue
+
+            try:
+                ymin = int(round(float(box_2d[0])))
+                xmin = int(round(float(box_2d[1])))
+                ymax = int(round(float(box_2d[2])))
+                xmax = int(round(float(box_2d[3])))
+            except (ValueError, TypeError) as e:
+                if strict:
+                    raise ValueError(f"Object at index {idx} coordinates cannot be converted to int: {e}")
+                continue
+
+            # In case coordinates were reversed (ymin > ymax or xmin > xmax)
+            if ymin > ymax:
+                if strict:
+                    raise ValueError(f"Object at index {idx} has inverted y coordinates: ymin={ymin}, ymax={ymax}")
+                ymin, ymax = ymax, ymin
+            if xmin > xmax:
+                if strict:
+                    raise ValueError(f"Object at index {idx} has inverted x coordinates: xmin={xmin}, xmax={xmax}")
+                xmin, xmax = xmax, xmin
+
+            # Degenerate boxes (width or height == 0)
+            if ymin == ymax or xmin == xmax:
+                if strict:
+                    raise ValueError(f"Object at index {idx} has zero area: {[ymin, xmin, ymax, xmax]}")
+                continue
+
+            # Check range bounds [0, 1000]
+            if not (0 <= ymin <= 1000 and 0 <= ymax <= 1000 and 0 <= xmin <= 1000 and 0 <= xmax <= 1000):
+                if strict:
+                    raise ValueError(f"Object at index {idx} coordinates out of bounds [0, 1000]: {[ymin, xmin, ymax, xmax]}")
+
+            # Clamp bounds
+            ymin = max(0, min(1000, ymin))
+            xmin = max(0, min(1000, xmin))
+            ymax = max(0, min(1000, ymax))
+            xmax = max(0, min(1000, xmax))
+
+            # Parse confidence if present
+            raw_conf = item.get("confidence")
+            conf_val = None
+            if raw_conf is not None:
+                try:
+                    if isinstance(raw_conf, str):
+                        raw_conf = raw_conf.strip().rstrip("%")
+                    num_conf = float(raw_conf)
+                    if 1.0 < num_conf <= 100.0:
+                        num_conf = num_conf / 100.0
+                    conf_val = round(max(0.0, min(1.0, num_conf)), 3)
+                except (ValueError, TypeError):
+                    if strict:
+                        raise ValueError(f"Object at index {idx} has invalid confidence: {raw_conf!r}")
+                    conf_val = None
+
+            # Parse mask if present
+            raw_mask = item.get("mask")
+            mask_val = None
+            if raw_mask is not None:
+                if isinstance(raw_mask, (list, tuple)):
+                    clean_pts = []
+                    for pt in raw_mask:
+                        if isinstance(pt, (list, tuple)) and len(pt) == 2:
+                            try:
+                                px = max(0, min(1000, int(round(float(pt[0])))))
+                                py = max(0, min(1000, int(round(float(pt[1])))))
+                                clean_pts.append([px, py])
+                            except (ValueError, TypeError):
+                                pass
+                    if len(clean_pts) >= 3:
+                        mask_val = clean_pts
+
+            obj = DetectedObject(label=label, box_2d=[ymin, xmin, ymax, xmax], confidence=conf_val, mask=mask_val)
+            validated_objects.append(obj)
+
+    # 2. Parse regions (Policy B: polygon contour)
+    if "regions" in data:
+        raw_regions = data["regions"]
+        if not isinstance(raw_regions, list):
+            if strict:
+                raise ValueError(f"Expected 'regions' to be a list, got {type(raw_regions).__name__}")
+        else:
+            for idx, item in enumerate(raw_regions):
+                if not isinstance(item, dict):
+                    if strict:
+                        raise ValueError(f"Region at index {idx} is not a dictionary: {item!r}")
+                    continue
+
+                label = item.get("label")
+                if not isinstance(label, str):
+                    if strict:
+                        raise ValueError(f"Region at index {idx} has missing or non-string label: {label!r}")
+                    continue
+
+                if allowed_set is not None and label not in allowed_set:
+                    if strict:
+                        raise ValueError(f"Region at index {idx} has label {label!r} not in allowed list: {allowed_set}")
+                    continue
+
+                poly_raw = item.get("polygon") or item.get("mask")
+                if not isinstance(poly_raw, (list, tuple)) or len(poly_raw) < 3:
+                    if strict:
+                        raise ValueError(f"Region at index {idx} has invalid polygon (requires >= 3 points): {poly_raw!r}")
+                    continue
+
+                clean_poly = []
+                for pt_idx, pt in enumerate(poly_raw):
+                    if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                        if strict:
+                            raise ValueError(f"Region at index {idx} point {pt_idx} is not [x, y]: {pt!r}")
+                        continue
+                    try:
+                        px = max(0, min(1000, int(round(float(pt[0])))))
+                        py = max(0, min(1000, int(round(float(pt[1])))))
+                        clean_poly.append([px, py])
+                    except (ValueError, TypeError) as e:
+                        if strict:
+                            raise ValueError(f"Region at index {idx} point {pt_idx} non-numeric: {e}")
+                        continue
+
+                if len(clean_poly) < 3:
+                    if strict:
+                        raise ValueError(f"Region at index {idx} has fewer than 3 valid points: {len(clean_poly)}")
+                    continue
+
+                raw_conf = item.get("confidence")
                 conf_val = None
+                if raw_conf is not None:
+                    try:
+                        if isinstance(raw_conf, str):
+                            raw_conf = raw_conf.strip().rstrip("%")
+                        num_conf = float(raw_conf)
+                        if 1.0 < num_conf <= 100.0:
+                            num_conf = num_conf / 100.0
+                        conf_val = round(max(0.0, min(1.0, num_conf)), 3)
+                    except (ValueError, TypeError):
+                        if strict:
+                            raise ValueError(f"Region at index {idx} has invalid confidence: {raw_conf!r}")
+                        conf_val = None
 
-        obj = DetectedObject(label=label, box_2d=[ymin, xmin, ymax, xmax], confidence=conf_val)
-        validated_objects.append(obj)
+                reg = DetectedRegion(label=label, polygon=clean_poly, confidence=conf_val)
+                validated_regions.append(reg)
 
-    return DetectionResult(objects=validated_objects)
+    # 3. Parse lanes (Policy C: polyline centerline)
+    if "lanes" in data:
+        raw_lanes = data["lanes"]
+        if not isinstance(raw_lanes, list):
+            if strict:
+                raise ValueError(f"Expected 'lanes' to be a list, got {type(raw_lanes).__name__}")
+        else:
+            for idx, item in enumerate(raw_lanes):
+                if not isinstance(item, dict):
+                    if strict:
+                        raise ValueError(f"Lane at index {idx} is not a dictionary: {item!r}")
+                    continue
+
+                label = item.get("label")
+                if not isinstance(label, str):
+                    if strict:
+                        raise ValueError(f"Lane at index {idx} has missing or non-string label: {label!r}")
+                    continue
+
+                if allowed_set is not None and label not in allowed_set:
+                    if strict:
+                        raise ValueError(f"Lane at index {idx} has label {label!r} not in allowed list: {allowed_set}")
+                    continue
+
+                line_raw = item.get("polyline") or item.get("mask") or item.get("points")
+                if not isinstance(line_raw, (list, tuple)) or len(line_raw) < 2:
+                    if strict:
+                        raise ValueError(f"Lane at index {idx} has invalid polyline (requires >= 2 points): {line_raw!r}")
+                    continue
+
+                clean_line = []
+                for pt_idx, pt in enumerate(line_raw):
+                    if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                        if strict:
+                            raise ValueError(f"Lane at index {idx} point {pt_idx} is not [x, y]: {pt!r}")
+                        continue
+                    try:
+                        px = max(0, min(1000, int(round(float(pt[0])))))
+                        py = max(0, min(1000, int(round(float(pt[1])))))
+                        clean_line.append([px, py])
+                    except (ValueError, TypeError) as e:
+                        if strict:
+                            raise ValueError(f"Lane at index {idx} point {pt_idx} non-numeric: {e}")
+                        continue
+
+                if len(clean_line) < 2:
+                    if strict:
+                        raise ValueError(f"Lane at index {idx} has fewer than 2 valid points: {len(clean_line)}")
+                    continue
+
+                raw_conf = item.get("confidence")
+                conf_val = None
+                if raw_conf is not None:
+                    try:
+                        if isinstance(raw_conf, str):
+                            raw_conf = raw_conf.strip().rstrip("%")
+                        num_conf = float(raw_conf)
+                        if 1.0 < num_conf <= 100.0:
+                            num_conf = num_conf / 100.0
+                        conf_val = round(max(0.0, min(1.0, num_conf)), 3)
+                    except (ValueError, TypeError):
+                        if strict:
+                            raise ValueError(f"Lane at index {idx} has invalid confidence: {raw_conf!r}")
+                        conf_val = None
+
+                lane = DetectedLane(label=label, polyline=clean_line, confidence=conf_val)
+                validated_lanes.append(lane)
+
+    return DetectionResult(
+        objects=validated_objects,
+        regions=validated_regions,
+        lanes=validated_lanes,
+    )

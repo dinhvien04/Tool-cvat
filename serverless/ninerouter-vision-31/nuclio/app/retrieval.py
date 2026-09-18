@@ -216,7 +216,9 @@ class CorrectionRetrievalEngine:
                     human_shape = {}
 
             # Construct expected structured annotation aligned with 3-tier vision contract
-            target_label = human_lbl or ai_lbl or "object"
+            target_label = human_lbl or ai_lbl
+            if not target_label:
+                continue
             crop_coords = details.get("crop_coords")  # [cx1, cy1, cx2, cy2] in original image pixels
 
             taxonomy = Taxonomy()
@@ -281,7 +283,16 @@ class CorrectionRetrievalEngine:
                     }
                 elif target_group == GROUP_LANE or target_label.startswith("lane/"):
                     # Lane Marking: POLICY C -> "polyline" key (NEVER mask, NEVER polygon)
-                    line_pts = human_shape.get("points")
+                    line_pts = None
+                    if details.get("human_polyline") and details["human_polyline"].get("points"):
+                        line_pts = details["human_polyline"]["points"]
+                    elif details.get("human_line") and details["human_line"].get("points"):
+                        line_pts = details["human_line"]["points"]
+                    elif human_shape.get("type") in ("polyline", "line") and human_shape.get("points"):
+                        line_pts = human_shape["points"]
+                    elif human_shape.get("points") and len(human_shape["points"]) >= 4:
+                        line_pts = human_shape["points"]
+
                     if not line_pts or len(line_pts) < 4:
                         # Cannot safely reconstruct lane polyline without fabricating; skip example
                         continue
@@ -347,12 +358,17 @@ class CorrectionRetrievalEngine:
                             py = int(round(max(0.0, min(1000.0, (mask_pts[i + 1] - cy1) / ch * 1000.0))))
                             norm_mask.append([px, py])
 
+                    # Policy A ATOMICITY: BOTH box_2d AND mask MUST be present.
+                    # If mask is missing (< 3 vertices), skip the visual example completely!
+                    # Never send a box-only (or mask-only) instance example.
+                    if len(norm_mask) < 3:
+                        continue
+
                     inst_obj: Dict[str, Any] = {
                         "label": target_label,
                         "box_2d": box_2d,
+                        "mask": norm_mask,
                     }
-                    if len(norm_mask) >= 3:
-                        inst_obj["mask"] = norm_mask
 
                     expected_output = {
                         "objects": [inst_obj],

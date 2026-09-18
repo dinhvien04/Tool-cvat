@@ -174,16 +174,15 @@ labels:
     group: "instance"
     policy: "box_mask"
     allowed_shapes:
-      - "mask"
       - "rectangle"
+      - "mask"
     preferred_shape: "mask"
     special_handling:
       thin_object: true
-      mask_preferred: true
       optional_rectangle: true
       supports_bounding_box: true
       supports_mask: true
-      notes: "Vertical utility pole, lamp post, or traffic sign post. Slender aspect ratio makes 2D rectangle prone to high background noise. Mask is preferred; rectangle permitted when task is box-only."
+      notes: "Vertical utility pole, lamp post, or traffic sign post. Slender aspect ratio makes mask preferred; rectangle required under paired Policy A."
 
   person:
     group: "instance"

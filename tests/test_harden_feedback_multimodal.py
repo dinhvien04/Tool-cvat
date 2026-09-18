@@ -149,6 +149,10 @@ def test_retrieval_engine_returns_real_visual_examples(tmp_path: Path):
         ai_shape={"type": "rectangle", "points": [20.0, 20.0, 100.0, 100.0]},
         human_shape={"type": "rectangle", "points": [20.0, 20.0, 100.0, 100.0]},
         iou=1.0,
+        details={
+            "human_rect": {"type": "rectangle", "points": [20.0, 20.0, 100.0, 100.0]},
+            "human_mask": {"type": "mask", "points": [20.0, 20.0, 100.0, 20.0, 100.0, 100.0, 20.0, 100.0]},
+        },
     )
     f_db.record_corrections(
         corrections=[diff_item],
@@ -185,6 +189,13 @@ def test_retrieval_engine_bounded_examples(tmp_path: Path):
                 correction_type=CORRECTION_ADD_MISSING,
                 human_label="pedestrian",
                 human_shape={"type": "rectangle", "points": [10.0 + i * 10, 10.0, 30.0 + i * 10, 50.0]},
+                details={
+                    "human_rect": {"type": "rectangle", "points": [10.0 + i * 10, 10.0, 30.0 + i * 10, 50.0]},
+                    "human_mask": {
+                        "type": "mask",
+                        "points": [10.0 + i * 10, 10.0, 30.0 + i * 10, 10.0, 30.0 + i * 10, 50.0, 10.0 + i * 10, 50.0],
+                    },
+                },
             )
         )
     f_db.record_corrections(corrections=diff_items, image_hash=img_hash, image=base_img)
@@ -348,6 +359,10 @@ def test_annotate_image_instrumentation_counts(monkeypatch, tmp_path: Path):
         ai_shape={"type": "rectangle", "points": [10.0, 10.0, 80.0, 80.0]},
         human_shape={"type": "rectangle", "points": [10.0, 10.0, 80.0, 80.0]},
         iou=1.0,
+        details={
+            "human_rect": {"type": "rectangle", "points": [10.0, 10.0, 80.0, 80.0]},
+            "human_mask": {"type": "mask", "points": [10.0, 10.0, 80.0, 10.0, 80.0, 80.0, 10.0, 80.0]},
+        },
     )
     f_db.record_corrections([diff_item], image_hash=img_hash, image=base_img)
 

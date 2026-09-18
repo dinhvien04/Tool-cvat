@@ -20,8 +20,10 @@ from core.vision_contract import (
     DEFAULT_BBOX_LABELS,
     MODE_BOX,
     MODE_BOX_AND_MASK,
+    MODE_FULL_31,
     MODE_MASK,
     SYSTEM_PROMPT,
+    SYSTEM_PROMPT_FULL_31,
     build_openai_vision_payload,
     build_user_prompt,
 )
@@ -542,7 +544,12 @@ class NineRouterClient:
             raise ValueError(f"image_bytes_or_b64 must be bytes or str, got {type(image_bytes_or_b64)}")
 
         # Construct prompts
-        sys_prompt = system_prompt or SYSTEM_PROMPT
+        if system_prompt is not None:
+            sys_prompt = system_prompt
+        elif mode == MODE_FULL_31:
+            sys_prompt = SYSTEM_PROMPT_FULL_31
+        else:
+            sys_prompt = SYSTEM_PROMPT
         if prompt is not None:
             user_text = prompt
         else:

@@ -510,16 +510,15 @@ _BUILTIN_LABEL_GEOMETRY: Dict[str, Dict[str, Any]] = {
     "pole": {
         "group": GROUP_INSTANCE,
         "policy": POLICY_BOX_MASK,
-        "allowed_shapes": [SHAPE_MASK, SHAPE_RECTANGLE],
+        "allowed_shapes": [SHAPE_RECTANGLE, SHAPE_MASK],
         "preferred_shape": SHAPE_MASK,
         "special_handling": {
             "thin_object": True,
-            "mask_preferred": True,
             "optional_rectangle": True,
             "supports_bounding_box": True,
             "supports_mask": True,
         },
-        "notes": "Vertical utility pole/post. Mask preferred due to slender aspect ratio; rectangle optional.",
+        "notes": "Vertical utility pole/post. Mask preferred due to slender aspect ratio; rectangle required under paired Policy A.",
     },
     "vegetation": {
         "group": GROUP_REGION,
@@ -1194,7 +1193,7 @@ class Taxonomy:
         if instances:
             sections.append("Foreground Instances - Policy A (Rectangle + Mask):\n" + "\n".join(f"- {lbl}" for lbl in instances))
         if regions:
-            sections.append("Background Regions & Semantic Surfaces - Policy B (Polygon + Mask):\n" + "\n".join(f"- {lbl}" for lbl in regions))
+            sections.append("Background Regions & Semantic Surfaces - Policy B (Polygon):\n" + "\n".join(f"- {lbl}" for lbl in regions))
         if lanes:
             sections.append("Lane Markings - Policy C (Polyline Only):\n" + "\n".join(f"- {lbl}" for lbl in lanes))
 
@@ -1361,6 +1360,9 @@ def validate_cvat_output_shapes(
         if policy == POLICY_BOX_MASK:
             if gid is None:
                 warnings.append(f"policy_a_violation: Instance shape '{lbl}' ({stype}) missing group_id; dropped")
+                continue
+            if stype not in (SHAPE_RECTANGLE, SHAPE_MASK):
+                warnings.append(f"policy_a_violation: Instance shape '{lbl}' cannot have type {stype!r}; dropped")
                 continue
             key = (gid, lbl)
             policy_a_groups.setdefault(key, []).append((orig_idx, shape))

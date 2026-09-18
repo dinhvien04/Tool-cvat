@@ -17,9 +17,14 @@ import yaml
 from core.vision_contract import (
     ALL_31_LABELS,
     DEFAULT_BBOX_LABELS,
+    MODE_FULL_31,
+    SYSTEM_PROMPT_FULL_31,
+    DetectedLane,
     DetectedObject,
+    DetectedRegion,
     DetectionResult,
     box_2d_to_cvat_rect,
+    build_full_31_prompt,
     build_openai_vision_payload,
     build_user_prompt,
     cvat_rect_to_box_2d,
@@ -403,3 +408,206 @@ def test_parse_invalid_coordinates():
 
     with pytest.raises(ValueError, match="inverted y coordinates"):
         parse_vision_response(raw_inverted, allowed_labels=list(DEFAULT_BBOX_LABELS), strict=True)
+
+
+# =====================================================================
+# Phase 3B 3-Policy Unified Vision Contract Tests
+# =====================================================================
+
+def test_system_prompt_full_31_schema():
+    """Verify SYSTEM_PROMPT_FULL_31 defines the 3 strict annotation policies."""
+    assert "Policy A — Foreground Instances" in SYSTEM_PROMPT_FULL_31
+    assert "Policy B — Semantic Regions" in SYSTEM_PROMPT_FULL_31
+    assert "Policy C — Lane Demarcations & Crosswalks" in SYSTEM_PROMPT_FULL_31
+    # Check schema keys
+    assert '"objects": [' in SYSTEM_PROMPT_FULL_31
+    assert '"box_2d":' in SYSTEM_PROMPT_FULL_31
+    assert '"regions": [' in SYSTEM_PROMPT_FULL_31
+    assert '"polygon":' in SYSTEM_PROMPT_FULL_31
+    assert '"lanes": [' in SYSTEM_PROMPT_FULL_31
+    assert '"polyline":' in SYSTEM_PROMPT_FULL_31
+    # Check that regions explicitly do not request box_2d or mask
+    assert "Do NOT provide box_2d or mask for regions" in SYSTEM_PROMPT_FULL_31
+    # Check that lanes explicitly do not request polygon, mask, or box_2d
+    assert "Do NOT provide polygon, mask, or box_2d for lanes" in SYSTEM_PROMPT_FULL_31
+
+
+def test_build_full_31_prompt():
+    """Verify build_full_31_prompt constructs prompt with exact 3-policy schema."""
+    prompt = build_full_31_prompt()
+    # Check policy sections
+    assert "Policy A — Foreground Instances (14 classes):" in prompt
+    assert "Policy B — Semantic Regions (10 classes):" in prompt
+    assert "Policy C — Lane Demarcations & Crosswalks (7 classes):" in prompt
+    # Check rules
+    assert "Do NOT provide 'box_2d' or 'mask' for regions" in prompt
+    assert "Do NOT provide 'polygon', 'mask', or 'box_2d' for lanes" in prompt
+    # Check labels present in respective sections
+    assert "- car" in prompt
+    assert "- pedestrian" in prompt
+    assert "- road" in prompt
+    assert "- vegetation" in prompt
+    assert "- lane/single white" in prompt
+    assert "- lane/crosswalk" in prompt
+    # Schema check
+    assert '"objects":' in prompt
+    assert '"regions":' in prompt
+    assert '"lanes":' in prompt
+    assert '"polygon": [[x, y], [x, y], ...]' in prompt
+    assert '"polyline": [[x, y], [x, y], ...]' in prompt
+
+
+def test_build_full_31_prompt_filtered_and_no_conf():
+    """Verify build_full_31_prompt with subset of labels and no confidence field."""
+    subset = ["car", "road", "lane/single white"]
+    prompt = build_full_31_prompt(allowed_labels=subset, include_confidence=False)
+    assert "- car" in prompt
+    assert "- road" in prompt
+    assert "- lane/single white" in prompt
+    # Other labels not requested must be omitted
+    assert "- pedestrian" not in prompt
+    assert "- sky" not in prompt
+    assert "- lane/crosswalk" not in prompt
+    assert '"confidence"' not in prompt
+
+
+def test_build_openai_vision_payload_full_31():
+    """Verify build_openai_vision_payload correctly uses SYSTEM_PROMPT_FULL_31 for MODE_FULL_31."""
+    payload = build_openai_vision_payload(
+        image_base64="fake_base64_data",
+        mode=MODE_FULL_31,
+    )
+    assert payload["model"] == "gpt-4o"
+    assert payload["response_format"] == {"type": "json_object"}
+    messages = payload["messages"]
+    assert len(messages) == 2
+    # System prompt must be SYSTEM_PROMPT_FULL_31
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"] == SYSTEM_PROMPT_FULL_31
+    # User prompt must contain 3-policy structure
+    assert messages[1]["role"] == "user"
+    user_content = messages[1]["content"]
+    text_part = next(c for c in user_content if c["type"] == "text")
+    assert "Policy A — Foreground Instances" in text_part["text"]
+    assert "Policy B — Semantic Regions" in text_part["text"]
+    assert "Policy C — Lane Demarcations & Crosswalks" in text_part["text"]
+
+
+def test_detected_region_and_lane_dataclasses():
+    """Verify validation and CVAT conversion for DetectedRegion and DetectedLane."""
+    # 1. DetectedRegion
+    reg = DetectedRegion(
+        label="road",
+        polygon=[[0, 500], [1000, 500], [1000, 1000], [0, 1000]],
+        confidence=0.92,
+    )
+    reg.validate(allowed_labels=ALL_31_LABELS)
+    cvat_poly = reg.to_cvat_polygon(width=1280, height=720)
+    assert cvat_poly["type"] == "polygon"
+    assert cvat_poly["label"] == "road"
+    assert cvat_poly["confidence"] == 0.92
+    assert cvat_poly["points"] == [0.0, 360.0, 1280.0, 360.0, 1280.0, 720.0, 0.0, 720.0]
+
+    cvat_mask = reg.to_cvat_mask(width=1280, height=720)
+    assert cvat_mask is not None
+    assert cvat_mask["type"] == "mask"
+    assert cvat_mask["label"] == "road"
+
+    # Region validation error on < 3 points
+    with pytest.raises(ValueError, match="at least 3 vertices"):
+        DetectedRegion(label="road", polygon=[[0, 500], [1000, 500]]).validate()
+
+    # 2. DetectedLane
+    lane = DetectedLane(
+        label="lane/single white",
+        polyline=[[500, 400], [400, 900]],
+        confidence=0.88,
+    )
+    lane.validate(allowed_labels=ALL_31_LABELS)
+    cvat_line = lane.to_cvat_polyline(width=1280, height=720)
+    assert cvat_line["type"] == "polyline"
+    assert cvat_line["label"] == "lane/single white"
+    assert cvat_line["confidence"] == 0.88
+    assert cvat_line["points"] == [640.0, 288.0, 512.0, 648.0]
+
+    # Lane validation error on < 2 points
+    with pytest.raises(ValueError, match="at least 2 vertices"):
+        DetectedLane(label="lane/single white", polyline=[[500, 400]]).validate()
+
+
+def test_parse_vision_response_full_31_unified():
+    """Verify parse_vision_response correctly parses unified 3-policy response."""
+    raw = json.dumps({
+        "objects": [
+            {
+                "label": "car",
+                "box_2d": [100, 200, 300, 400],
+                "mask": [[200, 100], [400, 100], [400, 300], [200, 300]],
+                "confidence": 0.95,
+            }
+        ],
+        "regions": [
+            {
+                "label": "road",
+                "polygon": [[0, 500], [1000, 500], [1000, 1000], [0, 1000]],
+                "confidence": 0.90,
+            }
+        ],
+        "lanes": [
+            {
+                "label": "lane/single white",
+                "polyline": [[500, 500], [400, 1000]],
+                "confidence": 0.88,
+            }
+        ],
+    })
+
+    result = parse_vision_response(raw, allowed_labels=ALL_31_LABELS)
+    assert len(result.objects) == 1
+    assert len(result.regions) == 1
+    assert len(result.lanes) == 1
+
+    assert result.objects[0].label == "car"
+    assert result.objects[0].box_2d == [100, 200, 300, 400]
+    assert result.objects[0].mask == [[200, 100], [400, 100], [400, 300], [200, 300]]
+    assert result.objects[0].confidence == 0.95
+
+    assert result.regions[0].label == "road"
+    assert result.regions[0].polygon == [[0, 500], [1000, 500], [1000, 1000], [0, 1000]]
+    assert result.regions[0].confidence == 0.90
+
+    assert result.lanes[0].label == "lane/single white"
+    assert result.lanes[0].polyline == [[500, 500], [400, 1000]]
+    assert result.lanes[0].confidence == 0.88
+
+    # Verify conversion to full CVAT annotations
+    cvat_annos = result.to_cvat_annotations(width=1280, height=720)
+    # Policy A emits rectangle + mask (2 shapes)
+    # Policy B emits polygon + mask (2 shapes)
+    # Policy C emits polyline (1 shape)
+    # Total = 5 shapes
+    assert len(cvat_annos) == 5
+
+    types = [a["type"] for a in cvat_annos]
+    assert types.count("rectangle") == 1
+    assert types.count("mask") == 2
+    assert types.count("polygon") == 1
+    assert types.count("polyline") == 1
+
+    # Check grouping: instance rect & mask have same group_id
+    inst_shapes = [a for a in cvat_annos if a["label"] == "car"]
+    assert len(inst_shapes) == 2
+    assert inst_shapes[0]["group_id"] == inst_shapes[1]["group_id"]
+    assert inst_shapes[0]["group_id"] > 0
+
+    # Region poly & mask have same group_id
+    reg_shapes = [a for a in cvat_annos if a["label"] == "road"]
+    assert len(reg_shapes) == 2
+    assert reg_shapes[0]["group_id"] == reg_shapes[1]["group_id"]
+    assert reg_shapes[0]["group_id"] > 0
+
+    # Lane has no group_id (or None)
+    lane_shape = next(a for a in cvat_annos if a["label"] == "lane/single white")
+    assert lane_shape["type"] == "polyline"
+    assert lane_shape.get("group_id") is None
+
