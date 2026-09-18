@@ -317,6 +317,80 @@ class CorrectionDiffEngine:
         self.min_iou_match = float(min_iou_match)
         self.taxonomy = taxonomy or Taxonomy()
 
+    def _group_shapes(self, shapes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Group paired CVAT shapes sharing the same group_id into composite semantic annotations.
+
+        In 31-label mode:
+        - Policy A: Rectangle + Mask share group_id -> 1 composite annotation.
+        - Policy B: Polygon + Mask share group_id -> 1 composite annotation.
+        - Policy C: Polyline has no group_id -> 1 annotation.
+        - Un-grouped shapes (e.g. from legacy or custom tasks) remain individual annotations.
+        """
+        grouped: Dict[Tuple[Any, str], List[Dict[str, Any]]] = {}
+        standalone: List[Dict[str, Any]] = []
+
+        for s in shapes:
+            gid = s.get("group_id")
+            lbl = s.get("label", "")
+            if gid is not None:
+                key = (gid, lbl)
+                grouped.setdefault(key, []).append(s)
+            else:
+                standalone.append(s)
+
+        annotations: List[Dict[str, Any]] = []
+
+        # Process grouped composite shapes
+        for (gid, lbl), sub_shapes in grouped.items():
+            # Pick primary shape: prefer rectangle or polygon for clear geometry, then mask
+            rect_shape = next((s for s in sub_shapes if s.get("type") == "rectangle"), None)
+            poly_shape = next((s for s in sub_shapes if s.get("type") == "polygon"), None)
+            mask_shape = next((s for s in sub_shapes if s.get("type") == "mask"), None)
+            polyline_shape = next((s for s in sub_shapes if s.get("type") == "polyline"), None)
+
+            primary = rect_shape or poly_shape or mask_shape or polyline_shape or sub_shapes[0]
+
+            # Compute union bbox across all sub-shapes
+            bboxes = [extract_shape_bbox(s) for s in sub_shapes]
+            valid_bboxes = [b for b in bboxes if b is not None]
+            if valid_bboxes:
+                union_bbox = [
+                    min(b[0] for b in valid_bboxes),
+                    min(b[1] for b in valid_bboxes),
+                    max(b[2] for b in valid_bboxes),
+                    max(b[3] for b in valid_bboxes),
+                ]
+            else:
+                union_bbox = None
+
+            annotations.append({
+                "group_id": gid,
+                "label": lbl,
+                "shape": primary,
+                "sub_shapes": sub_shapes,
+                "mask_shape": mask_shape,
+                "bbox": union_bbox,
+                "type": primary.get("type", "rectangle"),
+                "group": self.taxonomy.get_group(lbl),
+            })
+
+        # Process standalone shapes
+        for s in standalone:
+            lbl = s.get("label", "")
+            bbox = extract_shape_bbox(s)
+            annotations.append({
+                "group_id": None,
+                "label": lbl,
+                "shape": s,
+                "sub_shapes": [s],
+                "mask_shape": s if s.get("type") == "mask" else None,
+                "bbox": bbox,
+                "type": s.get("type", "rectangle"),
+                "group": self.taxonomy.get_group(lbl),
+            })
+
+        return annotations
+
     def diff(
         self,
         ai_shapes: List[Dict[str, Any]],
@@ -325,6 +399,9 @@ class CorrectionDiffEngine:
         image_height: int = 720,
     ) -> List[CorrectionDiffItem]:
         """Compute bipartite matching diff between AI predictions and human annotations.
+
+        Treats paired shapes sharing the same group_id (e.g. box+mask or polygon+mask)
+        as single semantic annotations to prevent duplicate or mismatched diff events.
 
         Args:
             ai_shapes: List of AI predicted shapes (e.g. from AnnotationResult or CVAT API).
@@ -337,36 +414,19 @@ class CorrectionDiffEngine:
         """
         results: List[CorrectionDiffItem] = []
 
-        # 1. Filter and compute bounding boxes for all AI shapes
-        ai_entries = []
-        for idx, s in enumerate(ai_shapes):
-            bbox = extract_shape_bbox(s)
-            ai_entries.append({
-                "idx": idx,
-                "shape": s,
-                "label": s.get("label", ""),
-                "bbox": bbox,
-                "type": s.get("type", "rectangle"),
-                "group": self.taxonomy.get_group(s.get("label", "")),
-            })
+        # 1. Group paired shapes (sharing group_id) into single semantic annotations
+        ai_entries = self._group_shapes(ai_shapes)
+        human_entries = self._group_shapes(human_shapes)
 
-        # 2. Filter and compute bounding boxes for all Human shapes
-        human_entries = []
-        for idx, s in enumerate(human_shapes):
-            bbox = extract_shape_bbox(s)
-            human_entries.append({
-                "idx": idx,
-                "shape": s,
-                "label": s.get("label", ""),
-                "bbox": bbox,
-                "type": s.get("type", "rectangle"),
-                "group": self.taxonomy.get_group(s.get("label", "")),
-            })
+        for idx, a in enumerate(ai_entries):
+            a["idx"] = idx
+        for idx, h in enumerate(human_entries):
+            h["idx"] = idx
 
         matched_ai: Set[int] = set()
         matched_human: Set[int] = set()
 
-        # 3. Compute pairwise IoU candidates
+        # 2. Compute pairwise IoU candidates
         candidates = []
         for a in ai_entries:
             if a["bbox"] is None:
@@ -381,7 +441,7 @@ class CorrectionDiffEngine:
         # Sort candidate pairs by IoU descending (greedy bipartite matching)
         candidates.sort(key=lambda x: x[0], reverse=True)
 
-        # 4. First pass: Match same-label or cross-label pairs
+        # 3. First pass: Match same-label or cross-label pairs
         for iou, a_idx, h_idx in candidates:
             if a_idx in matched_ai or h_idx in matched_human:
                 continue
@@ -411,13 +471,15 @@ class CorrectionDiffEngine:
                             "reason": f"Annotator relabeled '{ai_lbl}' to '{human_lbl}' (IoU {iou:.2f})",
                             "ai_bbox": a["bbox"],
                             "human_bbox": h["bbox"],
+                            "ai_group_id": a.get("group_id"),
+                            "human_group_id": h.get("group_id"),
                         },
                     )
                     results.append(item)
                     matched_ai.add(a_idx)
                     matched_human.add(h_idx)
 
-        # 5. Remaining unmatched AI shapes -> False Positives (Annotator deleted AI prediction)
+        # 4. Remaining unmatched AI annotations -> False Positives (Annotator deleted AI prediction)
         for a in ai_entries:
             if a["idx"] not in matched_ai:
                 results.append(
@@ -431,11 +493,13 @@ class CorrectionDiffEngine:
                         details={
                             "reason": f"AI predicted '{a['label']}' which was deleted or rejected by annotator",
                             "ai_bbox": a["bbox"],
+                            "group_id": a.get("group_id"),
+                            "sub_shapes_count": len(a.get("sub_shapes", [])),
                         },
                     )
                 )
 
-        # 6. Remaining unmatched Human shapes -> False Negatives (Annotator added missing object)
+        # 5. Remaining unmatched Human annotations -> False Negatives (Annotator added missing object)
         for h in human_entries:
             if h["idx"] not in matched_human:
                 results.append(
@@ -449,6 +513,8 @@ class CorrectionDiffEngine:
                         details={
                             "reason": f"Annotator manually added missing '{h['label']}'",
                             "human_bbox": h["bbox"],
+                            "group_id": h.get("group_id"),
+                            "sub_shapes_count": len(h.get("sub_shapes", [])),
                         },
                     )
                 )

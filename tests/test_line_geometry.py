@@ -204,8 +204,8 @@ class TestPolygonToCvatPolyline:
 class TestLaneShapePipeline:
     """Tests for the end-to-end lane shape dispatcher and fallback behavior."""
 
-    def test_crosswalk_always_emits_polygon_never_polyline(self):
-        """Crosswalks are 2D surfaces and should always be emitted as polygons, even in auto mode."""
+    def test_crosswalk_emits_polyline_per_policy_c(self):
+        """Crosswalks under Policy C strictly emit polyline traversal centerline."""
         crosswalk_contour = [[200, 200], [600, 200], [600, 400], [200, 400]]
         shape = lane_shape_pipeline(
             label=LANE_CROSSWALK,
@@ -213,15 +213,16 @@ class TestLaneShapePipeline:
             width=1000,
             height=1000,
             confidence=0.88,
-            preferred_geometry="auto",
+            preferred_geometry="polyline",
         )
         assert shape is not None
-        assert shape["type"] == "polygon"
+        assert shape["type"] == "polyline"
         assert shape["label"] == LANE_CROSSWALK
         assert shape["confidence"] == "0.88"
-        assert len(shape["points"]) == 8  # 4 vertices * 2 coordinates
+        assert len(shape["points"]) >= 4  # >= 2 points * 2 coordinates
 
-    def test_crosswalk_emits_mask_when_requested(self):
+    def test_crosswalk_strictly_polyline_ignores_mask_preference(self):
+        """Policy C enforces polyline only; even if mask was requested, emits polyline."""
         crosswalk_contour = [[200, 200], [600, 200], [600, 400], [200, 400]]
         shape = lane_shape_pipeline(
             label=LANE_CROSSWALK,
@@ -232,8 +233,7 @@ class TestLaneShapePipeline:
             preferred_geometry="mask",
         )
         assert shape is not None
-        assert shape["type"] == "mask"
-        assert "mask" in shape
+        assert shape["type"] == "polyline"
 
     def test_thin_lane_emits_polyline_in_auto_mode(self):
         lane_contour = [[100, 800], [115, 800], [455, 300], [445, 300]]
@@ -249,8 +249,8 @@ class TestLaneShapePipeline:
         assert shape["type"] == "polyline"
         assert shape["label"] == LANE_SINGLE_YELLOW
 
-    def test_thin_lane_fallback_to_polygon_when_polyline_fails(self):
-        """When a lane marking is not sufficiently elongated, it falls back to polygon."""
+    def test_thin_lane_no_auto_fallback_returns_none_per_policy_c(self):
+        """Under Policy C, auto fallback is removed. If polyline fails, returns None."""
         fat_patch = [[100, 100], [250, 100], [250, 200], [100, 200]]  # aspect ratio ~ 1.5 < 2.5
         shape = lane_shape_pipeline(
             label=LANE_ROAD_CURB,
@@ -258,11 +258,68 @@ class TestLaneShapePipeline:
             width=1000,
             height=1000,
             confidence=0.75,
-            preferred_geometry="auto",
+            preferred_geometry="polyline",
+            allow_fallback=False,
+        )
+        assert shape is None  # Dropped per Policy C; caller logs lane_polyline_failed
+
+    def test_legacy_fallback_when_explicitly_requested(self):
+        """Legacy allow_fallback=True returns polygon when polyline extraction fails."""
+        fat_patch = [[100, 100], [250, 100], [250, 200], [100, 200]]
+        shape = lane_shape_pipeline(
+            label=LANE_ROAD_CURB,
+            contour=fat_patch,
+            width=1000,
+            height=1000,
+            confidence=0.75,
+            allow_fallback=True,
         )
         assert shape is not None
-        assert shape["type"] == "polygon"  # Graceful fallback!
+        assert shape["type"] == "polygon"
         assert shape["label"] == LANE_ROAD_CURB
+
+    def test_open_polyline_2_points_emits_polyline(self):
+        """Verify 2-point line segments from models emit valid polylines directly."""
+        line_2pts = [[100, 200], [500, 800]]
+        shape = lane_shape_pipeline(
+            label=LANE_SINGLE_WHITE,
+            contour=line_2pts,
+            width=1000,
+            height=1000,
+            confidence=0.88,
+        )
+        assert shape is not None
+        assert shape["type"] == "polyline"
+        assert shape["label"] == LANE_SINGLE_WHITE
+        assert len(shape["points"]) == 4
+        # Due to denormalize_contour using (width - 1), coordinates are ~[99.9, 199.8, 499.5, 799.2]
+        assert pytest.approx(shape["points"], abs=1.0) == [100.0, 200.0, 500.0, 800.0]
+
+    def test_open_polyline_3_points_curved_emits_polyline(self):
+        """Verify 3-point curves emit simplified polylines."""
+        curve_3pts = [[100, 200], [300, 450], [500, 800]]
+        shape = lane_shape_pipeline(
+            label=LANE_DOUBLE_YELLOW,
+            contour=curve_3pts,
+            width=1000,
+            height=1000,
+            confidence=0.91,
+        )
+        assert shape is not None
+        assert shape["type"] == "polyline"
+        assert shape["label"] == LANE_DOUBLE_YELLOW
+        assert len(shape["points"]) >= 4
+
+    def test_open_polyline_degenerate_2_points_returns_none(self):
+        """Degenerate 2-point segment (length < 1 px) returns None without fallback."""
+        degenerate_2pts = [[100, 200], [100.2, 200.3]]
+        shape = lane_shape_pipeline(
+            label=LANE_SINGLE_WHITE,
+            contour=degenerate_2pts,
+            width=1000,
+            height=1000,
+        )
+        assert shape is None
 
     def test_all_7_lane_labels_recognized(self):
         assert len(ALL_LANE_LABELS) == 7

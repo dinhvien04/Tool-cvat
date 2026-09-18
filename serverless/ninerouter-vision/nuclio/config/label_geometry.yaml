@@ -5,20 +5,25 @@
 # - All 31 labels must exist exactly once.
 # - DO NOT rename any label.
 # - DO NOT merge ambiguous labels (pedestrian != person, traffic light != traffic_light, traffic sign != traffic_sign).
+# - Every label belongs to exactly one policy:
+#     - POLICY_BOX_MASK: 14 labels (rectangle, mask) - polygon removed!
+#     - POLICY_POLYGON_MASK: 10 labels (polygon, mask)
+#     - POLICY_POLYLINE: 7 labels (polyline, polygon, mask)
 
-version: "1.0.0"
+version: "1.1.0"
 
 groups:
   instance:
     description: "Countable foreground objects with distinct instances, rigid/semi-rigid extents, and clear boundaries."
+    policy: "box_mask"
     default_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     default_preferred_shape: "rectangle"
 
   region:
     description: "Amorphous background surfaces, large infrastructure, and environmental stuff without discrete countable instances."
+    policy: "polygon_mask"
     default_shapes:
       - "mask"
       - "polygon"
@@ -26,22 +31,21 @@ groups:
 
   lane:
     description: "Linear road boundary demarcations, dividing lines, curbs, and roadway pedestrian surface crossings."
+    policy: "polyline"
     default_shapes:
       - "polyline"
-      - "polygon"
-      - "mask"
     default_preferred_shape: "polyline"
 
 labels:
   # --------------------------------------------------------------------------
-  # Instance Objects (14 labels)
+  # Instance Objects (14 labels) -> POLICY_BOX_MASK
   # --------------------------------------------------------------------------
   pedestrian:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -51,10 +55,10 @@ labels:
 
   rider:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -64,10 +68,10 @@ labels:
 
   car:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -77,10 +81,10 @@ labels:
 
   truck:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -90,10 +94,10 @@ labels:
 
   bus:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -103,10 +107,10 @@ labels:
 
   train:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -116,10 +120,10 @@ labels:
 
   motorcycle:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -129,10 +133,10 @@ labels:
 
   bicycle:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -142,10 +146,10 @@ labels:
 
   traffic light:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -155,10 +159,10 @@ labels:
 
   traffic sign:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -168,9 +172,9 @@ labels:
 
   pole:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "mask"
-      - "polygon"
       - "rectangle"
     preferred_shape: "mask"
     special_handling:
@@ -179,14 +183,14 @@ labels:
       optional_rectangle: true
       supports_bounding_box: true
       supports_mask: true
-      notes: "Vertical utility pole, lamp post, or traffic sign post. Slender aspect ratio makes 2D rectangle prone to high background noise. Mask or polygon is preferred; rectangle permitted when task is box-only."
+      notes: "Vertical utility pole, lamp post, or traffic sign post. Slender aspect ratio makes 2D rectangle prone to high background noise. Mask is preferred; rectangle permitted when task is box-only."
 
   person:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -196,10 +200,10 @@ labels:
 
   traffic_light:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -209,10 +213,10 @@ labels:
 
   traffic_sign:
     group: "instance"
+    policy: "box_mask"
     allowed_shapes:
       - "rectangle"
       - "mask"
-      - "polygon"
     preferred_shape: "rectangle"
     special_handling:
       supports_bounding_box: true
@@ -221,10 +225,11 @@ labels:
       notes: "Road traffic sign face or board providing regulatory or warning info (underscore-separated label)."
 
   # --------------------------------------------------------------------------
-  # Region / Semantic Stuff (10 labels)
+  # Region / Semantic Stuff (10 labels) -> POLICY_POLYGON_MASK
   # --------------------------------------------------------------------------
   area/alternative:
     group: "region"
+    policy: "polygon_mask"
     allowed_shapes:
       - "mask"
       - "polygon"
@@ -237,6 +242,7 @@ labels:
 
   area/drivable:
     group: "region"
+    policy: "polygon_mask"
     allowed_shapes:
       - "mask"
       - "polygon"
@@ -249,6 +255,7 @@ labels:
 
   road:
     group: "region"
+    policy: "polygon_mask"
     allowed_shapes:
       - "mask"
       - "polygon"
@@ -261,6 +268,7 @@ labels:
 
   sidewalk:
     group: "region"
+    policy: "polygon_mask"
     allowed_shapes:
       - "mask"
       - "polygon"
@@ -273,6 +281,7 @@ labels:
 
   building:
     group: "region"
+    policy: "polygon_mask"
     allowed_shapes:
       - "mask"
       - "polygon"
@@ -285,6 +294,7 @@ labels:
 
   wall:
     group: "region"
+    policy: "polygon_mask"
     allowed_shapes:
       - "mask"
       - "polygon"
@@ -297,6 +307,7 @@ labels:
 
   fence:
     group: "region"
+    policy: "polygon_mask"
     allowed_shapes:
       - "mask"
       - "polygon"
@@ -309,6 +320,7 @@ labels:
 
   vegetation:
     group: "region"
+    policy: "polygon_mask"
     allowed_shapes:
       - "mask"
       - "polygon"
@@ -321,6 +333,7 @@ labels:
 
   terrain:
     group: "region"
+    policy: "polygon_mask"
     allowed_shapes:
       - "mask"
       - "polygon"
@@ -333,6 +346,7 @@ labels:
 
   sky:
     group: "region"
+    policy: "polygon_mask"
     allowed_shapes:
       - "mask"
       - "polygon"
@@ -344,103 +358,109 @@ labels:
       notes: "Open celestial sky hemisphere, clouds, horizon background."
 
   # --------------------------------------------------------------------------
-  # Lane Demarcations and Markings (7 labels)
+  # Lane Demarcations and Markings (7 labels) -> POLICY_POLYLINE
   # --------------------------------------------------------------------------
   lane/crosswalk:
     group: "lane"
-    allowed_shapes:
-      - "polygon"
-      - "mask"
-      - "rectangle"
-    preferred_shape: "polygon"
-    special_handling:
-      area_like: true
-      thin_line: false
-      supports_bounding_box: true
-      supports_mask: true
-      supports_polyline: false
-      notes: "Pedestrian crosswalk (zebra crossing stripes). Unlike linear lane dividers, crosswalk represents a 2D surface area (area-like vs thin line). Preferred shape is closed polygon or mask; coarse rectangle allowed for 2D detection tasks."
-
-  lane/double white:
-    group: "lane"
+    policy: "polyline"
     allowed_shapes:
       - "polyline"
-      - "polygon"
-      - "mask"
     preferred_shape: "polyline"
     special_handling:
       area_like: false
       thin_line: true
       supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
+      supports_polyline: true
+      notes: "Pedestrian crosswalk (zebra crossing stripes) emitted strictly as polyline traversal centerline per Policy C."
+
+  lane/double white:
+    group: "lane"
+    policy: "polyline"
+    allowed_shapes:
+      - "polyline"
+    preferred_shape: "polyline"
+    special_handling:
+      area_like: false
+      thin_line: true
+      supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
       supports_polyline: true
       notes: "Linear lane boundary marking: double solid white divider lines."
 
   lane/double yellow:
     group: "lane"
+    policy: "polyline"
     allowed_shapes:
       - "polyline"
-      - "polygon"
-      - "mask"
     preferred_shape: "polyline"
     special_handling:
       area_like: false
       thin_line: true
       supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
       supports_polyline: true
       notes: "Linear lane boundary marking: double solid yellow opposing traffic divider."
 
   lane/road curb:
     group: "lane"
+    policy: "polyline"
     allowed_shapes:
       - "polyline"
-      - "polygon"
-      - "mask"
     preferred_shape: "polyline"
     special_handling:
       area_like: false
       thin_line: true
       supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
       supports_polyline: true
       notes: "Linear edge/boundary: physical raised curb interface separating road from sidewalk or shoulder."
 
   lane/single other:
     group: "lane"
+    policy: "polyline"
     allowed_shapes:
       - "polyline"
-      - "polygon"
-      - "mask"
     preferred_shape: "polyline"
     special_handling:
       area_like: false
       thin_line: true
       supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
       supports_polyline: true
       notes: "Linear lane marking: single dashed, dotted, diagonal, or non-standard pavement line."
 
   lane/single white:
     group: "lane"
+    policy: "polyline"
     allowed_shapes:
       - "polyline"
-      - "polygon"
-      - "mask"
     preferred_shape: "polyline"
     special_handling:
       area_like: false
       thin_line: true
       supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
       supports_polyline: true
       notes: "Linear lane marking: single white longitudinal pavement line dividing lanes in same travel direction."
 
   lane/single yellow:
     group: "lane"
+    policy: "polyline"
     allowed_shapes:
       - "polyline"
-      - "polygon"
-      - "mask"
     preferred_shape: "polyline"
     special_handling:
       area_like: false
       thin_line: true
       supports_bounding_box: false
+      supports_mask: false
+      supports_polygon: false
       supports_polyline: true
       notes: "Linear lane marking: single yellow longitudinal line demarcating lane boundary or shoulder."

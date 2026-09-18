@@ -4,18 +4,29 @@ import pytest
 
 from core.taxonomy import (
     AMBIGUITY_PAIRS,
+    BOX_MASK_LABELS,
     GROUP_INSTANCE,
     GROUP_LANE,
     GROUP_REGION,
     MASTER_31_LABELS,
+    POLICY_BOX_MASK,
+    POLICY_POLYGON_MASK,
+    POLICY_POLYLINE,
+    POLYGON_MASK_LABELS,
+    POLYLINE_LABELS,
     SHAPE_MASK,
     SHAPE_POLYGON,
     SHAPE_POLYLINE,
     SHAPE_RECTANGLE,
+    VALID_POLICIES,
     LabelMetadata,
     Taxonomy,
     TaxonomyValidationError,
+    get_policy,
     get_taxonomy,
+    is_box_mask,
+    is_polygon_mask,
+    is_polyline,
 )
 
 
@@ -90,12 +101,18 @@ def test_strict_isolation_ambiguous_labels(tax: Taxonomy):
 
 
 def test_special_handling_pole(tax: Taxonomy):
-    """Verify 'pole' special handling: instance object, mask preferred, optional rectangle."""
+    """Verify 'pole' special handling: instance object, mask preferred, optional rectangle.
+
+    Polygon is strictly removed from instance label permissions.
+    """
     pole = tax.get_label_info("pole")
     assert pole.is_instance is True
+    assert pole.is_box_mask is True
+    assert pole.policy == POLICY_BOX_MASK
     assert pole.preferred_shape == SHAPE_MASK
     assert SHAPE_MASK in pole.allowed_shapes
-    assert SHAPE_POLYGON in pole.allowed_shapes
+    assert SHAPE_POLYGON not in pole.allowed_shapes  # Polygon removed from instance permissions!
+    assert pole.supports_polygon is False
     assert SHAPE_RECTANGLE in pole.allowed_shapes
     assert pole.supports_bounding_box is True
     assert pole.is_thin_structure is True
@@ -103,15 +120,17 @@ def test_special_handling_pole(tax: Taxonomy):
 
 
 def test_special_handling_crosswalk(tax: Taxonomy):
-    """Verify 'lane/crosswalk' special handling: lane group, area-like, polygon/mask preferred."""
+    """Verify 'lane/crosswalk' Policy C handling: lane group, strictly polyline."""
     cw = tax.get_label_info("lane/crosswalk")
     assert cw.is_lane is True
-    assert cw.is_area_like is True
-    assert cw.preferred_shape == SHAPE_POLYGON
-    assert SHAPE_POLYGON in cw.allowed_shapes
-    assert SHAPE_MASK in cw.allowed_shapes
-    assert SHAPE_RECTANGLE in cw.allowed_shapes
-    assert cw.supports_polyline is False  # Crosswalk is a 2D area, not a 1D polyline
+    assert cw.is_polyline is True
+    assert cw.policy == POLICY_POLYLINE
+    assert cw.preferred_shape == SHAPE_POLYLINE
+    assert cw.allowed_shapes == (SHAPE_POLYLINE,)
+    assert cw.supports_polyline is True
+    assert cw.supports_bounding_box is False
+    assert cw.supports_polygon is False
+    assert cw.supports_mask is False
 
 
 def test_linear_lanes(tax: Taxonomy):
@@ -300,9 +319,9 @@ def test_route_shapes_lanes(tax: Taxonomy):
     # Linear lane line: polyline
     assert tax.route_shapes("lane/single white", requested_mode="mask", has_mask=True) == [SHAPE_POLYLINE]
 
-    # Crosswalk: polygon or rectangle
-    assert tax.route_shapes("lane/crosswalk", requested_mode="box", has_box=True) == [SHAPE_RECTANGLE]
-    assert tax.route_shapes("lane/crosswalk", requested_mode="mask", has_mask=True) == [SHAPE_POLYGON]
+    # Crosswalk (Policy C): strictly polyline, never rectangle or polygon
+    assert tax.route_shapes("lane/crosswalk", requested_mode="box", has_box=True) == []
+    assert tax.route_shapes("lane/crosswalk", requested_mode="mask", has_mask=True) == [SHAPE_POLYLINE]
 
 
 # ============================================================================
@@ -313,17 +332,31 @@ def test_route_shapes_lanes(tax: Taxonomy):
 def test_filter_labels_by_mode(tax: Taxonomy):
     """Verify filtering labels based on inference mode."""
     box_labels = tax.filter_labels_by_mode("box")
-    # All 14 instances + crosswalk support box = 15 labels
-    assert len(box_labels) == 15
+    # Exactly the 14 Policy A instances support box (crosswalk is Policy C polyline)
+    assert len(box_labels) == 14
     assert "car" in box_labels
     assert "pedestrian" in box_labels
     assert "pole" in box_labels
-    assert "lane/crosswalk" in box_labels
+    assert "lane/crosswalk" not in box_labels
     assert "road" not in box_labels
     assert "sky" not in box_labels
 
     mask_labels = tax.filter_labels_by_mode("mask")
-    assert len(mask_labels) == 31  # All 31 support mask or polygon or polyline/mask
+    # 14 instances + 10 regions support mask = 24 labels
+    assert len(mask_labels) == 24
+    assert "car" in mask_labels
+    assert "road" in mask_labels
+    assert "lane/crosswalk" not in mask_labels
+
+    polyline_labels = tax.filter_labels_by_mode("polyline")
+    # Exactly 7 lane markings support polyline
+    assert len(polyline_labels) == 7
+    assert "lane/crosswalk" in polyline_labels
+    assert "lane/single white" in polyline_labels
+
+    all_labels = tax.filter_labels_by_mode("box_and_mask")
+    # All 31 labels covered across policies
+    assert len(all_labels) == 31
 
 
 def test_prompt_manifest_building(tax: Taxonomy):
@@ -362,6 +395,136 @@ def test_taxonomy_validation_missing_label(tax: Taxonomy):
     t._labels = corrupted
     t._ambiguity_pairs = list(AMBIGUITY_PAIRS)
     t._group_to_labels = {GROUP_INSTANCE: [], GROUP_REGION: [], GROUP_LANE: []}
+    t._policy_to_labels = {POLICY_BOX_MASK: [], POLICY_POLYGON_MASK: [], POLICY_POLYLINE: []}
 
     with pytest.raises(TaxonomyValidationError, match="Expected exactly 31 labels"):
         t.validate()
+
+
+# ============================================================================
+# 8. Strict 3-Policy Taxonomy and Shape Enforcement Tests
+# ============================================================================
+
+
+def test_exact_three_policies_partition(tax: Taxonomy):
+    """Verify exact 31 labels partitioned into: 14 box_mask, 10 polygon_mask, 7 polyline."""
+    box_masks = tax.get_box_mask_labels()
+    polygon_masks = tax.get_polygon_mask_labels()
+    polylines = tax.get_polyline_labels()
+
+    assert len(box_masks) == 14
+    assert len(polygon_masks) == 10
+    assert len(polylines) == 7
+    assert len(box_masks) + len(polygon_masks) + len(polylines) == 31
+
+    # Exact membership matches
+    assert set(box_masks) == set(BOX_MASK_LABELS)
+    assert set(polygon_masks) == set(POLYGON_MASK_LABELS)
+    assert set(polylines) == set(POLYLINE_LABELS)
+
+
+def test_every_label_belongs_to_exactly_one_policy(tax: Taxonomy):
+    """Ensure every label belongs to exactly one policy (mutually exclusive and exhaustive)."""
+    box_masks = set(tax.get_box_mask_labels())
+    polygon_masks = set(tax.get_polygon_mask_labels())
+    polylines = set(tax.get_polyline_labels())
+
+    # Pairwise disjoint
+    assert box_masks.isdisjoint(polygon_masks)
+    assert box_masks.isdisjoint(polylines)
+    assert polygon_masks.isdisjoint(polylines)
+
+    # Exhaustive union
+    assert (box_masks | polygon_masks | polylines) == set(MASTER_31_LABELS)
+
+    # Each individual label checks out
+    for label in MASTER_31_LABELS:
+        policy = tax.get_policy(label)
+        assert policy in VALID_POLICIES
+        if policy == POLICY_BOX_MASK:
+            assert tax.is_box_mask(label) is True
+            assert tax.is_polygon_mask(label) is False
+            assert tax.is_polyline(label) is False
+        elif policy == POLICY_POLYGON_MASK:
+            assert tax.is_box_mask(label) is False
+            assert tax.is_polygon_mask(label) is True
+            assert tax.is_polyline(label) is False
+        elif policy == POLICY_POLYLINE:
+            assert tax.is_box_mask(label) is False
+            assert tax.is_polygon_mask(label) is False
+            assert tax.is_polyline(label) is True
+
+
+def test_instance_labels_exclude_polygon_completely(tax: Taxonomy):
+    """STRICT REQUIREMENT: All 14 instance/box_mask labels must NOT permit polygon shape."""
+    for label in tax.get_box_mask_labels():
+        meta = tax.get_label_info(label)
+        assert SHAPE_POLYGON not in meta.allowed_shapes, f"Label {label} incorrectly allows polygon!"
+        assert meta.supports_polygon is False, f"Label {label} supports_polygon is True!"
+        assert tax.validate_shape_for_label(label, SHAPE_POLYGON) is False
+
+
+def test_policy_lookups_and_helpers(tax: Taxonomy):
+    """Verify O(1) policy helper methods: get_policy, is_box_mask, is_polygon_mask, is_polyline."""
+    assert tax.get_policy("car") == POLICY_BOX_MASK
+    assert tax.is_box_mask("car") is True
+    assert tax.is_polygon_mask("car") is False
+    assert tax.is_polyline("car") is False
+
+    assert tax.get_policy("road") == POLICY_POLYGON_MASK
+    assert tax.is_box_mask("road") is False
+    assert tax.is_polygon_mask("road") is True
+    assert tax.is_polyline("road") is False
+
+    assert tax.get_policy("lane/single white") == POLICY_POLYLINE
+    assert tax.is_box_mask("lane/single white") is False
+    assert tax.is_polygon_mask("lane/single white") is False
+    assert tax.is_polyline("lane/single white") is True
+
+    # lane/crosswalk belongs to POLICY_POLYLINE
+    assert tax.get_policy("lane/crosswalk") == POLICY_POLYLINE
+    assert tax.is_polyline("lane/crosswalk") is True
+
+    # Unknown label
+    with pytest.raises(KeyError):
+        tax.get_policy("nonexistent")
+    assert tax.is_box_mask("nonexistent") is False
+    assert tax.is_polygon_mask("nonexistent") is False
+    assert tax.is_polyline("nonexistent") is False
+
+
+def test_module_level_helpers():
+    """Verify module-level helper functions delegating to global taxonomy."""
+    assert get_policy("car") == POLICY_BOX_MASK
+    assert is_box_mask("car") is True
+    assert is_polygon_mask("car") is False
+    assert is_polyline("car") is False
+
+    assert get_policy("vegetation") == POLICY_POLYGON_MASK
+    assert is_polygon_mask("vegetation") is True
+
+    assert get_policy("lane/road curb") == POLICY_POLYLINE
+    assert is_polyline("lane/road curb") is True
+
+
+def test_taxonomy_validation_catches_polygon_in_box_mask(tax: Taxonomy):
+    """Verify validation raises error if an instance/box_mask label contains polygon."""
+    corrupted = dict(tax._labels)
+    old_car = corrupted["car"]
+    corrupted["car"] = LabelMetadata(
+        name=old_car.name,
+        group=old_car.group,
+        allowed_shapes=(SHAPE_RECTANGLE, SHAPE_MASK, SHAPE_POLYGON),
+        preferred_shape=old_car.preferred_shape,
+        policy=old_car.policy,
+    )
+
+    t = Taxonomy.__new__(Taxonomy)
+    t._labels = corrupted
+    t._ambiguity_pairs = list(AMBIGUITY_PAIRS)
+    t._group_to_labels = tax._group_to_labels
+    t._policy_to_labels = tax._policy_to_labels
+
+    with pytest.raises(TaxonomyValidationError, match="must not permit polygon shape"):
+        t.validate()
+

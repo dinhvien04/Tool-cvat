@@ -329,14 +329,14 @@ def build_full_31_prompt(
 ) -> str:
     """Build the unified Phase 3B vision prompt for full 31-label multi-shape annotation.
 
-    Categorizes labels into:
-    1. Objects (instances: rectangle + mask)
-    2. Regions (semantic background: mask only)
-    3. Lanes (linear markings & crosswalks: polyline / polygon / mask)
+    Categorizes labels into 3 strict annotation policies:
+    1. Policy A: Object Instances (14 classes: box_2d + mask contour).
+    2. Policy B: Semantic Regions (10 classes: boundary contour mask for polygon/mask emission).
+    3. Policy C: Lane Markings & Crosswalks (7 classes: ribbon contour for polyline centerline emission).
     """
     labels = set(allowed_labels) if allowed_labels is not None else set(ALL_31_LABELS)
 
-    # 14 Instance Labels
+    # 14 Instance Labels (Policy A)
     instance_labels = [
         l for l in (
             "pedestrian", "rider", "car", "truck", "bus", "train",
@@ -345,7 +345,7 @@ def build_full_31_prompt(
         ) if l in labels
     ]
 
-    # 10 Semantic Region Labels
+    # 10 Semantic Region Labels (Policy B)
     region_labels = [
         l for l in (
             "area/alternative", "area/drivable", "road", "sidewalk",
@@ -353,7 +353,7 @@ def build_full_31_prompt(
         ) if l in labels
     ]
 
-    # 7 Lane / Marking Labels
+    # 7 Lane / Marking Labels (Policy C)
     lane_labels = [
         l for l in (
             "lane/crosswalk", "lane/double white", "lane/double yellow",
@@ -368,20 +368,23 @@ def build_full_31_prompt(
 
     conf_field = ',\n      "confidence": 0.95' if include_confidence else ""
 
-    return f"""Perform comprehensive road-scene multi-shape annotation on this image for autonomous driving perception.
-Detect all visible:
-1. Object Instances: countable foreground objects (box_2d + mask).
-2. Semantic Regions: background surface areas (mask only).
-3. Lane Markings: linear lane dividers, curbs, and crosswalks (mask only).
+    return f"""Perform comprehensive road-scene multi-shape annotation on this image for autonomous driving perception across 3 strict annotation policies:
+
+1. Policy A — Foreground Instances (14 classes):
+   For every countable object instance, provide BOTH bounding box (box_2d) AND boundary contour (mask).
+2. Policy B — Semantic Regions (10 classes):
+   For every surface/infrastructure region, provide the precise boundary contour (mask) without bounding box.
+3. Policy C — Lane Demarcations & Crosswalks (7 classes):
+   For every lane boundary, marking, and pedestrian crosswalk, provide the ribbon contour (mask) along its traversal path without bounding box.
 
 Allowed Labels by Category:
-- Object Instances (14 classes):
+- Policy A — Object Instances (14 classes):
 {inst_str}
 
-- Semantic Regions (10 classes):
+- Policy B — Semantic Regions (10 classes):
 {reg_str}
 
-- Lane Markings (7 classes):
+- Policy C — Lane Markings & Crosswalks (7 classes):
 {lane_str}
 
 Output schema:
@@ -409,7 +412,7 @@ Output schema:
 
 Rules:
 1. Coordinates: All coordinates are normalized integers in [0, 1000].
-2. box_2d: [ymin, xmin, ymax, xmax] required ONLY for 'objects'. Do NOT include box_2d for 'regions' or 'lanes'.
+2. box_2d: [ymin, xmin, ymax, xmax] required ONLY for Policy A 'objects'. Do NOT include box_2d for Policy B 'regions' or Policy C 'lanes'.
 3. mask: Closed polygon contour boundary [[x1, y1], [x2, y2], ...] tracing the outer edge of each instance, region, or lane. Points are [x, y] in [0, 1000].
 4. Labels: Choose ONLY from the allowed lists. Never rename or alter labels.
 5. If no items are found for a category, return an empty array [].

@@ -358,20 +358,58 @@ def polygon_to_cvat_polyline(
     if width <= 0 or height <= 0:
         return None
 
-    if not isinstance(contour, (list, tuple)) or len(contour) < 4:
+    if not isinstance(contour, (list, tuple)) or len(contour) < 2:
         return None
 
-    try:
-        pixel_points = denormalize_contour(contour, width=width, height=height, min_points=4)
-    except (ValueError, TypeError):
-        return None
+    centerline: Optional[List[Tuple[float, float]]] = None
 
-    centerline = extract_centerline_from_polygon(
-        pixel_points,
-        num_samples=num_samples,
-        simplify_epsilon=simplify_epsilon,
-        min_aspect_ratio=min_aspect_ratio,
-    )
+    if len(contour) in (2, 3):
+        try:
+            pixel_points = denormalize_contour(contour, width=width, height=height, min_points=2)
+        except (ValueError, TypeError):
+            return None
+
+        if len(pixel_points) == 2:
+            p0, p1 = pixel_points[0], pixel_points[1]
+            if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) >= 1.0:
+                centerline = [(round(p0[0], 2), round(p0[1], 2)), (round(p1[0], 2), round(p1[1], 2))]
+            else:
+                return None
+        else:
+            pts = [(float(p[0]), float(p[1])) for p in pixel_points]
+            path_len = math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]) + math.hypot(pts[2][0] - pts[1][0], pts[2][1] - pts[1][1])
+            if path_len >= 2.0:
+                simplified = douglas_peucker(pts, epsilon=simplify_epsilon)
+                centerline = simplified if len(simplified) >= MIN_POLYLINE_POINTS else [pts[0], pts[-1]]
+            else:
+                return None
+    else:
+        try:
+            pixel_points = denormalize_contour(contour, width=width, height=height, min_points=4)
+        except (ValueError, TypeError):
+            return None
+
+        area = calculate_polygon_area(pixel_points)
+        if area < 0.5:
+            # Collinear points or open polyline from model
+            pts = [(float(p[0]), float(p[1])) for p in pixel_points]
+            path_len = sum(math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]) for i in range(len(pts) - 1))
+            end_dist = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
+            if path_len >= 2.0 and end_dist >= 1.0:
+                simplified = douglas_peucker(pts, epsilon=simplify_epsilon)
+                centerline = simplified if len(simplified) >= MIN_POLYLINE_POINTS else [pts[0], pts[-1]]
+            else:
+                return None
+        else:
+            # For crosswalks, allow wider elongation threshold (aspect ratio >= 1.05) to extract centerline
+            effective_aspect_ratio = 1.05 if (label == LANE_CROSSWALK and min_aspect_ratio == DEFAULT_MIN_ASPECT_RATIO) else min_aspect_ratio
+
+            centerline = extract_centerline_from_polygon(
+                pixel_points,
+                num_samples=num_samples,
+                simplify_epsilon=simplify_epsilon,
+                min_aspect_ratio=effective_aspect_ratio,
+            )
 
     if not centerline or len(centerline) < MIN_POLYLINE_POINTS:
         return None
@@ -401,29 +439,21 @@ def lane_shape_pipeline(
     width: int,
     height: int,
     confidence: Optional[Union[float, str]] = None,
-    preferred_geometry: str = "auto",
+    preferred_geometry: str = "polyline",
     num_samples: int = DEFAULT_NUM_SAMPLES,
     simplify_epsilon: float = DEFAULT_SIMPLIFY_EPSILON,
     min_aspect_ratio: float = DEFAULT_MIN_ASPECT_RATIO,
+    allow_fallback: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Complete lane and road marking shape dispatcher with automatic fallback.
+    """Strict Policy C Lane Dispatcher (POLYLINE ONLY).
 
-    Architecture Policy:
-    1. `lane/crosswalk`:
-       - Always 2D zebra surface patch.
-       - NEVER emitted as a 1D polyline.
-       - Returns `polygon` (or `mask`).
-    2. Linear Lane Labels (`lane/single white`, `lane/single yellow`, `lane/double white`,
-       `lane/double yellow`, `lane/road curb`, `lane/single other`):
-       - If `preferred_geometry == "polyline"` or `"auto"`:
-         Attempts centerline extraction via Medial Pair Resampling.
-         If successful, emits `polyline` shape (`{"type": "polyline", "points": [x1, y1, ...]}`).
-         If extraction fails (e.g. non-ribbon, low elongation, degenerate curve),
-         GRACEFULLY FALLS BACK to `polygon` or `mask` to preserve annotation fidelity!
-       - If `preferred_geometry == "polygon"`:
-         Emits high-fidelity 2D vector boundary polygon (`{"type": "polygon", "points": [...]}`).
-       - If `preferred_geometry == "mask"`:
-         Emits CVAT native 1D flattened raster mask (`{"type": "mask", "mask": [...]}`).
+    Architecture Policy C:
+    - ALL 7 lane labels (`lane/crosswalk`, `lane/double white`, `lane/double yellow`,
+      `lane/road curb`, `lane/single other`, `lane/single white`, `lane/single yellow`):
+      Must emit POLYLINE ONLY.
+    - Automatic polygon and mask fallbacks are strictly removed (allow_fallback=False).
+    - If polyline extraction fails or contour cannot be reduced to a centerline, returns None.
+      The calling service drops the annotation and emits warning 'lane_polyline_failed'.
 
     Args:
         label: One of the 7 lane labels.
@@ -431,74 +461,48 @@ def lane_shape_pipeline(
         width: Image width in pixels.
         height: Image height in pixels.
         confidence: Optional detection confidence score.
-        preferred_geometry: 'auto', 'polyline', 'polygon', or 'mask'.
+        preferred_geometry: Ignored; strictly forced to 'polyline' for Policy C.
         num_samples: Number of sample stations for centerline extraction.
         simplify_epsilon: Epsilon tolerance for polyline simplification.
         min_aspect_ratio: Minimum aspect ratio for polyline eligibility.
+        allow_fallback: Default False. If False, never falls back to polygon or mask.
 
     Returns:
-        Formatted CVAT shape dictionary (`polyline`, `polygon`, or `mask`),
-        or None if contour is degenerate / empty.
+        Formatted CVAT polyline shape dictionary (`{"type": "polyline", ...}`),
+        or None if polyline extraction fails.
     """
     if width <= 0 or height <= 0:
         return None
 
-    if not isinstance(contour, (list, tuple)) or len(contour) < 3:
+    if not isinstance(contour, (list, tuple)) or len(contour) < 2:
         return None
 
-    geom_mode = (preferred_geometry or "auto").strip().lower()
+    # Strict Policy C: attempt centerline polyline extraction
+    poly_shape = polygon_to_cvat_polyline(
+        contour=contour,
+        width=width,
+        height=height,
+        label=label,
+        confidence=confidence,
+        num_samples=num_samples,
+        simplify_epsilon=simplify_epsilon,
+        min_aspect_ratio=min_aspect_ratio,
+    )
+    if poly_shape is not None:
+        return poly_shape
 
-    # Special Case: lane/crosswalk is inherently a 2D surface patch
-    if label == LANE_CROSSWALK:
-        if geom_mode == "mask":
-            return polygon_to_cvat_mask(contour, width=width, height=height, label=label, confidence=confidence)
-        # Default for crosswalk: vector polygon
-        try:
-            pts_px = denormalize_contour(contour, width=width, height=height, min_points=3)
-            area = calculate_polygon_area(pts_px)
-            if area < 0.5:
-                return None
-            flat_pts = [round(float(c), 2) for pt in pts_px for c in pt]
-            shape: Dict[str, Any] = {
-                "type": "polygon",
-                "label": label,
-                "points": flat_pts,
-            }
-            if confidence is not None:
-                shape["confidence"] = str(round(float(confidence), 2)) if isinstance(confidence, (int, float)) else str(confidence)
-            return shape
-        except Exception:
-            return None
+    # Strict Policy C: No auto fallback! Return None so caller drops annotation and logs warning.
+    if not allow_fallback:
+        return None
 
-    # Linear lane labels
-    if geom_mode in ("polyline", "auto"):
-        poly_shape = polygon_to_cvat_polyline(
-            contour=contour,
-            width=width,
-            height=height,
-            label=label,
-            confidence=confidence,
-            num_samples=num_samples,
-            simplify_epsilon=simplify_epsilon,
-            min_aspect_ratio=min_aspect_ratio,
-        )
-        if poly_shape is not None:
-            return poly_shape
-        # If polyline extraction failed (e.g. low elongation, complex junction):
-        # Fall back gracefully to polygon vector boundary
-        geom_mode = "polygon"
-
-    if geom_mode == "mask":
-        return polygon_to_cvat_mask(contour, width=width, height=height, label=label, confidence=confidence)
-
-    # Polygon vector format
+    # Legacy fallback only if explicitly requested (e.g. backward compat test with allow_fallback=True)
     try:
         pts_px = denormalize_contour(contour, width=width, height=height, min_points=3)
         area = calculate_polygon_area(pts_px)
         if area < 0.5:
             return None
         flat_pts = [round(float(c), 2) for pt in pts_px for c in pt]
-        shape = {
+        shape: Dict[str, Any] = {
             "type": "polygon",
             "label": label,
             "points": flat_pts,
