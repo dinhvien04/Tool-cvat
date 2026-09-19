@@ -135,3 +135,19 @@ def test_good_instance_stays_single_fast_call(monkeypatch):
     )
     assert client.send_vision_request.call_count == 1
     assert result.refinement_attempted is False
+
+
+def test_empty_result_triggers_refinement():
+    report = assess_quality([], MODE_POLYGON_MASK)
+    assert report.needs_refine is True
+    assert report.score == 0.0
+    assert "empty_detection" in report.reasons
+
+
+def test_polygon_prompt_distinguishes_drivable_from_road():
+    from core.vision_contract import build_polygon_mask_prompt
+    prompt = build_polygon_mask_prompt()
+    assert '"area/drivable"' in prompt
+    assert '"road"' in prompt
+    assert "not mutually exclusive" in prompt.lower()
+    assert "never replace" in prompt.lower()
