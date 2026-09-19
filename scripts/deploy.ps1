@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
-    [ValidateSet("three", "rectangle-mask", "polygon-mask", "polyline", "all")]
+    [ValidateSet("three", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "three-with-tracker", "all")]
     [string]$Target = "three",
 
     [Parameter(Mandatory = $false)]
@@ -39,6 +39,9 @@ param (
     [string]$PolylineModel = $env:POLYLINE_MODEL,
 
     [Parameter(Mandatory = $false)]
+    [string]$RectangleTrackerModel = $env:RECTANGLE_TRACKER_MODEL,
+
+    [Parameter(Mandatory = $false)]
     [string]$NineRouterKey = $env:NINEROUTER_KEY,
 
     [Parameter(Mandatory = $false)]
@@ -54,6 +57,7 @@ if (-not $VisionModel) { $VisionModel = "ag/gemini-3.8-flash-low" }
 if (-not $RectangleMaskModel) { $RectangleMaskModel = "ag/gemini-3.8-flash-low" }
 if (-not $PolygonMaskModel) { $PolygonMaskModel = "ag/gemini-3.8-flash-low" }
 if (-not $PolylineModel) { $PolylineModel = "ag/gemini-3.8-flash-low" }
+if (-not $RectangleTrackerModel) { $RectangleTrackerModel = "ag/gemini-3.8-flash-low" }
 
 Write-Host "======================================================================" -ForegroundColor Cyan
 Write-Host " CVAT x 9Router - Deploy Streamlined 3-Detector Suite" -ForegroundColor Cyan
@@ -86,6 +90,19 @@ switch ($Target) {
             @{ Name = "ninerouter-rectangle-mask"; DisplayName = "9Router Rectangle + Mask"; Mode = "rectangle_mask" },
             @{ Name = "ninerouter-polygon-mask"; DisplayName = "9Router Polygon + Mask"; Mode = "polygon_mask" },
             @{ Name = "ninerouter-polyline"; DisplayName = "9Router Polyline"; Mode = "polyline" }
+        )
+    }
+    "rectangle-tracker" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-rectangle-tracker"; DisplayName = "9Router Rectangle Tracker"; Mode = "rectangle_tracker" }
+        )
+    }
+    "three-with-tracker" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-rectangle-mask"; DisplayName = "9Router Rectangle + Mask"; Mode = "rectangle_mask" },
+            @{ Name = "ninerouter-polygon-mask"; DisplayName = "9Router Polygon + Mask"; Mode = "polygon_mask" },
+            @{ Name = "ninerouter-polyline"; DisplayName = "9Router Polyline"; Mode = "polyline" },
+            @{ Name = "ninerouter-rectangle-tracker"; DisplayName = "9Router Rectangle Tracker"; Mode = "rectangle_tracker" }
         )
     }
     "all" {
@@ -248,6 +265,11 @@ foreach ($fn in $functionsToDeploy) {
             $fnModel = $PolylineModel.Trim()
         }
         $detectorEnvVar = "POLYLINE_MODEL=$fnModel"
+    } elseif ($fnName -eq "ninerouter-rectangle-tracker") {
+        if ($RectangleTrackerModel -and $RectangleTrackerModel.Trim() -ne "") {
+            $fnModel = $RectangleTrackerModel.Trim()
+        }
+        $detectorEnvVar = "RECTANGLE_TRACKER_MODEL=$fnModel"
     }
     Write-Host "Active model for $($fnName): $fnModel" -ForegroundColor Green
 

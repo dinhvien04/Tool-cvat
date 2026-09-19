@@ -1,0 +1,56 @@
+metadata:
+  name: ninerouter-rectangle-tracker
+  namespace: cvat
+  annotations:
+    name: 9Router Rectangle Tracker
+    type: tracker
+    supported_shape_types: rectangle
+    version: '1'
+    spec: '[]'
+
+spec:
+  description: Experimental rectangle-only visual tracker using 9Router
+  runtime: 'python:3.11'
+  handler: main:handler
+  eventTimeout: 20s
+
+  env:
+    - name: NINEROUTER_URL
+      value: 'http://host.docker.internal:20128'
+    - name: RECTANGLE_TRACKER_MODEL
+      value: 'ag/gemini-3.8-flash-low'
+    - name: NINEROUTER_TIMEOUT
+      value: '12.0'
+    - name: TRACKER_SEARCH_SCALE
+      value: '3.0'
+    - name: TRACKER_TEMPLATE_SIZE
+      value: '224'
+    - name: TRACKER_MAX_SEARCH_SIZE
+      value: '640'
+    - name: TRACKER_MAX_TOKENS
+      value: '192'
+    - name: TRACKER_UPDATE_TEMPLATE_CONFIDENCE
+      value: '0.65'
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 1
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432
+
+  build:
+    image: cvat.custom.ninerouter.rectangle.tracker
+    baseImage: python:3.11-slim
+    directives:
+      preCopy:
+        - kind: RUN
+          value: pip install --no-cache-dir requests pillow
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 1
+      mountMode: volume
