@@ -191,7 +191,18 @@ class ModelHandler:
             raise ValueError("9Router returned no choices")
         content = choices[0].get("message", {}).get("content", "")
         data = self._clean_json(content)
-        visible = bool(data.get("visible", True))
+        # Be tolerant to providers that wrap the single target in an "objects"
+        # array despite the tracker-specific schema.
+        if "box_2d" not in data and isinstance(data.get("objects"), list) and data["objects"]:
+            first = data["objects"][0]
+            if isinstance(first, dict):
+                data = first
+
+        raw_visible = data.get("visible", True)
+        if isinstance(raw_visible, str):
+            visible = raw_visible.strip().lower() not in {"false", "0", "no", "off"}
+        else:
+            visible = bool(raw_visible)
         confidence = float(data.get("confidence", 0.0) or 0.0)
         box = data.get("box_2d")
         if not visible or not isinstance(box, (list, tuple)) or len(box) != 4:

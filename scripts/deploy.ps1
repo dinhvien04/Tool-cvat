@@ -48,6 +48,9 @@ param (
     [string]$NineRouterTimeout = "45.0",
 
     [Parameter(Mandatory = $false)]
+    [string]$RectangleTrackerTimeout = "12.0",
+
+    [Parameter(Mandatory = $false)]
     [string]$CvatWebhookSecret = $env:CVAT_WEBHOOK_SECRET
 )
 
@@ -249,6 +252,7 @@ foreach ($fn in $functionsToDeploy) {
 
     # Resolve detector-specific model with fallback to VISION_MODEL
     $fnModel = $resolvedVisionModel
+    $fnTimeout = $NineRouterTimeout
     $detectorEnvVar = ""
     if ($fnName -eq "ninerouter-rectangle-mask") {
         if ($RectangleMaskModel -and $RectangleMaskModel.Trim() -ne "") {
@@ -270,8 +274,10 @@ foreach ($fn in $functionsToDeploy) {
             $fnModel = $RectangleTrackerModel.Trim()
         }
         $detectorEnvVar = "RECTANGLE_TRACKER_MODEL=$fnModel"
+        $fnTimeout = $RectangleTrackerTimeout
     }
     Write-Host "Active model for $($fnName): $fnModel" -ForegroundColor Green
+    Write-Host "Request timeout for $($fnName): $fnTimeout s" -ForegroundColor Gray
 
     # Validate specification
     $specValidator = Join-Path $ScriptDir "validate_function_spec.py"
@@ -316,7 +322,7 @@ nuctl deploy $fnName \
     --env "NINEROUTER_URL=$NineRouterUrl" \
     --env "VISION_MODEL=$fnModel" \
     --env "DETECTION_MODE=$fnMode" \
-    --env "NINEROUTER_TIMEOUT=$NineRouterTimeout" \
+    --env "NINEROUTER_TIMEOUT=$fnTimeout" \
     --env "FEEDBACK_DATA_DIR=/opt/nuclio/feedback" \
     --env "FEEDBACK_DB_PATH=/opt/nuclio/feedback/feedback.sqlite3" \
     $extraEnvBash \
@@ -344,7 +350,7 @@ nuctl deploy $fnName \
             "--env", "NINEROUTER_URL=$NineRouterUrl",
             "--env", "VISION_MODEL=$fnModel",
             "--env", "DETECTION_MODE=$fnMode",
-            "--env", "NINEROUTER_TIMEOUT=$NineRouterTimeout",
+            "--env", "NINEROUTER_TIMEOUT=$fnTimeout",
             "--env", "FEEDBACK_DATA_DIR=/opt/nuclio/feedback",
             "--env", "FEEDBACK_DB_PATH=/opt/nuclio/feedback/feedback.sqlite3"
         )
