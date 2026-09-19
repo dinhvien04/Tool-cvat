@@ -41,6 +41,7 @@ from core.line_geometry import (
     denormalize_polyline,
     polyline_to_cvat_polyline,
 )
+from core.quality_gate import assess_quality, should_accept_refinement
 from core.taxonomy import (
     BOX_MASK_LABELS,
     GROUP_INSTANCE,
@@ -150,6 +151,11 @@ class AnnotationResult:
     rules_injected: List[str] = field(default_factory=list)
     visual_examples_used: int = 0
     text_rules_used: int = 0
+    refinement_attempted: bool = False
+    refinement_accepted: bool = False
+    refinement_duration_seconds: float = 0.0
+    quality_score_before: Optional[float] = None
+    quality_score_after: Optional[float] = None
 
     def to_cvat_rectangles(self) -> List[Dict[str, Any]]:
         """Return pure CVAT detector response shapes."""
@@ -370,6 +376,134 @@ def annotate_image(
         mode=active_mode,
     )
     warnings.extend(parse_result.warnings)
+
+    # 7b. Adaptive one-call quality refinement. Normal drafts stay fast. Only
+    # suspicious geometry gets ONE stronger pass, bounded by a total remote budget.
+    api_duration_total = float(getattr(vision_resp, "duration_seconds", 0.0) or 0.0)
+    final_model_used = active_model
+    refine_attempted = False
+    refine_accepted = False
+    refinement_duration = 0.0
+    quality_before = None
+    quality_after = None
+
+    quality_refine_enabled = os.getenv("QUALITY_REFINE_ENABLED", "true").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+    if quality_refine_enabled and active_mode in (
+        MODE_RECTANGLE_MASK, MODE_BOX_MASK, MODE_POLYGON_MASK, MODE_POLYLINE
+    ):
+        try:
+            min_conf = float(os.getenv("QUALITY_REFINE_MIN_CONFIDENCE", "0.80"))
+        except ValueError:
+            min_conf = 0.80
+        try:
+            score_threshold = float(os.getenv("QUALITY_REFINE_SCORE_THRESHOLD", "0.76"))
+        except ValueError:
+            score_threshold = 0.76
+        try:
+            min_gain = float(os.getenv("QUALITY_REFINE_MIN_GAIN", "0.03"))
+        except ValueError:
+            min_gain = 0.03
+        try:
+            total_budget = float(os.getenv("QUALITY_REFINE_TOTAL_BUDGET", "42.0"))
+        except ValueError:
+            total_budget = 42.0
+
+        quality_before = assess_quality(
+            parse_result.all_items,
+            active_mode,
+            min_confidence=min_conf,
+            refine_score_threshold=score_threshold,
+        )
+
+        remaining_budget = max(0.0, total_budget - api_duration_total)
+        if quality_before.needs_refine and remaining_budget >= 4.0:
+            refine_attempted = True
+            refine_model = (
+                os.getenv("QUALITY_REFINE_MODEL")
+                or os.getenv("VISION_REFINE_MODEL")
+                or "ag/gemini-3.8-flash-medium"
+            ).strip()
+            try:
+                refine_max_size = int(os.getenv("QUALITY_REFINE_MAX_IMAGE_SIZE", "1600"))
+            except ValueError:
+                refine_max_size = 1600
+            try:
+                configured_refine_timeout = float(os.getenv("QUALITY_REFINE_TIMEOUT", "25.0"))
+            except ValueError:
+                configured_refine_timeout = 25.0
+            refine_max_size = max(int(eff_max_size or 1), refine_max_size)
+            refine_timeout = max(
+                1.0,
+                min(
+                    configured_refine_timeout,
+                    remaining_budget,
+                    float(getattr(client, "timeout", configured_refine_timeout)),
+                ),
+            )
+
+            suspect_summary = ", ".join(quality_before.suspect_labels[:8]) or "geometry"
+            reason_summary = ", ".join(quality_before.reasons[:8]) or "coarse geometry"
+            refine_prompt = (
+                prompt
+                + "\n\nSECOND-PASS GEOMETRY REFINEMENT. "
+                + "Re-analyze the image from scratch and return the COMPLETE annotation set for this detector. "
+                + "Prioritize exact visible boundaries. Do not expand masks or polygons into nearby objects, "
+                + "sidewalks, sky, vegetation, or unrelated surfaces. Follow curbs, road edges, horizons, "
+                + "silhouettes, lane paint, and occlusion boundaries precisely. "
+                + f"First-pass quality gate flagged: {suspect_summary}. Reasons: {reason_summary}. "
+                + "Use additional meaningful vertices where the boundary curves, without noisy point spam."
+            )
+
+            try:
+                refine_image, _, _ = resize_image_if_needed(crop_image, max_size=refine_max_size)
+                refine_data_url = image_to_data_url(refine_image, format="JPEG", quality=94)
+                refine_resp = client.send_vision_request(
+                    model=refine_model,
+                    image_bytes_or_b64=refine_data_url,
+                    prompt=refine_prompt,
+                    temperature=0.0,
+                    max_tokens=eff_max_tokens,
+                    visual_examples=None,
+                    mode=active_mode,
+                    timeout=refine_timeout,
+                )
+                refinement_duration = float(getattr(refine_resp, "duration_seconds", 0.0) or 0.0)
+                api_duration_total += refinement_duration
+                refined_text = getattr(refine_resp, "content", getattr(refine_resp, "raw_content", ""))
+                refined_result = parse_and_validate(
+                    raw_response=refined_text,
+                    allowed_labels=labels,
+                    image_width=curr_w,
+                    image_height=curr_h,
+                    strict=False,
+                    fallback_confidence=fallback_confidence,
+                    mode=active_mode,
+                )
+                quality_after = assess_quality(
+                    refined_result.all_items,
+                    active_mode,
+                    min_confidence=min_conf,
+                    refine_score_threshold=score_threshold,
+                )
+                if should_accept_refinement(quality_before, quality_after, min_gain=min_gain):
+                    parse_result = refined_result
+                    raw_text = refined_text
+                    vision_resp = refine_resp
+                    final_model_used = refine_model
+                    refine_accepted = True
+                    warnings.append(
+                        f"quality_refine_accepted: score {quality_before.score:.3f}->{quality_after.score:.3f}; "
+                        f"suspects {quality_before.suspect_count}->{quality_after.suspect_count}; model={refine_model}"
+                    )
+                else:
+                    warnings.append(
+                        f"quality_refine_rejected: kept fast draft; score {quality_before.score:.3f}->{quality_after.score:.3f}"
+                    )
+            except Exception as e:
+                # Refinement is best-effort; never discard a usable fast draft.
+                warnings.append(f"quality_refine_warning: {type(e).__name__}: {str(e)[:180]}")
 
     # 8. Apply confidence policy and format CVAT shapes according to mode
     filtered_objects: List[ParsedObject] = []
@@ -784,13 +918,18 @@ def annotate_image(
         original_dimensions=(orig_w, orig_h),
         resized_dimensions=(send_w, send_h),
         was_resized=was_resized,
-        api_duration_seconds=vision_resp.duration_seconds,
+        api_duration_seconds=round(api_duration_total, 3),
         total_duration_seconds=round(total_duration, 3),
-        model_used=active_model,
+        model_used=final_model_used,
         mode=active_mode,
         warnings=warnings,
         image_hash=image_hash,
         rules_injected=rules_injected,
         visual_examples_used=visual_examples_used,
         text_rules_used=text_rules_used,
+        refinement_attempted=refine_attempted,
+        refinement_accepted=refine_accepted,
+        refinement_duration_seconds=round(refinement_duration, 3),
+        quality_score_before=(quality_before.score if quality_before is not None else None),
+        quality_score_after=(quality_after.score if quality_after is not None else None),
     )
