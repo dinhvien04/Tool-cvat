@@ -580,3 +580,72 @@ class TestCvatShapeFormattingAndEditability:
                 assert len(shapes) == 1
                 assert shapes[0]["type"] == "polyline"
                 assert "group_id" not in shapes[0]
+
+
+# ==============================================================================
+# Native editability guard: preserve brush-editable masks beside vector shapes
+# ==============================================================================
+
+class TestNativeMaskEditabilityGuard:
+    """Ensure paired AI outputs stay native/editable in CVAT even if mask-to-polygon UI conversion is enabled."""
+
+    @staticmethod
+    def _client_with_response(payload: Dict[str, Any]) -> NineRouterClient:
+        client = NineRouterClient(base_url="http://127.0.0.1:20128")
+        client.send_vision_request = MagicMock(
+            return_value=VisionResponse(
+                content=json.dumps(payload),
+                raw_response={"choices": [{"message": {"content": json.dumps(payload)}}]},
+                duration_seconds=0.01,
+                model="ag/gemini-3.8-flash-low",
+                status_code=200,
+            )
+        )
+        return client
+
+    def test_rectangle_mask_pair_keeps_native_mask_without_polygon_points(self):
+        client = self._client_with_response({
+            "objects": [{
+                "label": "car",
+                "confidence": 0.95,
+                "box_2d": [100, 100, 700, 700],
+                "mask": [[100, 100], [700, 100], [700, 700], [100, 700]],
+            }]
+        })
+        result = annotate_image(
+            image_source=Image.new("RGB", (320, 240), "white"),
+            client=client,
+            model="ag/gemini-3.8-flash-low",
+            mode=MODE_RECTANGLE_MASK,
+            threshold=0.0,
+            enable_feedback=False,
+        )
+
+        assert [s["type"] for s in result.shapes] == ["mask", "rectangle"]
+        mask, rectangle = result.shapes
+        assert "mask" in mask and "points" not in mask
+        assert "points" in rectangle
+        assert mask["group_id"] == rectangle["group_id"]
+
+    def test_polygon_mask_pair_keeps_native_brush_mask_and_editable_polygon(self):
+        client = self._client_with_response({
+            "regions": [{
+                "label": "road",
+                "confidence": 0.95,
+                "polygon": [[50, 500], [950, 500], [950, 950], [50, 950]],
+            }]
+        })
+        result = annotate_image(
+            image_source=Image.new("RGB", (320, 240), "white"),
+            client=client,
+            model="ag/gemini-3.8-flash-low",
+            mode=MODE_POLYGON_MASK,
+            threshold=0.0,
+            enable_feedback=False,
+        )
+
+        assert [s["type"] for s in result.shapes] == ["mask", "polygon"]
+        mask, polygon = result.shapes
+        assert "mask" in mask and "points" not in mask
+        assert "points" in polygon and len(polygon["points"]) >= 6
+        assert mask["group_id"] == polygon["group_id"]

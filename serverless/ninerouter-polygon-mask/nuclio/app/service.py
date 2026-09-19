@@ -579,26 +579,25 @@ def annotate_image(
                 if conf_str is not None:
                     box_shape["confidence"] = conf_str
 
+                # Keep native CVAT mask editable. Intentionally DO NOT attach a
+                # polygon-style "points" field to mask responses. CVAT's Lambda
+                # converter treats a mask that also carries "points" as eligible
+                # for the UI "Masks to polygons" conversion; that would silently
+                # replace the brush-editable mask with a polygon.
                 mask_shape = {
                     "label": obj.label,
                     "type": "mask",
                     "mask": obj.cvat_mask,
                     "group_id": group_id,
                 }
-                if obj.pixel_polygon:
-                    mask_shape["points"] = [round(float(c), 2) for pt in obj.pixel_polygon for c in pt]
-                elif obj.mask:
-                    from core.geometry import denormalize_contour
-                    pts_px = denormalize_contour(obj.mask, width=orig_w, height=orig_h)
-                    mask_shape["points"] = [round(float(c), 2) for pt in pts_px for c in pt]
-                else:
-                    mask_shape["points"] = [round(float(p), 2) for p in obj.pixel_box]
-
                 if conf_str is not None:
                     mask_shape["confidence"] = conf_str
 
-                cvat_shapes.append(box_shape)
+                # Emit the raster mask first and vector rectangle second. Both are
+                # native, independently editable CVAT shapes; the later vector shape
+                # is easier to select when the pair overlaps on the canvas.
                 cvat_shapes.append(mask_shape)
+                cvat_shapes.append(box_shape)
 
             # POLICY B: POLYGON + MASK (10 semantic region labels)
             # For every accepted region, emit BOTH a polygon and a mask derived from the exact same contour,
@@ -670,18 +669,25 @@ def annotate_image(
                 if conf_str is not None:
                     poly_shape["confidence"] = conf_str
 
+                # The polygon already exists as its own editable CVAT shape.
+                # Do not duplicate the polygon contour into the mask response.
+                # In current CVAT Lambda conversion, a mask carrying "points" can be
+                # auto-converted to a polygon when "Masks to polygons" is enabled,
+                # which removes the native brush/eraser-editable mask.
                 mask_shape = {
                     "label": obj.label,
                     "type": "mask",
                     "mask": cvat_mask_data,
-                    "points": flat_pts,
                     "group_id": group_id,
                 }
                 if conf_str is not None:
                     mask_shape["confidence"] = conf_str
 
-                cvat_shapes.append(poly_shape)
+                # Put mask first, polygon second so the vector contour is the easier
+                # top-most/equal-z-order selection while the mask remains selectable
+                # from the Objects sidebar for Brush/Eraser editing.
                 cvat_shapes.append(mask_shape)
+                cvat_shapes.append(poly_shape)
 
             # POLICY C: POLYLINE ONLY (7 lane labels)
             # All 7 lane labels must emit POLYLINE ONLY (including lane/crosswalk).
