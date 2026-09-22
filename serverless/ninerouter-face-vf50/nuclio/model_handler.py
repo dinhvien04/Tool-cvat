@@ -39,7 +39,6 @@ from app.config import (
     mask_api_key,
 )
 from app.parser import clean_json_string
-from core.pose_face_schema import VF50_LANDMARKS, VF50_EDGES
 from core.skeleton_contract import (
     VF50_COMPONENT_NAMES,
     VF50Face,
@@ -253,15 +252,11 @@ class ModelHandler:
             active_faces = refined_faces
 
         # Convert to CVAT component skeletons with quality gate validation and multi-face group_id
-        as_components = True
-        if mode in ("single", "parent"):
-            as_components = False
-
         shapes = faces_to_cvat_skeletons(
             active_faces,
             width=orig_w,
             height=orig_h,
-            as_components=as_components,
+            as_components=True,
             filter_corrupt=True,
             fallback_on_corrupt=True,
         )
