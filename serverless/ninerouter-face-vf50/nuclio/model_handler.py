@@ -39,10 +39,13 @@ from app.config import (
     mask_api_key,
 )
 from app.parser import clean_json_string
-from core.pose_face_schema import (
+from core.skeleton_contract import (
     VF50_LANDMARKS,
-    VF50_EDGES,
-    parse_and_sanitize_vf50_instance,
+    VF50_COMPONENT_NAMES,
+    build_vf50_prompt,
+    parse_vf50_response,
+    faces_to_cvat_skeletons,
+    assess_vf50_quality,
 )
 
 logger = logging.getLogger("cvat.nuclio.ninerouter.face_vf50")
@@ -188,12 +191,19 @@ class ModelHandler:
             working_img = img.convert("RGB")
 
             # Apply ROI if specified
+            crop_box_norm = None
             if roi is not None and len(roi) == 4:
                 rx1 = max(0, min(orig_w - 1, int(round(float(roi[0])))))
                 ry1 = max(0, min(orig_h - 1, int(round(float(roi[1])))))
                 rx2 = max(rx1 + 1, min(orig_w, int(round(float(roi[2])))))
                 ry2 = max(ry1 + 1, min(orig_h, int(round(float(roi[3])))))
                 working_img = working_img.crop((rx1, ry1, rx2, ry2))
+                crop_box_norm = [
+                    int(round(ry1 / float(orig_h) * 1000.0)),
+                    int(round(rx1 / float(orig_w) * 1000.0)),
+                    int(round(ry2 / float(orig_h) * 1000.0)),
+                    int(round(rx2 / float(orig_w) * 1000.0)),
+                ]
 
             # Resize if exceeding max size
             curr_w, curr_h = working_img.size
@@ -208,7 +218,7 @@ class ModelHandler:
             send_bytes = buf.getvalue()
 
         # Build prompt
-        prompt = build_vf50_prompt(VF50_LANDMARKS)
+        prompt = build_vf50_prompt()
 
         # Execute 9Router vision inference
         resp = self.client.send_vision_request(
@@ -219,40 +229,29 @@ class ModelHandler:
             timeout=self.timeout,
         )
 
-        # Parse JSON
-        cleaned = clean_json_string(resp.content)
-        try:
-            parsed = json.loads(cleaned)
-        except Exception as e:
-            logger.warning(f"Failed to parse JSON from 9Router response: {e}. Content: {resp.content[:200]!r}")
-            return []
+        # Parse VF-50 faces with multi-schema parsing, crop coordinate transformation
+        parsed_faces = parse_vf50_response(
+            resp.content,
+            crop_box=crop_box_norm,
+            orig_w=orig_w,
+            orig_h=orig_h,
+        )
 
-        # Parse candidate face instances
-        raw_faces: List[Dict[str, Any]] = []
-        if isinstance(parsed, dict):
-            if "faces" in parsed and isinstance(parsed["faces"], list):
-                raw_faces = [f for f in parsed["faces"] if isinstance(f, dict)]
-            elif "people" in parsed and isinstance(parsed["people"], list):
-                raw_faces = [f for f in parsed["people"] if isinstance(f, dict)]
-            elif "landmarks" in parsed or "keypoints" in parsed:
-                raw_faces = [parsed]
-        elif isinstance(parsed, list):
-            raw_faces = [f for f in parsed if isinstance(f, dict)]
+        # Filter by confidence threshold
+        active_faces = [f for f in parsed_faces if f.confidence >= threshold]
 
-        shapes: List[Dict[str, Any]] = []
-        for face_dict in raw_faces:
-            conf = float(face_dict.get("confidence", 1.0))
-            if conf < threshold:
-                continue
+        # Convert to CVAT component skeletons with quality gate validation and multi-face group_id
+        as_components = True
+        if mode in ("single", "parent"):
+            as_components = False
 
-            instance = parse_and_sanitize_vf50_instance(
-                face_dict,
-                img_width=orig_w,
-                img_height=orig_h,
-                coord_range=1000.0,
-            )
-            if instance and instance.elements:
-                shapes.append(instance.to_cvat_dict())
+        shapes = faces_to_cvat_skeletons(
+            active_faces,
+            width=orig_w,
+            height=orig_h,
+            as_components=as_components,
+            filter_corrupt=True,
+        )
 
         elapsed = time.perf_counter() - t0
         logger.info(f"Face VF50 inference completed in {elapsed:.2f}s: detected {len(shapes)} face skeleton(s)")
