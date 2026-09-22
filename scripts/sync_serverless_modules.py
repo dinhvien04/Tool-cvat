@@ -62,7 +62,14 @@ def check_drift(repo_root: Path, target_dir: Path) -> List[Tuple[str, str]]:
             if not target_file.exists():
                 drifts.append((f"{mod}/{rel_path}", "missing_in_target"))
             elif not filecmp.cmp(p, target_file, shallow=False):
-                drifts.append((f"{mod}/{rel_path}", "content_mismatch"))
+                # Fallback to normalized content comparison to prevent spurious CRLF/LF drift on Windows
+                try:
+                    p_norm = p.read_bytes().replace(b"\r\n", b"\n")
+                    t_norm = target_file.read_bytes().replace(b"\r\n", b"\n")
+                    if p_norm != t_norm:
+                        drifts.append((f"{mod}/{rel_path}", "content_mismatch"))
+                except Exception:
+                    drifts.append((f"{mod}/{rel_path}", "content_mismatch"))
 
         # Check for orphan files in target_mod
         for p in target_mod.rglob("*"):
