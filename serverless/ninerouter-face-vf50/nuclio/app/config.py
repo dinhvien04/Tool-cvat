@@ -32,6 +32,10 @@ DEFAULT_VISION_MODEL = "ag/gemini-3.8-flash-low"
 DEFAULT_POLYLINE_VISION_MODEL = "ag/gemini-3.8-flash-low"
 DEFAULT_RECTANGLE_MASK_VISION_MODEL = "ag/gemini-3.8-flash-low"
 DEFAULT_POLYGON_MASK_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_POSE17_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_POSE17_REFINE_VISION_MODEL = "ag/gemini-3.8-flash-medium"
+DEFAULT_VF50_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_VF50_REFINE_VISION_MODEL = "ag/gemini-3.8-flash-medium"
 DEFAULT_MAX_IMAGE_SIZE = 1600
 DEFAULT_POLYLINE_MAX_IMAGE_SIZE = 1280
 DEFAULT_POLYLINE_MAX_TOKENS = 1200
@@ -121,6 +125,10 @@ class AppConfig:
     rectangle_mask_model: Optional[str] = None
     polygon_mask_model: Optional[str] = None
     polyline_model: Optional[str] = None
+    pose17_model: Optional[str] = None
+    pose17_refine_model: Optional[str] = None
+    vf50_model: Optional[str] = None
+    vf50_refine_model: Optional[str] = None
     max_image_size: int = DEFAULT_MAX_IMAGE_SIZE
     ninerouter_timeout: float = DEFAULT_NINEROUTER_TIMEOUT
     fallback_confidence: Optional[float] = DEFAULT_FALLBACK_CONFIDENCE
@@ -139,6 +147,24 @@ class AppConfig:
             return self.polygon_mask_model or os.getenv("POLYGON_MASK_MODEL") or self.vision_model
         elif m == "polyline":
             return self.polyline_model or os.getenv("POLYLINE_MODEL") or self.vision_model
+        elif m in ("pose17", "human_pose_17", "pose"):
+            return self.pose17_model or os.getenv("POSE17_MODEL") or self.vision_model
+        elif m in ("pose17_refine", "human_pose_17_refine", "pose_refine"):
+            return (
+                self.pose17_refine_model
+                or os.getenv("POSE17_REFINE_MODEL")
+                or os.getenv("QUALITY_REFINE_MODEL")
+                or DEFAULT_POSE17_REFINE_VISION_MODEL
+            )
+        elif m in ("vf50", "face_vf50", "face"):
+            return self.vf50_model or os.getenv("VF50_MODEL") or self.vision_model
+        elif m in ("vf50_refine", "face_vf50_refine"):
+            return (
+                self.vf50_refine_model
+                or os.getenv("VF50_REFINE_MODEL")
+                or os.getenv("QUALITY_REFINE_MODEL")
+                or DEFAULT_VF50_REFINE_VISION_MODEL
+            )
         return self.vision_model
 
     def __repr__(self) -> str:
@@ -151,6 +177,10 @@ class AppConfig:
             f"rectangle_mask_model={self.rectangle_mask_model!r}, "
             f"polygon_mask_model={self.polygon_mask_model!r}, "
             f"polyline_model={self.polyline_model!r}, "
+            f"pose17_model={self.pose17_model!r}, "
+            f"pose17_refine_model={self.pose17_refine_model!r}, "
+            f"vf50_model={self.vf50_model!r}, "
+            f"vf50_refine_model={self.vf50_refine_model!r}, "
             f"max_image_size={self.max_image_size}, "
             f"ninerouter_timeout={self.ninerouter_timeout}, "
             f"fallback_confidence={self.fallback_confidence}, "
@@ -253,6 +283,18 @@ class AppConfig:
         polyline_model_env = os.getenv("POLYLINE_MODEL")
         polyline_model = polyline_model_env.strip() if polyline_model_env else None
 
+        pose17_model_env = os.getenv("POSE17_MODEL")
+        pose17_model = pose17_model_env.strip() if pose17_model_env else None
+
+        pose17_refine_env = os.getenv("POSE17_REFINE_MODEL")
+        pose17_refine = pose17_refine_env.strip() if pose17_refine_env else None
+
+        vf50_model_env = os.getenv("VF50_MODEL")
+        vf50_model = vf50_model_env.strip() if vf50_model_env else None
+
+        vf50_refine_env = os.getenv("VF50_REFINE_MODEL")
+        vf50_refine = vf50_refine_env.strip() if vf50_refine_env else None
+
         return cls(
             ninerouter_url=url,
             ninerouter_key=key,
@@ -260,6 +302,10 @@ class AppConfig:
             rectangle_mask_model=rect_model,
             polygon_mask_model=poly_model,
             polyline_model=polyline_model,
+            pose17_model=pose17_model,
+            pose17_refine_model=pose17_refine,
+            vf50_model=vf50_model,
+            vf50_refine_model=vf50_refine,
             max_image_size=max_size,
             ninerouter_timeout=timeout_val,
             fallback_confidence=fallback_conf,

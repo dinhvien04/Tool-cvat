@@ -26,6 +26,11 @@ from pathlib import Path
 import requests
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from core.cvat_safety import assert_job_writable, is_job_protected, get_protected_job_ids
+
 TOKEN_FILE = REPO_ROOT / ".tool-cvat" / "cvat_token.txt"
 
 base_url = os.getenv("CVAT_URL", "http://localhost:18080").rstrip("/")
@@ -37,6 +42,11 @@ try:
     job_id = int(job_id_raw)
 except ValueError:
     print("Error: CVAT_JOB_ID must be an integer.")
+    sys.exit(2)
+
+if is_job_protected(job_id):
+    print(f"Error: Job {job_id} is a protected production job ({sorted(get_protected_job_ids())}).")
+    print("Production jobs are STRICTLY READ-ONLY. Mutating tests must use disposable jobs.")
     sys.exit(2)
 
 access_token = os.getenv("CVAT_ACCESS_TOKEN", "").strip()

@@ -953,12 +953,14 @@ def generate_cvat_pose17_svg(sublabel_names: Optional[Sequence[str]] = None) -> 
         f'<circle r="0.75" cx="{cx}" cy="{cy}" data-type="element node" data-element-id="{nid}" data-node-id="{nid}" data-label-name="{labels[nid-1]}"></circle>'
         for nid, cx, cy in nodes_info
     ]
-    return "\n".join(lines + circles)
+    inner_svg = "".join(lines + circles)
+    return f'<svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">{inner_svg}</svg>'
 
 
 def build_cvat_pose17_spec(
     parent_label: str = DEFAULT_PARENT_LABEL,
     *,
+    label_id: int = 1,
     sublabel_names: Optional[Sequence[str]] = None,
     include_svg: bool = True,
 ) -> Dict[str, Any]:
@@ -966,14 +968,39 @@ def build_cvat_pose17_spec(
 
     Args:
         parent_label: Name of parent skeleton label.
-        sublabel_names: Optional custom sublabel names (defaults to canonical POSE17_KEYPOINTS).
+        label_id: Unique integer ID for the parent skeleton spec entry.
+        sublabel_names: Optional custom sublabel names (defaults to canonical VinFast sequence).
         include_svg: If True, populates mandatory 'svg' attribute for CVAT Lambda Manager.
     """
-    names = list(sublabel_names) if sublabel_names and len(sublabel_names) == KEYPOINT_COUNT else list(POSE17_KEYPOINTS)
-    sublabels = [{"name": name, "type": "points"} for name in names]
+    vinfast_default_names = (
+        "nose",
+        "right_eye",
+        "left_eye",
+        "right_ear",
+        "left_ear",
+        "right_shoulder",
+        "left_shoulder",
+        "right_elbow",
+        "left_elbow",
+        "right_wrist",
+        "left_wrist",
+        "right_hip",
+        "left_hip",
+        "right_knee",
+        "left_knee",
+        "right_ankle",
+        "left_ankle",
+    )
+    names = list(sublabel_names) if sublabel_names and len(sublabel_names) == KEYPOINT_COUNT else list(vinfast_default_names)
+    sublabels = [
+        {"id": idx + 1, "name": name, "type": "points", "attributes": []}
+        for idx, name in enumerate(names)
+    ]
     spec_dict: Dict[str, Any] = {
+        "id": label_id,
         "name": parent_label,
         "type": "skeleton",
+        "attributes": [],
         "sublabels": sublabels,
     }
     if include_svg:
@@ -1723,6 +1750,7 @@ def faces_to_cvat_skeletons(
     base_group_id: int = 1,
     filter_corrupt: bool = True,
     as_components: bool = True,
+    fallback_on_corrupt: bool = True,
 ) -> List[Dict[str, Any]]:
     """Convert multiple detected faces to native CVAT skeleton shape dictionaries.
 
@@ -1732,6 +1760,7 @@ def faces_to_cvat_skeletons(
     - N faces -> returns N * 7 component skeletons. Skeletons for Face k share group_id = base_group_id + k.
     - Skeletons belonging to distinct faces never share group_id.
     - Completely separate landmark instances preventing any cross-contamination.
+    - Quality gate fallback: Never silently returns 0 shapes when a non-degenerate face was detected.
 
     Args:
         faces: Sequence of VF50Face instances.
@@ -1741,6 +1770,8 @@ def faces_to_cvat_skeletons(
         filter_corrupt: If True, filters out anatomically collapsed or corrupted faces.
         as_components: If True, outputs authoritative 7 component skeletons.
                        If False, outputs 1 unified parent skeleton per face.
+        fallback_on_corrupt: If True, when strict quality gate rejects all detected faces,
+                             salvages the highest-scoring candidate to prevent silent drop in CVAT.
 
     Returns:
         List of CVAT skeleton shape dictionaries.
@@ -1750,6 +1781,7 @@ def faces_to_cvat_skeletons(
 
     skeletons: List[Dict[str, Any]] = []
     curr_group_id = int(base_group_id)
+    rejected_faces: List[Tuple[VF50Face, VF50QualityReport]] = []
 
     for face in faces:
         if filter_corrupt:
@@ -1758,6 +1790,7 @@ def faces_to_cvat_skeletons(
                 logger.warning(
                     f"Dropped corrupted face (face id={face.face_id}): reasons={report.reasons}"
                 )
+                rejected_faces.append((face, report))
                 continue
 
         if as_components:
@@ -1776,6 +1809,34 @@ def faces_to_cvat_skeletons(
             skeletons.append(skel)
 
         curr_group_id += 1
+
+    # Safe Fallback: If strict quality gate dropped all detected faces, prevent silent 0-shape drop
+    if not skeletons and rejected_faces and fallback_on_corrupt:
+        salvageable = [
+            (f, r) for f, r in rejected_faces
+            if r.active_count >= 15 and not any("degenerate_collapse" in reas for reas in r.reasons)
+        ]
+        if salvageable:
+            salvageable.sort(key=lambda item: item[1].score, reverse=True)
+            best_face, best_report = salvageable[0]
+            logger.info(
+                f"Quality gate fallback triggered: emitting detected face (id={best_face.face_id}, score={best_report.score:.2f}) "
+                f"to prevent silent drop in CVAT."
+            )
+            if as_components:
+                face_skels = best_face.to_cvat_component_skeletons(
+                    width=width,
+                    height=height,
+                    group_id=curr_group_id,
+                )
+                skeletons.extend(face_skels)
+            else:
+                skel = best_face.to_cvat_single_skeleton(
+                    width=width,
+                    height=height,
+                    group_id=curr_group_id,
+                )
+                skeletons.append(skel)
 
     return skeletons
 
@@ -2039,6 +2100,50 @@ def build_vf50_prompt() -> str:
     )
 
 
+def build_vf50_crop_prompt() -> str:
+    """Generate targeted prompt for 9Router vision inference on cropped face patches.
+
+    Optimized for high-resolution single-face crops with strict anatomical topological guidance:
+    - Exactly 50 landmarks conforming to VinFast VF-50 schema across 7 components.
+    - Explicit ordering constraints (medial-to-lateral eyebrows, non-inverted eyelids, contained inner lips).
+    - Normalized to [0, 1000] relative to the cropped patch.
+    """
+    return (
+        "Perform fine-grained facial landmark estimation on this cropped human face adhering to the VinFast VF-50 schema.\n"
+        "This image is a close-up crop containing a single face. Localize all 50 landmarks with high precision across all 7 components:\n"
+        "  1. longmaytrai (points 0..4): left eyebrow from medial/inner (0) to lateral/outer (4) (viewer perspective)\n"
+        "  2. longmayphai (points 5..9): right eyebrow from medial/inner (5) to lateral/outer (9) (viewer perspective)\n"
+        "  3. songmui (points 10..13): nasal bridge descending vertically from nasion (10) to nasal tip (13)\n"
+        "  4. mattrai (points 14..21): left eye contour closed loop starting at inner corner (14), upper eyelid (15..17), outer corner (18), lower eyelid (19..21)\n"
+        "  5. matphai (points 22..29): right eye contour closed loop starting at inner corner (22), upper eyelid (23..25), outer corner (26), lower eyelid (27..29)\n"
+        "  6. moingoai (points 30..41): outer lip contour closed loop starting at left corner (30), upper lip contour (31..35), right corner (36), lower lip contour (37..41)\n"
+        "  7. moitrong (points 42..49): inner lip contour closed loop starting at left corner (42), upper boundary (43..45), right corner (46), lower boundary (47..49)\n"
+        "\n"
+        "Critical Anatomical Constraints:\n"
+        "- Viewer perspective: features on the image left side are 'trai' (x_left < x_right).\n"
+        "- Eyelid vertical order: upper eyelid points MUST have y <= lower eyelid points (upper eyelid is above lower eyelid).\n"
+        "- Eyebrow ordering: points must progress monotonically from center outwards.\n"
+        "- Mouth topology: inner lip (moitrong) MUST be completely enclosed within outer lip (moingoai). If mouth is closed, inner lip seam coincides with mouth line.\n"
+        "- Coordinates MUST be normalized to integers in [0, 1000] relative to this cropped image patch [width=1000, height=1000].\n"
+        "- Visibility flag: 0=outside frame, 1=occluded, 2=visible.\n"
+        "\n"
+        "Output MUST be strict, valid JSON with no extra commentary:\n"
+        "{\n"
+        '  "faces": [\n'
+        "    {\n"
+        '      "id": 1,\n'
+        '      "confidence": 0.99,\n'
+        '      "landmarks": [\n'
+        '        {"id": 0, "point": [x, y], "visibility": 2, "confidence": 0.99},\n'
+        "        ...\n"
+        '        {"id": 49, "point": [x, y], "visibility": 2, "confidence": 0.99}\n'
+        "      ]\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
+    )
+
+
 def build_cvat_vf50_spec() -> List[Dict[str, Any]]:
     """Build CVAT function.yaml annotations spec items for the 7 VF-50 component skeletons.
 
@@ -2065,9 +2170,8 @@ def build_cvat_vf50_spec() -> List[Dict[str, Any]]:
         for pt_id in range(cfg["start"], cfg["end"] + 1):
             n_id = pt_id - node_offset + 1
             svg_circles.append(
-                f'<circle id="node_{n_id}" cx="50" cy="50" r="3" '
-                f'data-type="element node" data-element-id="{n_id}" '
-                f'data-node-id="{n_id}" data-label-name="{pt_id}"></circle>'
+                f'<circle cx="50" cy="50" r="3" data-type="element node" '
+                f'data-element-id="{n_id}" data-node-id="{n_id}" data-label-name="{pt_id}"/>'
             )
 
         svg_lines = []
@@ -2075,8 +2179,7 @@ def build_cvat_vf50_spec() -> List[Dict[str, Any]]:
             n1 = p1 - node_offset + 1
             n2 = p2 - node_offset + 1
             svg_lines.append(
-                f'<line id="edge_{n1}_{n2}" data-type="edge" '
-                f'data-node-from="{n1}" data-node-to="{n2}" stroke="red" stroke-width="1"></line>'
+                f'<line data-type="edge" data-node-from="{n1}" data-node-to="{n2}"/>'
             )
 
         svg_content = f'<svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">{"".join(svg_circles + svg_lines)}</svg>'

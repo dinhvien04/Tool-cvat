@@ -273,8 +273,18 @@ if (-not (Test-Path $hostExamplesDir)) { New-Item -ItemType Directory -Path $hos
 $forwardHostFeedbackDir = $hostFeedbackDir -replace '\\', '/'
 
 # Zero-drift sync of modules
-Write-Host "Syncing canonical modules across serverless targets..." -ForegroundColor Gray
-python (Join-Path $ScriptDir "sync_serverless_modules.py")
+$syncTargetParam = switch ($Target) {
+    "week2" { "week2" }
+    "human-pose-17" { "human-pose-17" }
+    "face-vf50" { "face-vf50" }
+    "three" { "three" }
+    "rectangle-mask" { "rectangle-mask" }
+    "polygon-mask" { "polygon-mask" }
+    "polyline" { "polyline" }
+    default { "all" }
+}
+Write-Host "Syncing canonical modules across serverless targets (target: $syncTargetParam)..." -ForegroundColor Gray
+python (Join-Path $ScriptDir "sync_serverless_modules.py") --target $syncTargetParam
 
 foreach ($fn in $functionsToDeploy) {
     $fnName = $fn.Name
@@ -326,6 +336,19 @@ foreach ($fn in $functionsToDeploy) {
     Write-Host "Active model for $($fnName): $fnModel" -ForegroundColor Green
     Write-Host "Request timeout for $($fnName): $fnTimeout s" -ForegroundColor Gray
 
+    # Ensure feedback volume hostPath dynamically matches actual repository location
+    if (Test-Path $functionYaml) {
+        $yamlRaw = Get-Content $functionYaml -Raw
+        if ($yamlRaw -match "(hostPath:\s*[\r\n]+\s*path:\s*)['`"]?([^'`"\r\n]+)['`"]?") {
+            $existingPath = $Matches[2].Trim()
+            if ($existingPath -ne $forwardHostFeedbackDir) {
+                Write-Host "Normalizing host feedback path in $functionYaml to '$forwardHostFeedbackDir'..." -ForegroundColor DarkGray
+                $yamlRaw = $yamlRaw -replace "(hostPath:\s*[\r\n]+\s*path:\s*)['`"]?[^'`"\r\n]+['`"]?", "`$1'$forwardHostFeedbackDir'"
+                [System.IO.File]::WriteAllText($functionYaml, $yamlRaw, (New-Object System.Text.UTF8Encoding($false)))
+            }
+        }
+    }
+
     # Validate specification
     $specValidator = Join-Path $ScriptDir "validate_function_spec.py"
     & python $specValidator --yaml-path $functionYaml
@@ -376,12 +399,19 @@ nuctl deploy $fnName \
     "`${extraArgs[@]}"
 "@
         $bashScriptUnix = $bashScript -replace "`r`n", "`n"
-        $b64Script = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($bashScriptUnix))
+        $tmpDeployScript = Join-Path $hostFeedbackDir "deploy_${fnName}.sh"
+        $tmpDriveLetter = $tmpDeployScript.Substring(0, 1).ToLower()
+        $tmpRestPath = $tmpDeployScript.Substring(2) -replace '\\', '/'
+        $wslTmpScript = "/mnt/$tmpDriveLetter$tmpRestPath"
+
+        # Write script file directly without BOM to avoid Win32 32,767 character command length limits and PowerShell pipeline BOM corruption
+        [System.IO.File]::WriteAllText($tmpDeployScript, $bashScriptUnix, (New-Object System.Text.UTF8Encoding($false)))
 
         try {
             Write-Host "Invoking nuctl deploy $fnName in WSL..." -ForegroundColor Gray
-            & wsl -d Ubuntu bash -c "echo '$b64Script' | base64 -d | bash"
+            & wsl -d Ubuntu bash "$wslTmpScript"
         } finally {
+            Remove-Item -Path $tmpDeployScript -Force -ErrorAction SilentlyContinue
             $env:NINEROUTER_KEY = $null
             $env:WSLENV = $env:WSLENV_BACKUP
             $env:WSLENV_BACKUP = $null

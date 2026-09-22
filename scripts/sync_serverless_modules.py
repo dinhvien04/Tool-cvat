@@ -25,6 +25,25 @@ SERVERLESS_TARGETS = (
 )
 
 
+TARGET_GROUPS = {
+    "all": SERVERLESS_TARGETS,
+    "three": (
+        "serverless/ninerouter-rectangle-mask/nuclio",
+        "serverless/ninerouter-polygon-mask/nuclio",
+        "serverless/ninerouter-polyline/nuclio",
+    ),
+    "week2": (
+        "serverless/ninerouter-human-pose-17/nuclio",
+        "serverless/ninerouter-face-vf50/nuclio",
+    ),
+    "rectangle-mask": ("serverless/ninerouter-rectangle-mask/nuclio",),
+    "polygon-mask": ("serverless/ninerouter-polygon-mask/nuclio",),
+    "polyline": ("serverless/ninerouter-polyline/nuclio",),
+    "human-pose-17": ("serverless/ninerouter-human-pose-17/nuclio",),
+    "face-vf50": ("serverless/ninerouter-face-vf50/nuclio",),
+}
+
+
 def ignore_patterns(path: str, names: List[str]) -> List[str]:
     """Filter out caches and temporary files."""
     ignored = []
@@ -102,12 +121,20 @@ def sync_modules(repo_root: Path, target_dir: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sync canonical modules to serverless directories")
     parser.add_argument("--check", action="store_true", help="Check for drift without modifying files")
+    parser.add_argument(
+        "--target",
+        type=str,
+        default="all",
+        choices=list(TARGET_GROUPS.keys()),
+        help="Target group or detector to sync/check (default: 'all'). Use 'week2' to sync only Pose17 and VF50.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
+    selected_targets = TARGET_GROUPS.get(args.target, SERVERLESS_TARGETS)
 
     all_drifts = []
-    for rel_target in SERVERLESS_TARGETS:
+    for rel_target in selected_targets:
         target_path = repo_root / rel_target
         if not target_path.exists():
             continue
@@ -123,12 +150,12 @@ def main() -> int:
             for target, fpath, reason in all_drifts:
                 print(f"  - {target}: {fpath} ({reason})")
             return 1
-        print("[OK] All serverless modules are in perfect sync with canonical root.")
+        print(f"[OK] Serverless modules ({args.target}) are in perfect sync with canonical root.")
         return 0
 
     # Sync
     total_synced = 0
-    for rel_target in SERVERLESS_TARGETS:
+    for rel_target in selected_targets:
         target_path = repo_root / rel_target
         if not target_path.exists():
             continue
@@ -136,7 +163,7 @@ def main() -> int:
         total_synced += count
         print(f"Synced {count} modules to {rel_target}")
 
-    print(f"[COMPLETE] Synchronized canonical modules across serverless targets.")
+    print(f"[COMPLETE] Synchronized canonical modules to '{args.target}' serverless targets ({total_synced} copies).")
     return 0
 
 

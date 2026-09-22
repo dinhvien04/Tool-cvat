@@ -121,12 +121,12 @@ Rules:
 """
 
 
-def execute_request(model: str, system_prompt: str, user_prompt: str, img_b64: str, timeout: float = 30.0) -> Dict[str, Any]:
+def execute_request(model: str, system_prompt: str, user_prompt: str, img_b64: str, timeout: float = 30.0, max_tokens: int = 2500) -> Dict[str, Any]:
     url = f"{BASE_URL}/v1/chat/completions"
     payload = {
         "model": model,
         "temperature": 0.0,
-        "max_tokens": 1500,
+        "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
         "stream": False,
         "messages": [
@@ -275,8 +275,17 @@ def main():
     img_road = Path("test.jpg")
 
     if not img_driver.exists():
-        print(f"Error: {img_driver} not found")
-        return
+        print(f"Notice: {img_driver} not found. Generating synthetic test driver image...")
+        try:
+            from scripts.generate_test_driver import generate_driver_image
+            generate_driver_image(str(img_driver))
+        except Exception:
+            from PIL import Image, ImageDraw
+            img = Image.new("RGB", (1280, 720), color=(50, 60, 75))
+            draw = ImageDraw.Draw(img)
+            draw.ellipse([540, 200, 640, 320], fill=(220, 180, 150))
+            draw.polygon([(480, 360), (700, 360), (740, 600), (440, 600)], fill=(40, 50, 120))
+            img.save(img_driver, "JPEG")
 
     with open(img_driver, "rb") as f:
         b64_driver = base64.b64encode(f.read()).decode("ascii")

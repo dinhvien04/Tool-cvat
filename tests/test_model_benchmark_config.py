@@ -18,6 +18,8 @@ from app.client import (
     PREFERRED_RECTANGLE_MASK_MODELS,
     PREFERRED_POLYGON_MASK_MODELS,
     PREFERRED_POLYLINE_MODELS,
+    PREFERRED_POSE17_MODELS,
+    PREFERRED_VF50_MODELS,
 )
 
 
@@ -84,3 +86,52 @@ class TestDetectorModelConfig:
             assert client.resolve_rectangle_mask_model("ag/gemini-3.8-flash-high") == "ag/gemini-3.8-flash-high"
             assert client.resolve_polygon_mask_model("ag/gemini-3.8-flash-high") == "ag/gemini-3.8-flash-high"
             assert client.resolve_polyline_model("ag/gemini-3.8-flash-high") == "ag/gemini-3.8-flash-high"
+
+    def test_week2_pose17_and_vf50_model_fallback(self):
+        cfg = AppConfig()
+        assert cfg.get_model_for_mode("pose17") == cfg.vision_model
+        assert cfg.get_model_for_mode("human_pose_17") == cfg.vision_model
+        assert cfg.get_model_for_mode("pose") == cfg.vision_model
+        assert cfg.get_model_for_mode("vf50") == cfg.vision_model
+        assert cfg.get_model_for_mode("face_vf50") == cfg.vision_model
+        assert cfg.get_model_for_mode("face") == cfg.vision_model
+
+    def test_week2_env_var_loading_and_overrides(self, monkeypatch):
+        monkeypatch.setenv("VISION_MODEL", "fallback-model")
+        monkeypatch.setenv("POSE17_MODEL", "custom-pose17-model")
+        monkeypatch.setenv("POSE17_REFINE_MODEL", "custom-pose17-refine")
+        monkeypatch.setenv("VF50_MODEL", "custom-vf50-model")
+        monkeypatch.setenv("VF50_REFINE_MODEL", "custom-vf50-refine")
+
+        cfg = AppConfig.load()
+        assert cfg.pose17_model == "custom-pose17-model"
+        assert cfg.pose17_refine_model == "custom-pose17-refine"
+        assert cfg.vf50_model == "custom-vf50-model"
+        assert cfg.vf50_refine_model == "custom-vf50-refine"
+
+        assert cfg.get_model_for_mode("pose17") == "custom-pose17-model"
+        assert cfg.get_model_for_mode("human_pose_17") == "custom-pose17-model"
+        assert cfg.get_model_for_mode("pose17_refine") == "custom-pose17-refine"
+        assert cfg.get_model_for_mode("vf50") == "custom-vf50-model"
+        assert cfg.get_model_for_mode("face_vf50") == "custom-vf50-model"
+        assert cfg.get_model_for_mode("vf50_refine") == "custom-vf50-refine"
+
+    def test_client_prioritizes_flash_low_for_week2(self):
+        assert PREFERRED_POSE17_MODELS[0] == "ag/gemini-3.8-flash-low"
+        assert PREFERRED_VF50_MODELS[0] == "ag/gemini-3.8-flash-low"
+
+    def test_client_resolve_week2_models(self):
+        client = NineRouterClient(base_url="http://127.0.0.1:20128")
+        available = [
+            "ag/gemini-3.8-flash-high",
+            "ag/gemini-3.8-flash-medium",
+            "ag/gemini-3.8-flash-low",
+        ]
+        with patch.object(client, "get_vision_model_ids", return_value=available):
+            # Dynamic resolution picks fastest preferred model (flash-low)
+            assert client.resolve_pose17_model() == "ag/gemini-3.8-flash-low"
+            assert client.resolve_vf50_model() == "ag/gemini-3.8-flash-low"
+
+            # Explicit preference is respected
+            assert client.resolve_pose17_model("ag/gemini-3.8-flash-high") == "ag/gemini-3.8-flash-high"
+            assert client.resolve_vf50_model("ag/gemini-3.8-flash-high") == "ag/gemini-3.8-flash-high"

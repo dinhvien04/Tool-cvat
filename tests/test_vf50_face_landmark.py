@@ -34,6 +34,7 @@ from core.skeleton_contract import (
     assess_vf50_quality,
     build_cvat_vf50_spec,
     build_vf50_prompt,
+    build_vf50_crop_prompt,
     crop_to_image_coords,
     expand_face_bbox,
     faces_to_cvat_skeletons,
@@ -432,6 +433,38 @@ class TestVF50QualityGate:
         report = assess_vf50_quality(face)
         assert any("inverted_laterality" in a for a in report.anomalies)
 
+    def test_quality_gate_fallback_never_silently_drops_detected_face(self):
+        # Create a face with several anomalies that trigger strict rejection (is_valid=False)
+        face = create_canonical_frontal_face(face_id=1)
+        # Induce multiple anomalies: inverted eyelid, protruding lip, monotonic nose break
+        face.landmarks[16].y = face.landmarks[20].y + 50.0  # left eyelid inversion
+        face.landmarks[24].y = face.landmarks[28].y + 50.0  # right eyelid inversion
+        face.landmarks[42].x = face.landmarks[30].x - 60.0  # lip protrusion
+        face.landmarks[11].y = face.landmarks[10].y - 20.0  # nose non-monotonic
+
+        report = assess_vf50_quality(face, width=640, height=480)
+        assert report.is_valid is False
+        assert len(report.anomalies) >= 3
+
+        # With fallback_on_corrupt=True, it MUST NOT drop the face into an empty list!
+        shapes_fallback = faces_to_cvat_skeletons([face], width=640, height=480, filter_corrupt=True, fallback_on_corrupt=True)
+        assert len(shapes_fallback) == 7
+
+        # With fallback_on_corrupt=False, it would be dropped
+        shapes_strict = faces_to_cvat_skeletons([face], width=640, height=480, filter_corrupt=True, fallback_on_corrupt=False)
+        assert shapes_strict == []
+
+    def test_quality_gate_fallback_still_drops_true_degenerate_collapse(self):
+        # Pure degenerate collapse (all 50 points collapsed to (500, 500))
+        face = create_canonical_frontal_face(face_id=1)
+        for lm in face.landmarks.values():
+            lm.x = 500.0
+            lm.y = 500.0
+
+        shapes = faces_to_cvat_skeletons([face], width=640, height=480, filter_corrupt=True, fallback_on_corrupt=True)
+        # Should be dropped because it is a true geometric collapse (< 15 normalized units diagonal)
+        assert shapes == []
+
 
 # ==============================================================================
 # SECTION 12: RESPONSE PARSER & MULTI-SCHEMA SUPPORT
@@ -534,6 +567,16 @@ class TestVF50PromptAndSpec:
         assert "50 landmarks" in prompt
         assert "0 = outside" in prompt or "0=outside" in prompt
 
+    def test_crop_prompt_builder_contents(self):
+        crop_prompt = build_vf50_crop_prompt()
+        assert "longmaytrai" in crop_prompt
+        assert "moingoai" in crop_prompt
+        assert "moitrong" in crop_prompt
+        assert "50 landmarks" in crop_prompt
+        assert "close-up crop" in crop_prompt
+        assert "Eyelid vertical order" in crop_prompt
+        assert "Mouth topology" in crop_prompt
+
     def test_cvat_spec_structure(self):
         specs = build_cvat_vf50_spec()
         assert len(specs) == 7
@@ -568,16 +611,23 @@ class TestVF50ModelHandler:
         import importlib.util
         from pathlib import Path
 
-        def mock_resolve(self, requested_model):
+        def mock_resolve(self, requested_model=None):
             return "mock-gemini-vision"
 
         monkeypatch.setattr("app.client.NineRouterClient.resolve_vision_model", mock_resolve)
+        if hasattr(importlib.import_module("app.client").NineRouterClient, "resolve_vf50_model"):
+            monkeypatch.setattr("app.client.NineRouterClient.resolve_vf50_model", mock_resolve)
 
         handler_path = Path(__file__).resolve().parent.parent / "serverless" / "ninerouter-face-vf50" / "nuclio" / "model_handler.py"
         spec = importlib.util.spec_from_file_location("vf50_model_handler", handler_path)
         assert spec and spec.loader
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+
+        if hasattr(mod, "NineRouterClient"):
+            monkeypatch.setattr(mod.NineRouterClient, "resolve_vision_model", mock_resolve)
+            if hasattr(mod.NineRouterClient, "resolve_vf50_model"):
+                monkeypatch.setattr(mod.NineRouterClient, "resolve_vf50_model", mock_resolve)
 
         handler = mod.ModelHandler(base_url="http://mock:20128", api_key="test-key", model="mock-gemini-vision")
         return handler
@@ -693,4 +743,74 @@ class TestVF50ModelHandler:
         # Threshold 0.5 filters out 0.3 face -> returns empty list
         shapes = mock_handler.infer(buf.getvalue(), threshold=0.5)
         assert shapes == []
+
+    def test_handler_two_pass_crop_refinement_triggers_for_small_face(self, mock_handler, monkeypatch):
+        import io
+        from PIL import Image
+        from app.client import VisionResponse
+
+        # Face in pass 1 is small: box [100, 100, 180, 180] (normalized), in 640x480 -> width = 80/1000*640 = 51.2px (< 100px)
+        pass1_face = {
+            "id": 1,
+            "confidence": 0.90,
+            "box_2d": [100, 100, 180, 180],
+            "landmarks": [
+                {"id": i, "point": [120 + (i % 5) * 10, 120 + (i // 5) * 5], "visibility": 2, "confidence": 0.85}
+                for i in range(50)
+            ],
+        }
+
+        # Canonical face returned for the crop patch (pass 2)
+        canonical_crop_face = create_canonical_frontal_face(face_id=1)
+        pass2_crop_face = {
+            "id": 1,
+            "confidence": 0.99,
+            "landmarks": [
+                {"id": lm.id, "point": [lm.x, lm.y], "visibility": lm.visibility, "confidence": lm.confidence}
+                for lm in canonical_crop_face.landmarks.values()
+            ],
+        }
+
+        recorded_calls = []
+
+        def mock_send(model, image_bytes_or_b64, prompt, **kwargs):
+            recorded_calls.append({"model": model, "prompt": prompt})
+            if len(recorded_calls) == 1:
+                return VisionResponse(
+                    content=json.dumps({"faces": [pass1_face]}),
+                    raw_response={},
+                    duration_seconds=0.1,
+                    model="mock-gemini-vision",
+                    status_code=200,
+                )
+            else:
+                return VisionResponse(
+                    content=json.dumps({"faces": [pass2_crop_face]}),
+                    raw_response={},
+                    duration_seconds=0.1,
+                    model="mock-gemini-vision",
+                    status_code=200,
+                )
+
+        monkeypatch.setattr(mock_handler.client, "send_vision_request", mock_send)
+
+        img = Image.new("RGB", (640, 480), color=(128, 128, 128))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        img_bytes = buf.getvalue()
+
+        shapes = mock_handler.infer(img_bytes, threshold=0.5, refine_crops=True)
+
+        # Must have called 9Router twice: 1 for global full image, 1 for crop patch
+        assert len(recorded_calls) == 2
+        # First call used global prompt
+        assert "Perform facial landmark estimation conforming to the VinFast VF-50 schema" in recorded_calls[0]["prompt"]
+        # Second call used targeted crop prompt
+        assert "close-up crop containing a single face" in recorded_calls[1]["prompt"]
+
+        # Exactly 7 component skeletons emitted
+        assert len(shapes) == 7
+        for s in shapes:
+            assert s["type"] == "skeleton"
+            assert s["group"] == 1
 

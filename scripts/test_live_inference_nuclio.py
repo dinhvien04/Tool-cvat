@@ -1,11 +1,20 @@
 """Test live inference of deployed Week-2 Nuclio functions on test_driver.jpg."""
 import base64
 import json
+import os
 import sys
 import time
 from pathlib import Path
 from PIL import Image
 import requests
+
+POSE17_URL = os.getenv("NUCLIO_POSE17_URL", "http://localhost:5997").rstrip("/")
+VF50_URL = os.getenv("NUCLIO_VF50_URL", "http://localhost:5886").rstrip("/")
+
+req_headers = {"Content-Type": "application/json"}
+nuclio_token = os.getenv("NUCLIO_AUTH_TOKEN", "").strip()
+if nuclio_token:
+    req_headers["Authorization"] = f"Bearer {nuclio_token}"
 
 repo_root = Path(__file__).resolve().parent.parent
 if len(sys.argv) > 1 and Path(sys.argv[1]).exists():
@@ -30,14 +39,14 @@ payload = {
     "threshold": 0.5,
 }
 
-# 1. Test Human Pose 17 (Port 5997)
-print("\n--- Testing 9Router Human Pose 17 (Port 5997) ---")
+# 1. Test Human Pose 17
+print(f"\n--- Testing 9Router Human Pose 17 ({POSE17_URL}) ---")
 t0 = time.perf_counter()
 try:
     resp17 = requests.post(
-        "http://localhost:5997",
+        POSE17_URL,
         json=payload,
-        headers={"Content-Type": "application/json"},
+        headers=req_headers,
         timeout=60,
     )
     dur17 = time.perf_counter() - t0
@@ -54,14 +63,14 @@ try:
 except Exception as e:
     print(f"Pose 17 Request Failed: {e}")
 
-# 2. Test Face VF-50 (Port 9598)
-print("\n--- Testing 9Router Face Landmark VF-50 (Port 9598) ---")
+# 2. Test Face VF-50
+print(f"\n--- Testing 9Router Face Landmark VF-50 ({VF50_URL}) ---")
 t0 = time.perf_counter()
 try:
     resp50 = requests.post(
-        "http://localhost:9598",
+        VF50_URL,
         json=payload,
-        headers={"Content-Type": "application/json"},
+        headers=req_headers,
         timeout=60,
     )
     dur50 = time.perf_counter() - t0

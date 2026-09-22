@@ -258,46 +258,9 @@ def validate_function_yaml(yaml_path: Path) -> Tuple[bool, List[str]]:
                     is_valid_svg_0, svg_errs_0 = validate_svg_node_ids(svg_content, expected_node_ids=set(range(0, expected_count)))
                     if not (is_valid_svg_1 or is_valid_svg_0):
                         errors.extend([f"VF50 SVG error in '{cname}': {e}" for e in svg_errs_1])
-
-        elif len(label_names) == 1:
-            # Legacy unified parent skeleton
-            if label_names[0] not in ("face", "head"):
-                errors.append(
-                    f"ninerouter-face-vf50 parent label must be 'face', got {label_names[0]!r} in {yaml_path}"
-                )
-            for item in spec_items:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") != "skeleton":
-                    errors.append(
-                        f"ninerouter-face-vf50 parent label must have type 'skeleton', got {item.get('type')!r} in {yaml_path}"
-                    )
-                sublabels = item.get("sublabels", [])
-                if not isinstance(sublabels, list) or len(sublabels) != 50:
-                    errors.append(
-                        f"ninerouter-face-vf50 must have exactly 50 sublabels, got {len(sublabels) if isinstance(sublabels, list) else type(sublabels)} in {yaml_path}"
-                    )
-                else:
-                    sub_names = [s.get("name") for s in sublabels if isinstance(s, dict)]
-                    missing_lms = set(VF50_LANDMARKS) - set(sub_names)
-                    if missing_lms:
-                        errors.append(f"ninerouter-face-vf50 missing landmarks: {sorted(missing_lms)}")
-                    for sub in sublabels:
-                        if isinstance(sub, dict) and sub.get("type") != "points":
-                            errors.append(
-                                f"ninerouter-face-vf50 sublabel '{sub.get('name')}' must have type 'points', got '{sub.get('type')}'"
-                            )
-                svg_content = item.get("svg", "")
-                if not svg_content:
-                    errors.append(f"ninerouter-face-vf50 missing 'svg' in skeleton spec in {yaml_path}")
-                else:
-                    is_valid_svg_0, svg_errs_0 = validate_svg_node_ids(svg_content, expected_node_ids=set(range(0, 50)))
-                    is_valid_svg_1, svg_errs_1 = validate_svg_node_ids(svg_content, expected_node_ids=set(range(1, 51)))
-                    if not (is_valid_svg_0 or is_valid_svg_1):
-                        errors.extend([f"VF50 SVG error: {e}" for e in svg_errs_0])
         else:
             errors.append(
-                f"ninerouter-face-vf50 must have either 7 component skeletons (authoritative) or 1 parent skeleton, but found {len(label_names)} in {yaml_path}"
+                f"ninerouter-face-vf50 must have exactly 7 component skeletons (authoritative VinFast VF-50 architecture), but found {len(label_names)} in {yaml_path}"
             )
 
     elif "ninerouter-vision-31" in str(yaml_path) or fn_name == "ninerouter-vision-31":

@@ -56,6 +56,24 @@ POSE17_PAIRED_KEYPOINTS: Tuple[Tuple[str, str], ...] = (
     ("left_ankle", "right_ankle"),
 )
 
+# Rigid axial/head anchors that determine overall body laterality
+# Inversion of rigid anchors for a frontal subject indicates genuine laterality error.
+POSE17_RIGID_PAIRED_KEYPOINTS: Tuple[Tuple[str, str], ...] = (
+    ("left_eye", "right_eye"),
+    ("left_ear", "right_ear"),
+    ("left_shoulder", "right_shoulder"),
+    ("left_hip", "right_hip"),
+)
+
+# Articulated appendicular limb pairs that articulate in 3D and cross naturally (arms/legs crossing)
+# Crossing of distal limbs is an anatomical soft warning, NOT a fatal invalidation.
+POSE17_ARTICULATED_PAIRED_KEYPOINTS: Tuple[Tuple[str, str], ...] = (
+    ("left_elbow", "right_elbow"),
+    ("left_wrist", "right_wrist"),
+    ("left_knee", "right_knee"),
+    ("left_ankle", "right_ankle"),
+)
+
 # VinFast Guideline (output_pose17_guideline.txt) 1..17 index to canonical name mapping
 VINFAST_POSE17_INDEX_TO_NAME: Dict[int, str] = {
     1: "nose",
@@ -158,6 +176,8 @@ class QualityReport:
     suspect_labels: List[str] = field(default_factory=list)
     item_count: int = 0
     suspect_count: int = 0
+    hard_errors: List[str] = field(default_factory=list)
+    soft_warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -172,6 +192,8 @@ class Pose17QualityReport:
     suspect_bones: List[str] = field(default_factory=list)
     laterality_status: str = "ok"
     axis_swap_detected: bool = False
+    hard_errors: List[str] = field(default_factory=list)
+    soft_warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -186,6 +208,8 @@ class VF50QualityReport:
     suspect_components: List[str] = field(default_factory=list)
     laterality_status: str = "ok"
     axis_swap_detected: bool = False
+    hard_errors: List[str] = field(default_factory=list)
+    soft_warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -196,6 +220,9 @@ class LateralityVerificationResult:
     expected_convention: str
     reasons: List[str] = field(default_factory=list)
     delta_x: float = 0.0
+    hard_errors: List[str] = field(default_factory=list)
+    soft_warnings: List[str] = field(default_factory=list)
+    crossed_limbs: List[str] = field(default_factory=list)
 
 
 # ==============================================================================
@@ -380,7 +407,28 @@ def _extract_pose17_points(
 
     if isinstance(item, dict):
         elements = item.get("elements") or item.get("keypoints") or item.get("points")
-        if isinstance(elements, list):
+        if isinstance(elements, dict):
+            for k, v in elements.items():
+                name = _normalize_pose_name(k)
+                if hasattr(v, "x") and hasattr(v, "y"):
+                    res[name] = (
+                        float(v.x),
+                        float(v.y),
+                        int(getattr(v, "visibility", 2)),
+                        float(getattr(v, "confidence", 1.0)),
+                    )
+                elif isinstance(v, (list, tuple)) and len(v) >= 2:
+                    vis = int(v[2]) if len(v) > 2 else 2
+                    conf = float(v[3]) if len(v) > 3 else 1.0
+                    res[name] = (float(v[0]), float(v[1]), vis, conf)
+                elif isinstance(v, dict):
+                    pt = v.get("point") or [v.get("x", 0.0), v.get("y", 0.0)]
+                    vis = int(v.get("visibility", 2))
+                    conf = float(v.get("confidence", 1.0))
+                    res[name] = (float(pt[0]), float(pt[1]), vis, conf)
+            if res:
+                return res
+        elif isinstance(elements, list):
             for el in elements:
                 if isinstance(el, dict):
                     name = _normalize_pose_name(el.get("label") or el.get("name"))
@@ -433,6 +481,9 @@ def _extract_vf50_points(
 ) -> Dict[int, Tuple[float, float, int, float]]:
     """Extract canonical VF-50 points mapping: point_id (0..49) -> (x, y, visibility, confidence)."""
     res: Dict[int, Tuple[float, float, int, float]] = {}
+
+    if hasattr(item, "landmarks"):
+        item = getattr(item, "landmarks")
 
     if isinstance(item, list):
         # Could be list of 7 skeletons, list of elements, or direct list of 50 tuples
@@ -497,7 +548,11 @@ def _extract_vf50_points(
             except ValueError:
                 continue
             if 0 <= p_id < VF50_EXPECTED_TOTAL_POINTS:
-                if isinstance(v, (list, tuple)) and len(v) >= 2:
+                if hasattr(v, "x") and hasattr(v, "y"):
+                    vis = int(getattr(v, "visibility", 2))
+                    conf = float(getattr(v, "confidence", 1.0))
+                    res[p_id] = (float(v.x), float(v.y), vis, conf)
+                elif isinstance(v, (list, tuple)) and len(v) >= 2:
                     vis = int(v[2]) if len(v) > 2 else 2
                     conf = float(v[3]) if len(v) > 3 else 1.0
                     res[p_id] = (float(v[0]), float(v[1]), vis, conf)
@@ -549,8 +604,17 @@ def detect_coordinate_axis_swap(
         shoulder_dx = abs(ls[0] - rs[0])
         shoulder_dy = abs(ls[1] - rs[1])
 
-        # If torso is horizontal and shoulders are vertical, axes are swapped
+        # If torso is horizontal and shoulders are vertical, check secondary anchors
         if torso_dx > 1.35 * torso_dy and shoulder_dy > 1.35 * shoulder_dx:
+            # Check secondary head/eye anchor to avoid false positives on reclining/lying drivers
+            le = pts.get("left_eye")
+            re = pts.get("right_eye")
+            if le and re and le[2] > 0 and re[2] > 0:
+                eye_dx = abs(le[0] - re[0])
+                eye_dy = abs(le[1] - re[1])
+                # If eyes are horizontal, the head is horizontal - this is a person reclining/lying down!
+                if eye_dx > 1.25 * eye_dy:
+                    return False, "reclining_or_lying_pose: eyes remain horizontal"
             return True, "coordinate_axis_swap_detected: torso is horizontal while shoulder line is vertical"
         return False, "pose_axes_normal"
 
@@ -638,33 +702,59 @@ def verify_laterality_convention(
                 is_frontal = True
 
         reasons: List[str] = []
+        hard_errors: List[str] = []
+        soft_warnings: List[str] = []
+        crossed_limbs: List[str] = []
         is_valid = True
         if target_conv == LATERALITY_SUBJECT:
             if is_frontal and delta_x < 0:
                 is_valid = False
-                reasons.append("laterality_inversion: left_shoulder has smaller x than right_shoulder for frontal subject")
+                msg = "laterality_inversion: left_shoulder has smaller x than right_shoulder for frontal subject"
+                reasons.append(msg)
+                hard_errors.append(msg)
         elif target_conv == LATERALITY_VIEWER:
             if delta_x > 0:
                 is_valid = False
-                reasons.append("laterality_inversion: viewer left has larger x than viewer right")
+                msg = "laterality_inversion: viewer left has larger x than viewer right"
+                reasons.append(msg)
+                hard_errors.append(msg)
 
-        # Verify symmetric left/right pairs
-        pair_inversions: List[str] = []
-        for left_k, right_k in POSE17_PAIRED_KEYPOINTS:
+        # 1. Verify rigid axial/head pairs (eyes, ears, shoulders, hips)
+        rigid_inversions: List[str] = []
+        for left_k, right_k in POSE17_RIGID_PAIRED_KEYPOINTS:
             lp = pts.get(left_k)
             rp = pts.get(right_k)
             if lp and rp and lp[2] > 0 and rp[2] > 0:
                 if target_conv == LATERALITY_VIEWER:
                     # In viewer convention, left_k (odd) must have smaller x than right_k (even)
                     if lp[0] > rp[0] + 5.0:
-                        pair_inversions.append(f"{left_k} ({lp[0]:.1f}) > {right_k} ({rp[0]:.1f})")
+                        rigid_inversions.append(f"{left_k} ({lp[0]:.1f}) > {right_k} ({rp[0]:.1f})")
                 elif target_conv == LATERALITY_SUBJECT and is_frontal:
                     # In subject convention for frontal, left_k must have larger x than right_k
                     if lp[0] < rp[0] - 5.0:
-                        pair_inversions.append(f"{left_k} ({lp[0]:.1f}) < {right_k} ({rp[0]:.1f})")
-        if pair_inversions:
+                        rigid_inversions.append(f"{left_k} ({lp[0]:.1f}) < {right_k} ({rp[0]:.1f})")
+        if rigid_inversions:
             is_valid = False
-            reasons.append(f"paired_laterality_inversions: {pair_inversions}")
+            reasons.append(f"paired_laterality_inversions: {rigid_inversions}")
+            hard_errors.append(f"paired_laterality_inversions: {rigid_inversions}")
+
+        # 2. Verify articulated limb pairs (elbows, wrists, knees, ankles) - crossing arms or legs
+        # Natural human kinesiology allows limbs to cross; these are soft warnings, NOT hard failures!
+        articulated_crossings: List[str] = []
+        for left_k, right_k in POSE17_ARTICULATED_PAIRED_KEYPOINTS:
+            lp = pts.get(left_k)
+            rp = pts.get(right_k)
+            if lp and rp and lp[2] > 0 and rp[2] > 0:
+                if target_conv == LATERALITY_VIEWER:
+                    if lp[0] > rp[0] + 5.0:
+                        articulated_crossings.append(f"{left_k} ({lp[0]:.1f}) > {right_k} ({rp[0]:.1f})")
+                elif target_conv == LATERALITY_SUBJECT and is_frontal:
+                    if lp[0] < rp[0] - 5.0:
+                        articulated_crossings.append(f"{left_k} ({lp[0]:.1f}) < {right_k} ({rp[0]:.1f})")
+        if articulated_crossings:
+            crossed_limbs.extend(articulated_crossings)
+            soft_warnings.append(f"crossed_limbs_detected: {articulated_crossings}")
+            reasons.append(f"crossed_limbs_detected: {articulated_crossings} (soft_warning)")
 
         return LateralityVerificationResult(
             is_valid=is_valid,
@@ -672,6 +762,9 @@ def verify_laterality_convention(
             expected_convention=target_conv,
             reasons=reasons,
             delta_x=round(delta_x, 2),
+            hard_errors=hard_errors,
+            soft_warnings=soft_warnings,
+            crossed_limbs=crossed_limbs,
         )
 
     elif "vf50" in schema_clean or "face" in schema_clean:
@@ -686,6 +779,7 @@ def verify_laterality_convention(
                 detected_convention="unknown",
                 expected_convention=target_conv,
                 reasons=["missing_eyes_for_face_laterality_check"],
+                hard_errors=["missing_eyes_for_face_laterality_check"],
             )
 
         c_left = sum(p[0] for p in left_eye_pts) / len(left_eye_pts)
@@ -696,15 +790,21 @@ def verify_laterality_convention(
         detected = "viewer" if delta_x > 0 else "subject"
 
         reasons: List[str] = []
+        hard_errors: List[str] = []
+        soft_warnings: List[str] = []
         is_valid = True
         if target_conv == LATERALITY_VIEWER:
             if delta_x < 0:
                 is_valid = False
-                reasons.append("laterality_inversion: mattrai has larger x than matphai (violates viewer convention)")
+                msg = "laterality_inversion: mattrai has larger x than matphai (violates viewer convention)"
+                reasons.append(msg)
+                hard_errors.append(msg)
         elif target_conv == LATERALITY_SUBJECT:
             if delta_x > 0:
                 is_valid = False
-                reasons.append("laterality_inversion: subject right eye has larger x than left eye")
+                msg = "laterality_inversion: subject right eye has larger x than left eye"
+                reasons.append(msg)
+                hard_errors.append(msg)
 
         # Check eyebrows (longmaytrai 0..4 vs longmayphai 5..9)
         left_eb_pts = [pts_map[i] for i in range(0, 5) if i in pts_map]
@@ -714,10 +814,14 @@ def verify_laterality_convention(
             c_right_eb = sum(p[0] for p in right_eb_pts) / len(right_eb_pts)
             if target_conv == LATERALITY_VIEWER and c_left_eb > c_right_eb:
                 is_valid = False
-                reasons.append(f"eyebrow_laterality_inversion: longmaytrai ({c_left_eb:.1f}) > longmayphai ({c_right_eb:.1f})")
+                msg = f"eyebrow_laterality_inversion: longmaytrai ({c_left_eb:.1f}) > longmayphai ({c_right_eb:.1f})"
+                reasons.append(msg)
+                hard_errors.append(msg)
             elif target_conv == LATERALITY_SUBJECT and c_left_eb < c_right_eb:
                 is_valid = False
-                reasons.append(f"eyebrow_laterality_inversion: subject right eyebrow ({c_right_eb:.1f}) > left eyebrow ({c_left_eb:.1f})")
+                msg = f"eyebrow_laterality_inversion: subject right eyebrow ({c_right_eb:.1f}) > left eyebrow ({c_left_eb:.1f})"
+                reasons.append(msg)
+                hard_errors.append(msg)
 
         return LateralityVerificationResult(
             is_valid=is_valid,
@@ -725,6 +829,9 @@ def verify_laterality_convention(
             expected_convention=target_conv,
             reasons=reasons,
             delta_x=round(delta_x, 2),
+            hard_errors=hard_errors,
+            soft_warnings=soft_warnings,
+            crossed_limbs=[],
         )
 
     return LateralityVerificationResult(
@@ -833,13 +940,15 @@ def assess_pose17_quality(
     1. 17 exact expected keypoint names.
     2. No duplicate or coincident points.
     3. All coordinates within image bounds [0, 1000].
-    4. Coordinate axis swap detection (x vs y).
-    5. Shoulder / Hip vertical ordering (shoulders above hips in upright poses).
-    6. Left/Right pair sanity and laterality correctness.
-    7. Non-zero skeleton area and limb length ratio sanity.
+    4. Coordinate axis swap detection (x vs y) with head-orientation verification.
+    5. Shoulder / Hip vertical ordering with forward-lean / recline tolerance.
+    6. Left/Right rigid laterality vs. soft articulated crossing (crossed arms/legs).
+    7. Adaptive torso-scale proportion check and 0-span degenerate collapse detection.
     """
     pts = _extract_pose17_points(data)
     reasons: List[str] = []
+    hard_errors: List[str] = []
+    soft_warnings: List[str] = []
     suspect_bones: List[str] = []
     score = 1.0
 
@@ -851,9 +960,11 @@ def assess_pose17_quality(
     if missing:
         score -= 0.15 * (len(missing) / 17.0)
         reasons.append(f"missing_keypoints: {sorted(missing)}")
+        soft_warnings.append(f"missing_keypoints: {len(missing)}")
     if extra:
         score -= 0.10
         reasons.append(f"unexpected_keypoints: {sorted(extra)}")
+        soft_warnings.append(f"unexpected_keypoints: {len(extra)}")
 
     # Filter active and visible points
     active_kps = {k: v for k, v in pts.items() if v[2] > 0 and v[3] >= min_confidence}
@@ -862,7 +973,9 @@ def assess_pose17_quality(
     visible_count = len(visible_kps)
 
     if active_count < min_visible_keypoints:
-        reasons.append(f"too_few_active_keypoints: {active_count} < {min_visible_keypoints}")
+        msg = f"too_few_active_keypoints: {active_count} < {min_visible_keypoints}"
+        reasons.append(msg)
+        hard_errors.append(msg)
         return Pose17QualityReport(
             score=0.0,
             is_valid=False,
@@ -870,36 +983,68 @@ def assess_pose17_quality(
             reasons=reasons,
             visible_count=visible_count,
             active_count=active_count,
+            hard_errors=hard_errors,
+            soft_warnings=soft_warnings,
         )
 
-    # 2. Coordinate bounds check [0, 1000]
+    # 2. Coordinate bounds check [0, 1000] & NaN/Inf detection
     out_of_bounds: List[str] = []
+    severe_oob: List[str] = []
+    has_nan_or_inf = False
     for name, (x, y, vis, conf) in active_kps.items():
-        if not (0.0 <= x <= 1000.0 and 0.0 <= y <= 1000.0):
+        if math.isnan(x) or math.isnan(y) or math.isinf(x) or math.isinf(y):
+            has_nan_or_inf = True
+            severe_oob.append(f"{name}:(nan/inf)")
+        elif not (0.0 <= x <= 1000.0 and 0.0 <= y <= 1000.0):
             out_of_bounds.append(f"{name}:({x:.1f},{y:.1f})")
-    if out_of_bounds:
+            if x < -50.0 or x > 1050.0 or y < -50.0 or y > 1050.0:
+                severe_oob.append(f"{name}:({x:.1f},{y:.1f})")
+
+    if has_nan_or_inf:
+        msg = f"severe_out_of_bounds: NaN or Inf coordinates in {severe_oob}"
+        reasons.append(msg)
+        hard_errors.append(msg)
+        return Pose17QualityReport(
+            score=0.0,
+            is_valid=False,
+            needs_refine=True,
+            reasons=reasons,
+            visible_count=visible_count,
+            active_count=active_count,
+            hard_errors=hard_errors,
+            soft_warnings=soft_warnings,
+        )
+
+    if severe_oob:
         score -= 0.35
+        hard_errors.append(f"severe_out_of_bounds: {severe_oob}")
+        reasons.append(f"coordinates_out_of_bounds: {out_of_bounds or severe_oob}")
+    elif out_of_bounds:
+        score -= 0.25
+        soft_warnings.append(f"coordinates_out_of_bounds: {out_of_bounds}")
         reasons.append(f"coordinates_out_of_bounds: {out_of_bounds}")
 
     # 3. Duplicate / coincident active points
     coord_seen: Dict[Tuple[int, int], str] = {}
     duplicates: List[str] = []
     for name, (x, y, vis, conf) in active_kps.items():
-        # Round to 1 decimal place to detect suspicious snapping
         key = (int(round(x)), int(round(y)))
         if key in coord_seen:
             duplicates.append(f"{name} co-located with {coord_seen[key]}")
         else:
             coord_seen[key] = name
     if duplicates:
-        score -= 0.25
+        score -= 0.20
+        soft_warnings.append(f"duplicate_coincident_joints: {duplicates}")
         reasons.append(f"duplicate_coincident_joints: {duplicates}")
 
     # Section 1.1 Item 2: Machine failure fallback cluster dumped at top-left [0..35, 0..35]
     corner_dump = [name for name, (x, y, vis, conf) in active_kps.items() if x <= 35.0 and y <= 35.0]
     if len(corner_dump) >= 2:
         score -= 0.35
-        reasons.append(f"corner_cluster_dump: keypoints clumped at top-left [0..35, 0..35]: {corner_dump}")
+        msg = f"corner_cluster_dump: keypoints clumped at top-left [0..35, 0..35]: {corner_dump}"
+        hard_errors.append(msg)
+        reasons.append(msg)
 
     # 4. Non-zero skeleton dimensions and collapse detection
     xs = [v[0] for v in active_kps.values()]
@@ -908,49 +1053,74 @@ def assess_pose17_quality(
     span_h = max(ys) - min(ys)
     bbox_diag = math.hypot(span_w, span_h)
 
-    if span_w < 3.0 or span_h < 3.0 or bbox_diag < 10.0:
+    if bbox_diag < 10.0:
         score -= 0.50
-        reasons.append(f"degenerate_skeleton_collapse: diagonal={bbox_diag:.1f} span=({span_w:.1f}x{span_h:.1f})")
+        msg = f"degenerate_skeleton_collapse: diagonal={bbox_diag:.1f} span=({span_w:.1f}x{span_h:.1f})"
+        hard_errors.append(msg)
+        reasons.append(msg)
+    elif span_w < 3.0 or span_h < 3.0:
+        score -= 0.15
+        soft_warnings.append(f"extreme_aspect_ratio_span: span=({span_w:.1f}x{span_h:.1f})")
+        reasons.append(f"extreme_aspect_ratio_span: span=({span_w:.1f}x{span_h:.1f})")
 
     # 5. Coordinate axis swap check
     axis_swapped, swap_reason = detect_coordinate_axis_swap(pts, schema_type="pose17")
     if axis_swapped:
         score -= 0.40
+        hard_errors.append(swap_reason)
         reasons.append(swap_reason)
 
-    # 6. Vertical orientation (Shoulders above hips in upright poses)
+    # 6. Vertical orientation (Shoulders above hips in upright poses, with forward-lean allowance)
     ls = pts.get("left_shoulder")
     rs = pts.get("right_shoulder")
     lh = pts.get("left_hip")
     rh = pts.get("right_hip")
     la = pts.get("left_ankle")
     ra = pts.get("right_ankle")
+    nose = pts.get("nose")
 
     if ls and rs and lh and rh:
         shoulder_y = (ls[1] + rs[1]) * 0.5
         hip_y = (lh[1] + rh[1]) * 0.5
-        # If ankles are below hips, person is upright; shoulders must be above hips
         ankles_y = None
         if la and ra and la[2] > 0 and ra[2] > 0:
             ankles_y = (la[1] + ra[1]) * 0.5
 
         if ankles_y is not None and ankles_y > hip_y:
-            if shoulder_y > hip_y + 40.0:  # 40 normalized px margin for extreme forward leans
-                score -= 0.35
-                reasons.append(f"inverted_vertical_orientation: shoulders (y={shoulder_y:.1f}) below hips (y={hip_y:.1f})")
+            if shoulder_y > hip_y + 40.0:  # 40 normalized px margin
+                # If nose is also below hips, person is bending forward (e.g. driver reaching to footwell)
+                if nose and nose[2] > 0 and nose[1] > hip_y:
+                    score -= 0.15
+                    soft_warnings.append(f"forward_lean_pose: shoulders (y={shoulder_y:.1f}) and nose (y={nose[1]:.1f}) below hips (y={hip_y:.1f})")
+                    reasons.append(f"forward_lean_pose: shoulders below hips during forward bend")
+                else:
+                    score -= 0.35
+                    soft_warnings.append(f"inverted_vertical_orientation: shoulders (y={shoulder_y:.1f}) below hips (y={hip_y:.1f})")
+                    reasons.append(f"inverted_vertical_orientation: shoulders (y={shoulder_y:.1f}) below hips (y={hip_y:.1f})")
 
-    # 7. Laterality verification
+    # 7. Laterality verification (Rigid anchors vs Articulated crossed limbs)
     lat_result = verify_laterality_convention(pts, schema_type="pose17", expected_convention=laterality_convention)
     if not lat_result.is_valid:
         score -= 0.30
+        hard_errors.extend(lat_result.hard_errors)
         reasons.extend(lat_result.reasons)
+    elif lat_result.soft_warnings:
+        score -= 0.08
+        soft_warnings.extend(lat_result.soft_warnings)
+        reasons.extend(lat_result.soft_warnings)
 
-    # 8. Limb length & proportion sanity
-    torso_scale: Optional[float] = None
+    # 8. Adaptive torso-scale limb length & proportion sanity (handles seated & profile poses)
+    torso_scales: List[float] = []
     if ls and rs and ls[2] > 0 and rs[2] > 0:
-        s_width = math.hypot(rs[0] - ls[0], rs[1] - ls[1])
-        if s_width > 5.0:
-            torso_scale = s_width
+        torso_scales.append(math.hypot(rs[0] - ls[0], rs[1] - ls[1]))
+    if lh and rh and lh[2] > 0 and rh[2] > 0:
+        torso_scales.append(math.hypot(rh[0] - lh[0], rh[1] - lh[1]))
+    if ls and lh and ls[2] > 0 and lh[2] > 0:
+        torso_scales.append(math.hypot(lh[0] - ls[0], lh[1] - ls[1]) * 0.6)
+    if rs and rh and rs[2] > 0 and rh[2] > 0:
+        torso_scales.append(math.hypot(rh[0] - rs[0], rh[1] - rs[1]) * 0.6)
+
+    torso_scale: Optional[float] = max(torso_scales) if torso_scales else None
 
     for u_name, v_name in POSE17_SKELETON_EDGES:
         u_pt = pts.get(u_name)
@@ -960,31 +1130,38 @@ def assess_pose17_quality(
         bone_len = math.hypot(v_pt[0] - u_pt[0], v_pt[1] - u_pt[1])
         bone_tag = f"{u_name}-{v_name}"
 
-        # Segment length exceeding 55% of image size (impossible for single limb segment)
+        # Segment length exceeding 55% of image size (implausible spatial jump)
         if bone_len > 550.0:
             score -= 0.25
             suspect_bones.append(bone_tag)
+            if bone_len > 720.0:
+                hard_errors.append(f"excessive_bone_length: {bone_tag} len={bone_len:.1f}")
+            else:
+                soft_warnings.append(f"excessive_bone_length: {bone_tag} len={bone_len:.1f}")
             reasons.append(f"excessive_bone_length: {bone_tag} len={bone_len:.1f}")
 
-        # Segment length exceeding 3.2x shoulder width
-        if torso_scale is not None and torso_scale > 15.0 and bone_len > 3.2 * torso_scale:
+        # Segment length exceeding 4.5x adaptive torso scale (relaxed for perspective & seated poses)
+        if torso_scale is not None and torso_scale > 15.0 and bone_len > 4.5 * torso_scale:
             score -= 0.20
             suspect_bones.append(bone_tag)
+            soft_warnings.append(f"disproportionate_bone: {bone_tag} ratio={bone_len / torso_scale:.2f}")
             reasons.append(f"disproportionate_bone: {bone_tag} ratio={bone_len / torso_scale:.2f}")
 
     score = max(0.0, min(1.0, score))
-    is_valid = score >= 0.40 and len(suspect_bones) < 3 and not axis_swapped
+    is_valid = len(hard_errors) == 0 and score >= 0.35 and not axis_swapped
 
     return Pose17QualityReport(
         score=round(score, 3),
         is_valid=is_valid,
-        needs_refine=(score < refine_score_threshold or bool(reasons)),
+        needs_refine=(score < refine_score_threshold or bool(hard_errors) or bool(soft_warnings) or bool(reasons)),
         reasons=reasons,
         visible_count=visible_count,
         active_count=active_count,
         suspect_bones=suspect_bones,
         laterality_status=lat_result.detected_convention,
         axis_swap_detected=axis_swapped,
+        hard_errors=hard_errors,
+        soft_warnings=soft_warnings,
     )
 
 
@@ -1002,10 +1179,10 @@ def assess_vf50_quality(
 
     Validation checks:
     1. Exact 50 points total, partitioned across 7 canonical components.
-    2. Coordinates in bounds [0, 1000].
-    3. Coordinate axis swap detection.
+    2. Coordinates in bounds [0, 1000] and NaN/Inf detection.
+    3. Coordinate axis swap detection with eye-line orientation check.
     4. Laterality (Viewer convention by VinFast guideline: mattrai on image left).
-    5. Eyebrows positioned above corresponding eyes.
+    5. Eyebrows positioned above corresponding eyes (with head roll compensation).
     6. Nose bridge (10..13) alignment and central positioning between eyes and mouth.
     7. Eyelid contour vs pupil/iris (eyelid boundaries, upper above lower, no figure-8 crossing).
     8. Outer lip vs inner lip topological constraints (inner lip enclosed inside outer lip).
@@ -1013,6 +1190,8 @@ def assess_vf50_quality(
     """
     pts_map = _extract_vf50_points(data)
     reasons: List[str] = []
+    hard_errors: List[str] = []
+    soft_warnings: List[str] = []
     suspect_components: List[str] = []
     score = 1.0
 
@@ -1026,25 +1205,62 @@ def assess_vf50_quality(
         if cnt < expected_cnt:
             score -= 0.12 * ((expected_cnt - cnt) / expected_cnt)
             suspect_components.append(comp_name)
-            reasons.append(f"incomplete_component_{comp_name}: {cnt}/{expected_cnt} points")
+            msg = f"incomplete_component_{comp_name}: {cnt}/{expected_cnt} points"
+            reasons.append(msg)
+            soft_warnings.append(msg)
 
     if total_pts < VF50_EXPECTED_TOTAL_POINTS:
         score -= 0.25 * ((VF50_EXPECTED_TOTAL_POINTS - total_pts) / 50.0)
-        reasons.append(f"invalid_total_points: {total_pts}/{VF50_EXPECTED_TOTAL_POINTS}")
+        msg = f"invalid_total_points: {total_pts}/{VF50_EXPECTED_TOTAL_POINTS}"
+        reasons.append(msg)
+        if total_pts < 35:
+            hard_errors.append(msg)
+        else:
+            soft_warnings.append(msg)
 
-    # 2. Coordinates within image bounds [0, 1000]
+    # 2. Coordinates within image bounds [0, 1000] & NaN/Inf detection
     out_of_bounds: List[int] = []
+    severe_oob: List[int] = []
+    has_nan_or_inf = False
     for p_id, (x, y, vis, conf) in pts_map.items():
-        if not (0.0 <= x <= 1000.0 and 0.0 <= y <= 1000.0):
+        if math.isnan(x) or math.isnan(y) or math.isinf(x) or math.isinf(y):
+            has_nan_or_inf = True
+            severe_oob.append(p_id)
+        elif not (0.0 <= x <= 1000.0 and 0.0 <= y <= 1000.0):
             out_of_bounds.append(p_id)
-    if out_of_bounds:
+            if x < -50.0 or x > 1050.0 or y < -50.0 or y > 1050.0:
+                severe_oob.append(p_id)
+
+    if has_nan_or_inf:
+        msg = f"severe_out_of_bounds: NaN or Inf coordinates in IDs {severe_oob[:10]}"
+        reasons.append(msg)
+        hard_errors.append(msg)
+        return VF50QualityReport(
+            score=0.0,
+            is_valid=False,
+            needs_refine=True,
+            reasons=reasons,
+            point_count=total_pts,
+            component_counts=component_counts,
+            suspect_components=list(set(suspect_components)),
+            hard_errors=hard_errors,
+            soft_warnings=soft_warnings,
+        )
+
+    if severe_oob:
         score -= 0.35
+        hard_errors.append(f"severe_out_of_bounds: IDs {severe_oob[:10]}")
+        reasons.append(f"landmarks_out_of_bounds: IDs {(out_of_bounds or severe_oob)[:10]}")
+    elif out_of_bounds:
+        score -= 0.25
+        soft_warnings.append(f"landmarks_out_of_bounds: IDs {out_of_bounds[:10]}")
         reasons.append(f"landmarks_out_of_bounds: IDs {out_of_bounds[:10]}")
 
     # 3. Coordinate axis swap check
     axis_swapped, swap_reason = detect_coordinate_axis_swap(pts_map, schema_type="vf50")
     if axis_swapped:
         score -= 0.45
+        hard_errors.append(swap_reason)
         reasons.append(swap_reason)
 
     # 4. Laterality verification (Viewer convention: mattrai is on screen left)
@@ -1052,7 +1268,12 @@ def assess_vf50_quality(
     if not lat_result.is_valid:
         score -= 0.35
         suspect_components.extend(["mattrai", "matphai"])
+        hard_errors.extend(lat_result.hard_errors)
         reasons.extend(lat_result.reasons)
+    elif lat_result.soft_warnings:
+        score -= 0.08
+        soft_warnings.extend(lat_result.soft_warnings)
+        reasons.extend(lat_result.soft_warnings)
 
     # Calculate face roll angle and inter-ocular distance (IOD)
     left_eye_pts = [pts_map[i] for i in range(14, 22) if i in pts_map]
@@ -1097,7 +1318,9 @@ def assess_vf50_quality(
         if y_eb_left > y_eye_left - 3.0:
             score -= 0.20
             suspect_components.append("longmaytrai")
-            reasons.append(f"eyebrow_below_eye: longmaytrai (y={y_eb_left:.1f}) below or touching mattrai (y={y_eye_left:.1f})")
+            msg = f"eyebrow_below_eye: longmaytrai (y={y_eb_left:.1f}) below or touching mattrai (y={y_eye_left:.1f})"
+            soft_warnings.append(msg)
+            reasons.append(msg)
 
     if right_eb_pts and right_eye_pts:
         y_eb_right = sum(to_face_frame(p)[1] for p in right_eb_pts) / len(right_eb_pts)
@@ -1105,7 +1328,9 @@ def assess_vf50_quality(
         if y_eb_right > y_eye_right - 3.0:
             score -= 0.20
             suspect_components.append("longmayphai")
-            reasons.append(f"eyebrow_below_eye: longmayphai (y={y_eb_right:.1f}) below or touching matphai (y={y_eye_right:.1f})")
+            msg = f"eyebrow_below_eye: longmayphai (y={y_eb_right:.1f}) below or touching matphai (y={y_eye_right:.1f})"
+            soft_warnings.append(msg)
+            reasons.append(msg)
 
     # 6. Eyelid contour vs pupil/iris & opposing eyelid checks
     # Upper eyelid points must be higher (or equal) to opposing lower eyelid points
@@ -1118,22 +1343,28 @@ def assess_vf50_quality(
                 score -= 0.15
                 comp = "mattrai" if upper_id < 22 else "matphai"
                 suspect_components.append(comp)
-                reasons.append(f"inverted_eyelid: upper pt {upper_id} below lower pt {lower_id}")
+                msg = f"inverted_eyelid: upper pt {upper_id} below lower pt {lower_id}"
+                soft_warnings.append(msg)
+                reasons.append(msg)
 
-    # Check for self-intersecting eye loops (figure-8 / X-shape)
+    # Check for self-intersecting eye loops (figure-8 / X-shape) - Hard error
     if len(left_eye_pts) == 8:
         poly_left_eye = [(pts_map[i][0], pts_map[i][1]) for i in range(14, 22)]
         if _self_intersects(poly_left_eye, closed=True):
             score -= 0.25
             suspect_components.append("mattrai")
-            reasons.append("self_intersecting_eye_contour: mattrai forms figure-8")
+            msg = "self_intersecting_eye_contour: mattrai forms figure-8"
+            hard_errors.append(msg)
+            reasons.append(msg)
 
     if len(right_eye_pts) == 8:
         poly_right_eye = [(pts_map[i][0], pts_map[i][1]) for i in range(22, 30)]
         if _self_intersects(poly_right_eye, closed=True):
             score -= 0.25
             suspect_components.append("matphai")
-            reasons.append("self_intersecting_eye_contour: matphai forms figure-8")
+            msg = "self_intersecting_eye_contour: matphai forms figure-8"
+            hard_errors.append(msg)
+            reasons.append(msg)
 
     # 7. Nose alignment & position between eyes and mouth
     nose_pts = [pts_map[i] for i in range(10, 14) if i in pts_map]
@@ -1143,7 +1374,9 @@ def assess_vf50_quality(
         if not (y_nose_rot[0] <= y_nose_rot[1] + 3.0 <= y_nose_rot[2] + 6.0 <= y_nose_rot[3] + 9.0):
             score -= 0.15
             suspect_components.append("songmui")
-            reasons.append("disordered_nose_bridge: points 10..13 not monotonic down bridge")
+            msg = "disordered_nose_bridge: points 10..13 not monotonic down bridge"
+            soft_warnings.append(msg)
+            reasons.append(msg)
 
     mouth_outer_pts = [pts_map[i] for i in range(30, 42) if i in pts_map]
     if 13 in pts_map and left_eye_pts and right_eye_pts and mouth_outer_pts:
@@ -1154,7 +1387,9 @@ def assess_vf50_quality(
         if not (y_eyes < y_nose_base < y_mouth_top):
             score -= 0.25
             suspect_components.append("songmui")
-            reasons.append(f"nose_vertical_position_invalid: base y={y_nose_base:.1f} not between eyes ({y_eyes:.1f}) and mouth ({y_mouth_top:.1f})")
+            msg = f"nose_vertical_position_invalid: base y={y_nose_base:.1f} not between eyes ({y_eyes:.1f}) and mouth ({y_mouth_top:.1f})"
+            soft_warnings.append(msg)
+            reasons.append(msg)
 
     # 8. Outer lip vs Inner lip topological constraints
     mouth_inner_pts = [pts_map[i] for i in range(42, 50) if i in pts_map]
@@ -1165,11 +1400,13 @@ def assess_vf50_quality(
         area_outer = _polygon_area(poly_outer)
         area_inner = _polygon_area(poly_inner)
 
-        # Topological constraint: inner lip area cannot exceed outer lip area
+        # Topological constraint: inner lip area cannot exceed outer lip area (Hard Error)
         if area_inner > area_outer + 5.0:
             score -= 0.35
             suspect_components.append("moitrong")
-            reasons.append(f"inner_lip_larger_than_outer: inner={area_inner:.1f} > outer={area_outer:.1f}")
+            msg = f"inner_lip_larger_than_outer: inner={area_inner:.1f} > outer={area_outer:.1f}"
+            hard_errors.append(msg)
+            reasons.append(msg)
 
         # Horizontal nesting constraint: inner corners inside outer corners
         x_outer_left = pts_map[30][0]
@@ -1180,30 +1417,38 @@ def assess_vf50_quality(
         if x_inner_left < x_outer_left - 4.0 or x_inner_right > x_outer_right + 4.0:
             score -= 0.25
             suspect_components.append("moitrong")
-            reasons.append(f"inner_lip_protrudes_horizontally: inner=[{x_inner_left:.1f},{x_inner_right:.1f}] outer=[{x_outer_left:.1f},{x_outer_right:.1f}]")
+            msg = f"inner_lip_protrudes_horizontally: inner=[{x_inner_left:.1f},{x_inner_right:.1f}] outer=[{x_outer_left:.1f},{x_outer_right:.1f}]"
+            soft_warnings.append(msg)
+            reasons.append(msg)
 
         if _self_intersects(poly_outer, closed=True):
             score -= 0.20
             suspect_components.append("moingoai")
-            reasons.append("self_intersecting_lip_contour: moingoai self-intersects")
+            msg = "self_intersecting_lip_contour: moingoai self-intersects"
+            soft_warnings.append(msg)
+            reasons.append(msg)
         if _self_intersects(poly_inner, closed=True):
             score -= 0.20
             suspect_components.append("moitrong")
-            reasons.append("self_intersecting_lip_contour: moitrong self-intersects")
+            msg = "self_intersecting_lip_contour: moitrong self-intersects"
+            soft_warnings.append(msg)
+            reasons.append(msg)
 
     score = max(0.0, min(1.0, score))
-    is_valid = score >= 0.40 and not axis_swapped and len(suspect_components) < 4
+    is_valid = len(hard_errors) == 0 and score >= 0.35 and not axis_swapped
 
     return VF50QualityReport(
         score=round(score, 3),
         is_valid=is_valid,
-        needs_refine=(score < refine_score_threshold or bool(reasons)),
+        needs_refine=(score < refine_score_threshold or bool(hard_errors) or bool(soft_warnings) or bool(reasons)),
         reasons=reasons,
         point_count=total_pts,
         component_counts=component_counts,
         suspect_components=list(set(suspect_components)),
         laterality_status=lat_result.detected_convention,
         axis_swap_detected=axis_swapped,
+        hard_errors=hard_errors,
+        soft_warnings=soft_warnings,
     )
 
 
@@ -1233,24 +1478,31 @@ def assess_quality(
                 suspect_labels=[],
                 item_count=0,
                 suspect_count=1,
+                hard_errors=["empty_pose_detection"],
             )
         conv = laterality_convention or LATERALITY_SUBJECT
         sub_reports = [assess_pose17_quality(it, laterality_convention=conv, refine_score_threshold=refine_score_threshold) for it in items]
         avg_score = sum(r.score for r in sub_reports) / max(1, len(sub_reports))
         reasons: List[str] = []
         suspects: List[str] = []
+        hard_errors: List[str] = []
+        soft_warnings: List[str] = []
         for idx, r in enumerate(sub_reports, start=1):
+            hard_errors.extend(f"person_{idx}:{e}" for e in r.hard_errors)
+            soft_warnings.extend(f"person_{idx}:{w}" for w in r.soft_warnings)
             if not r.is_valid or r.needs_refine:
                 label_id = f"person_{idx}"
                 suspects.append(label_id)
                 reasons.extend(f"{label_id}:{reason}" for reason in r.reasons)
         return QualityReport(
             score=round(avg_score, 3),
-            needs_refine=(bool(suspects) or avg_score < refine_score_threshold),
+            needs_refine=(bool(suspects) or avg_score < refine_score_threshold or bool(hard_errors) or bool(soft_warnings)),
             reasons=reasons,
             suspect_labels=suspects,
             item_count=len(items),
             suspect_count=len(suspects),
+            hard_errors=hard_errors,
+            soft_warnings=soft_warnings,
         )
 
     # Dispatch to Face Landmark VF-50 quality gate
@@ -1263,12 +1515,15 @@ def assess_quality(
                 suspect_labels=[],
                 item_count=0,
                 suspect_count=1,
+                hard_errors=["empty_face_detection"],
             )
         conv = laterality_convention or LATERALITY_VIEWER
         face_payload = items if len(items) > 1 else items[0]
         vf_report = assess_vf50_quality(face_payload, laterality_convention=conv, refine_score_threshold=refine_score_threshold)
         reasons = [f"face:{r}" for r in vf_report.reasons]
         suspects = [f"face_{c}" for c in vf_report.suspect_components]
+        hard_errors = [f"face:{e}" for e in vf_report.hard_errors]
+        soft_warnings = [f"face:{w}" for w in vf_report.soft_warnings]
         return QualityReport(
             score=vf_report.score,
             needs_refine=vf_report.needs_refine,
@@ -1276,6 +1531,8 @@ def assess_quality(
             suspect_labels=suspects,
             item_count=len(items),
             suspect_count=len(suspects),
+            hard_errors=hard_errors,
+            soft_warnings=soft_warnings,
         )
 
     # Standard 31-label policies (rectangle_mask, polygon_mask, polyline)
@@ -1287,19 +1544,27 @@ def assess_quality(
             suspect_labels=[],
             item_count=0,
             suspect_count=1,
+            hard_errors=["empty_detection"],
         )
 
     scores: List[float] = []
     reasons_list: List[str] = []
     suspects_list: List[str] = []
+    hard_errors_list: List[str] = []
+    soft_warnings_list: List[str] = []
 
     for item in items:
         score = 1.0
         item_reasons: List[str] = []
+        item_hard_errors: List[str] = []
+        item_soft_warnings: List[str] = []
+        lbl = str(getattr(item, "label", "unknown"))
+
         confidence = getattr(item, "confidence", None)
         if confidence is not None and float(confidence) < min_confidence:
             score -= 0.18
             item_reasons.append("low_confidence")
+            item_soft_warnings.append("low_confidence")
 
         if mode in ("rectangle_mask", "box_mask"):
             box = getattr(item, "box_2d", None)
@@ -1307,6 +1572,7 @@ def assess_quality(
             if not box or not mask or len(mask) < 3:
                 score = 0.0
                 item_reasons.append("missing_box_or_mask")
+                item_hard_errors.append("missing_box_or_mask")
             else:
                 ymin, xmin, ymax, xmax = map(float, box)
                 box_xyxy = (xmin, ymin, xmax, ymax)
@@ -1316,22 +1582,27 @@ def assess_quality(
                 if len(mask) < 6:
                     score -= 0.18
                     item_reasons.append("coarse_mask")
+                    item_soft_warnings.append("coarse_mask")
                 if mask_bbox is not None and _bbox_iou_xyxy(box_xyxy, mask_bbox) < 0.62:
                     score -= 0.30
                     item_reasons.append("mask_box_mismatch")
+                    item_soft_warnings.append("mask_box_mismatch")
                 fill_ratio = mask_area / box_area
-                if fill_ratio < 0.18 or fill_ratio > 1.20:
+                if fill_ratio < 0.15 or fill_ratio > 1.25:
                     score -= 0.30
                     item_reasons.append("implausible_mask_fill")
+                    item_soft_warnings.append("implausible_mask_fill")
                 if _self_intersects(mask, closed=True):
                     score -= 0.30
                     item_reasons.append("self_intersecting_mask")
+                    item_hard_errors.append("self_intersecting_mask")
 
         elif mode == "polygon_mask":
             poly = getattr(item, "region_polygon", None) or getattr(item, "mask", None)
             if not poly or len(poly) < 3:
                 score = 0.0
                 item_reasons.append("missing_polygon")
+                item_hard_errors.append("missing_polygon")
             else:
                 area = _polygon_area(poly)
                 bbox = _bbox_from_points(poly)
@@ -1341,28 +1612,35 @@ def assess_quality(
                 if area < 150.0:
                     score -= 0.28
                     item_reasons.append("tiny_region")
+                    item_soft_warnings.append("tiny_region")
                 if len(poly) < 7:
                     score -= 0.22
                     item_reasons.append("coarse_polygon")
+                    item_soft_warnings.append("coarse_polygon")
                 if bbox_area >= 180_000.0 and len(poly) < 16:
                     score -= 0.30
                     item_reasons.append("large_region_too_coarse")
+                    item_soft_warnings.append("large_region_too_coarse")
                 if _self_intersects(poly, closed=True):
                     score -= 0.35
                     item_reasons.append("self_intersecting_polygon")
+                    item_hard_errors.append("self_intersecting_polygon")
 
         elif mode == "polyline":
             line = getattr(item, "lane_polyline", None) or getattr(item, "mask", None)
             if not line or len(line) < 2:
                 score = 0.0
                 item_reasons.append("missing_polyline")
+                item_hard_errors.append("missing_polyline")
             else:
                 if len(line) < 3:
                     score -= 0.18
                     item_reasons.append("undersampled_polyline")
+                    item_soft_warnings.append("undersampled_polyline")
                 if _line_path_ratio(line) > 3.2:
                     score -= 0.32
                     item_reasons.append("zigzag_polyline")
+                    item_soft_warnings.append("zigzag_polyline")
                 max_seg = max(
                     (
                         math.hypot(float(b[0]) - float(a[0]), float(b[1]) - float(a[1]))
@@ -1373,21 +1651,26 @@ def assess_quality(
                 if max_seg > 700.0:
                     score -= 0.20
                     item_reasons.append("oversized_line_jump")
+                    item_soft_warnings.append("oversized_line_jump")
 
         score = max(0.0, min(1.0, score))
         scores.append(score)
-        if score < refine_score_threshold:
-            suspects_list.append(str(getattr(item, "label", "unknown")))
-            reasons_list.extend(f"{getattr(item, 'label', 'unknown')}:{r}" for r in item_reasons)
+        hard_errors_list.extend(f"{lbl}:{e}" for e in item_hard_errors)
+        soft_warnings_list.extend(f"{lbl}:{w}" for w in item_soft_warnings)
+        if score < refine_score_threshold or item_hard_errors:
+            suspects_list.append(lbl)
+            reasons_list.extend(f"{lbl}:{r}" for r in item_reasons)
 
     aggregate = sum(scores) / max(1, len(scores))
     return QualityReport(
         score=round(aggregate, 3),
-        needs_refine=(bool(suspects_list) or aggregate < refine_score_threshold),
+        needs_refine=(bool(suspects_list) or aggregate < refine_score_threshold or bool(hard_errors_list)),
         reasons=reasons_list,
         suspect_labels=suspects_list,
         item_count=len(items),
         suspect_count=len(suspects_list),
+        hard_errors=hard_errors_list,
+        soft_warnings=soft_warnings_list,
     )
 
 

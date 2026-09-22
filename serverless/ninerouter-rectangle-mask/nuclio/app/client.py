@@ -80,6 +80,26 @@ PREFERRED_POLYGON_MASK_MODELS: Tuple[str, ...] = (
     "ag/gemini-3.8-flash-high",
 )
 
+# Prioritized fast models for Human Pose 17 keypoint estimation
+PREFERRED_POSE17_MODELS: Tuple[str, ...] = (
+    "ag/gemini-3.8-flash-low",
+    "ag/gemini-3.8-flash",
+    "ag/gemini-3.7-flash-low",
+    "ag/gemini-3.8-flash-medium",
+    "ag/gemini-3.8-flash-high",
+    "ag/claude-sonnet-4-6",
+)
+
+# Prioritized fast models for VinFast VF-50 facial landmark estimation
+PREFERRED_VF50_MODELS: Tuple[str, ...] = (
+    "ag/gemini-3.8-flash-low",
+    "ag/gemini-3.8-flash",
+    "ag/gemini-3.7-flash-low",
+    "ag/gemini-3.8-flash-medium",
+    "ag/gemini-3.8-flash-high",
+    "ag/claude-sonnet-4-6",
+)
+
 # In-memory capability cache to prevent redundant API calls during runtime inference
 _SEGMENTATION_CAPABILITY_CACHE: Dict[str, bool] = {}
 
@@ -393,6 +413,63 @@ class NineRouterClient:
                 return pref
 
         return self.resolve_segmentation_model(preferred_model)
+
+    def resolve_pose17_model(self, preferred_model: Optional[str] = None) -> str:
+        """Resolve the fastest capable vision model for Human Pose 17 estimation.
+
+        Prioritizes fast flash-low models with low latency to keep
+        Pose17 inference comfortably under the 10-15 second SLA target.
+        """
+        available_ids = self.get_vision_model_ids()
+        if not available_ids:
+            raise NineRouterError(
+                f"No vision-capable models found in 9Router at {self.base_url}."
+            )
+
+        if preferred_model and preferred_model.strip():
+            target = preferred_model.strip()
+            if target in available_ids:
+                return target
+            available_str = ", ".join(available_ids)
+            raise NineRouterError(
+                f"Requested pose17 vision model '{target}' is not available in 9Router. "
+                f"Available vision models: {available_str}"
+            )
+
+        # Match against PREFERRED_POSE17_MODELS
+        for pref in PREFERRED_POSE17_MODELS:
+            if pref in available_ids:
+                return pref
+
+        return available_ids[0]
+
+    def resolve_vf50_model(self, preferred_model: Optional[str] = None) -> str:
+        """Resolve the fastest capable vision model for VinFast VF-50 face landmark estimation.
+
+        Prioritizes fast flash-low models to maintain the 15-20 second SLA target.
+        """
+        available_ids = self.get_vision_model_ids()
+        if not available_ids:
+            raise NineRouterError(
+                f"No vision-capable models found in 9Router at {self.base_url}."
+            )
+
+        if preferred_model and preferred_model.strip():
+            target = preferred_model.strip()
+            if target in available_ids:
+                return target
+            available_str = ", ".join(available_ids)
+            raise NineRouterError(
+                f"Requested vf50 vision model '{target}' is not available in 9Router. "
+                f"Available vision models: {available_str}"
+            )
+
+        # Match against PREFERRED_VF50_MODELS
+        for pref in PREFERRED_VF50_MODELS:
+            if pref in available_ids:
+                return pref
+
+        return available_ids[0]
 
     def probe_segmentation_capability(
         self,

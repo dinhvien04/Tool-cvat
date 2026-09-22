@@ -634,3 +634,116 @@ def test_cvat_missing_elements_outside_occluded_flags():
     assert songmui_elems["11"]["occluded"] is False
 
 
+# ==============================================================================
+# SOFT QUALITY GATES: RECLINING, FORWARD LEAN, CROSSED LIMBS, ADAPTIVE SCALE
+# ==============================================================================
+
+def test_pose17_reclining_pose_not_flagged_as_axis_swap():
+    """Reclining passenger with horizontal torso and vertical shoulders has horizontal eyes."""
+    pose = make_canonical_pose17()
+    # Reclining: Torso spans horizontally (dx >> dy)
+    pose["left_shoulder"] = (650.0, 380.0, 2, 0.95)
+    pose["right_shoulder"] = (650.0, 300.0, 2, 0.95)  # vertical shoulders
+    pose["left_hip"] = (350.0, 390.0, 2, 0.95)
+    pose["right_hip"] = (350.0, 310.0, 2, 0.95)       # horizontal torso: mid-shoulder x=650, mid-hip x=350 (dx=300, dy=10)
+    # Head & eyes remain horizontal (not rotated coordinates)
+    pose["left_eye"] = (720.0, 320.0, 2, 0.96)
+    pose["right_eye"] = (680.0, 320.0, 2, 0.96)
+
+    is_swapped, reason = detect_coordinate_axis_swap(pose, schema_type="pose17")
+    assert is_swapped is False
+    assert "reclining_or_lying_pose" in reason
+
+    report = assess_pose17_quality(pose)
+    assert report.axis_swap_detected is False
+
+
+def test_pose17_forward_lean_pose_soft_warning():
+    """Driver leaning forward to reach footwell/glovebox has shoulders and head below hips."""
+    pose = make_canonical_pose17()
+    # Hips at y=450, shoulders at y=560 (below hips), nose at y=580 (also below hips)
+    pose["left_hip"] = (545.0, 450.0, 2, 0.95)
+    pose["right_hip"] = (455.0, 450.0, 2, 0.95)
+    pose["left_shoulder"] = (570.0, 560.0, 2, 0.95)
+    pose["right_shoulder"] = (430.0, 560.0, 2, 0.95)
+    pose["nose"] = (500.0, 580.0, 2, 0.95)
+    # Ankles planted on floor at y=750
+    pose["left_ankle"] = (550.0, 750.0, 2, 0.9)
+    pose["right_ankle"] = (450.0, 750.0, 2, 0.9)
+
+    report = assess_pose17_quality(pose)
+    # Must remain valid (soft warning rather than dropping skeleton)
+    assert report.is_valid is True
+    assert report.needs_refine is True
+    assert any("forward_lean_pose" in w for w in report.soft_warnings)
+    assert not any("inverted_vertical_orientation" in e for e in report.hard_errors)
+
+
+def test_pose17_crossed_limbs_tolerated_as_soft_warning():
+    """Crossed arms (wrists crossed) and crossed legs (ankles crossed) do not fail laterality."""
+    pose = make_canonical_pose17()
+    # Canonical subject convention: left_wrist x=610 > right_wrist x=390
+    # Cross wrists: left_wrist reaches across to screen left (x=380), right_wrist to screen right (x=620)
+    pose["left_wrist"] = (380.0, 530.0, 2, 0.92)
+    pose["right_wrist"] = (620.0, 530.0, 2, 0.92)
+
+    # Cross ankles: left_ankle reaches to screen left (x=430), right_ankle to screen right (x=570)
+    pose["left_ankle"] = (430.0, 770.0, 2, 0.90)
+    pose["right_ankle"] = (570.0, 770.0, 2, 0.90)
+
+    # Rigid pairs (eyes, ears, shoulders, hips) remain uncrossed
+    lat_res = verify_laterality_convention(pose, schema_type="pose17", expected_convention=LATERALITY_SUBJECT)
+    assert lat_res.is_valid is True
+    assert any("left_wrist" in c for c in lat_res.crossed_limbs)
+    assert any("left_ankle" in c for c in lat_res.crossed_limbs)
+    assert any("crossed_limbs_detected" in w for w in lat_res.soft_warnings)
+
+    report = assess_pose17_quality(pose)
+    assert report.is_valid is True
+    assert report.needs_refine is True
+    assert any("crossed_limbs_detected" in w for w in report.soft_warnings)
+
+
+def test_pose17_seated_driver_horizontal_thighs_adaptive_torso_scale():
+    """Seated driver with foreshortened torso and horizontal thighs passes adaptive scale checks."""
+    pose = make_canonical_pose17()
+    # Driver seated: shoulders at y=350, hips at y=500, knees horizontal at y=510
+    pose["left_shoulder"] = (570.0, 350.0, 2, 0.95)
+    pose["right_shoulder"] = (430.0, 350.0, 2, 0.95)
+    pose["left_hip"] = (545.0, 500.0, 2, 0.95)
+    pose["right_hip"] = (455.0, 500.0, 2, 0.95)
+    pose["left_knee"] = (550.0, 510.0, 2, 0.92)   # horizontal thigh
+    pose["right_knee"] = (450.0, 510.0, 2, 0.92)  # horizontal thigh
+
+    report = assess_pose17_quality(pose)
+    assert report.is_valid is True
+    assert not any("disproportionate_bone" in r for r in report.reasons)
+
+
+def test_hard_errors_vs_soft_warnings_separation():
+    """Hard errors (NaN, collapse) invalidate skeletons; soft warnings (crossed limbs) allow refinement."""
+    # 1. Hard error: NaN coordinates
+    nan_pose = make_canonical_pose17()
+    nan_pose["nose"] = (float("nan"), 300.0, 2, 0.95)
+    nan_report = assess_pose17_quality(nan_pose)
+    assert nan_report.is_valid is False
+    assert len(nan_report.hard_errors) > 0
+
+    # 2. Hard error: Degenerate collapse (< 10px diagonal)
+    collapsed = {k: (500.0, 500.0, 2, 0.95) for k in POSE17_KEYPOINTS}
+    col_report = assess_pose17_quality(collapsed)
+    assert col_report.is_valid is False
+    assert any("degenerate_skeleton_collapse" in e for e in col_report.hard_errors)
+
+    # 3. Soft warning: Crossed arms only
+    crossed_pose = make_canonical_pose17()
+    crossed_pose["left_wrist"] = (390.0, 530.0, 2, 0.92)
+    crossed_pose["right_wrist"] = (610.0, 530.0, 2, 0.92)
+    cross_report = assess_pose17_quality(crossed_pose)
+    assert cross_report.is_valid is True
+    assert cross_report.needs_refine is True
+    assert len(cross_report.hard_errors) == 0
+    assert len(cross_report.soft_warnings) > 0
+
+
+

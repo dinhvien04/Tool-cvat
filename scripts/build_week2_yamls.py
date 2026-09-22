@@ -7,16 +7,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from core.pose_face_schema import (
-    POSE17_KEYPOINTS,
-    POSE17_EDGES,
-    VF50_LANDMARKS,
-    VF50_EDGES,
-    build_cvat_skeleton_spec,
+from core.skeleton_contract import (
+    build_cvat_pose17_spec,
+    build_cvat_vf50_spec,
 )
 
+FEEDBACK_HOST_PATH = (ROOT / ".tool-cvat").as_posix()
+
 # 1. Pose 17
-pose_spec = [build_cvat_skeleton_spec("person", POSE17_KEYPOINTS, POSE17_EDGES, label_id=1, id_offset=1)]
+pose_spec = [build_cvat_pose17_spec(parent_label="person")]
 pose_json = json.dumps(pose_spec, indent=2)
 indented_pose_json = "\n".join(("      " + line) if line else "" for line in pose_json.splitlines())
 
@@ -59,7 +58,7 @@ spec:
     - volume:
         name: feedback-data
         hostPath:
-          path: 'D:/tool-cvat/.tool-cvat'
+          path: '{FEEDBACK_HOST_PATH}'
       volumeMount:
         name: feedback-data
         mountPath: '/opt/nuclio/feedback'
@@ -93,22 +92,20 @@ pose_path.parent.mkdir(parents=True, exist_ok=True)
 pose_path.write_text(pose_yaml, encoding="utf-8")
 print(f"Generated {pose_path} ({len(pose_yaml)} bytes)")
 
-# 2. VF50
-vf_spec = [build_cvat_skeleton_spec("face", VF50_LANDMARKS, VF50_EDGES, label_id=1, id_offset=0)]
-vf_json = json.dumps(vf_spec, indent=2)
-indented_vf_json = "\n".join(("      " + line) if line else "" for line in vf_json.splitlines())
+# 2. VF50 (Authoritative 7 Component Skeletons, NO parent 'face' skeleton)
+vf_spec = build_cvat_vf50_spec()
+vf_json = json.dumps(vf_spec, separators=(",", ":"))
 
 vf_yaml = f"""metadata:
   name: ninerouter-face-vf50
   namespace: cvat
   annotations:
-    name: 9Router Face VF50
+    name: 9Router Face Landmark VF-50
     type: detector
-    spec: |
-{indented_vf_json}
+    spec: '{vf_json}'
 
 spec:
-  description: 9Router Face VF50 Detector (VinAI 50 Facial Landmarks via local 9Router)
+  description: 9Router Face Landmark VF-50 Detector (VinAI 50 Facial Landmarks across 7 Component Skeletons via local 9Router)
   runtime: 'python:3.11'
   handler: main:handler
   eventTimeout: 60s
@@ -137,7 +134,7 @@ spec:
     - volume:
         name: feedback-data
         hostPath:
-          path: 'D:/tool-cvat/.tool-cvat'
+          path: '{FEEDBACK_HOST_PATH}'
       volumeMount:
         name: feedback-data
         mountPath: '/opt/nuclio/feedback'

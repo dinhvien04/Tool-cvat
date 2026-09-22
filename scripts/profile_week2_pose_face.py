@@ -307,6 +307,15 @@ def main():
 
     for mode in modes:
         mode_metrics: List[BenchmarkMetric] = []
+        # Support POSE17_MODEL and VF50_MODEL environment variable overrides
+        if args.model == DEFAULT_VISION_MODEL:
+            if mode == "pose17":
+                mode_model = os.getenv("POSE17_MODEL", args.model)
+            else:
+                mode_model = os.getenv("VF50_MODEL", args.model)
+        else:
+            mode_model = args.model
+
         for i in range(1, args.iterations + 1):
             m = profile_single_iteration(
                 mode=mode,
@@ -314,7 +323,7 @@ def main():
                 image_bytes=image_bytes,
                 base_url=args.base_url,
                 api_key=api_key,
-                model=args.model,
+                model=mode_model,
                 timeout=args.timeout,
                 mock=args.mock,
             )
