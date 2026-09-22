@@ -1,0 +1,178 @@
+metadata:
+  name: ninerouter-human-pose-17
+  namespace: cvat
+  annotations:
+    name: 9Router Human Pose 17
+    type: detector
+    spec: |
+      [
+        {
+          "id": 1,
+          "name": "person",
+          "type": "skeleton",
+          "attributes": [],
+          "sublabels": [
+            {
+              "id": 1,
+              "name": "nose",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 2,
+              "name": "right_eye",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 3,
+              "name": "left_eye",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 4,
+              "name": "right_ear",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 5,
+              "name": "left_ear",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 6,
+              "name": "right_shoulder",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 7,
+              "name": "left_shoulder",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 8,
+              "name": "right_elbow",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 9,
+              "name": "left_elbow",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 10,
+              "name": "right_wrist",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 11,
+              "name": "left_wrist",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 12,
+              "name": "right_hip",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 13,
+              "name": "left_hip",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 14,
+              "name": "right_knee",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 15,
+              "name": "left_knee",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 16,
+              "name": "right_ankle",
+              "type": "points",
+              "attributes": []
+            },
+            {
+              "id": 17,
+              "name": "left_ankle",
+              "type": "points",
+              "attributes": []
+            }
+          ],
+          "svg": "<svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle id=\"node_1\" data-type=\"element node\" data-element-id=\"1\" data-node-id=\"1\" data-label-name=\"nose\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_2\" data-type=\"element node\" data-element-id=\"2\" data-node-id=\"2\" data-label-name=\"right_eye\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_3\" data-type=\"element node\" data-element-id=\"3\" data-node-id=\"3\" data-label-name=\"left_eye\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_4\" data-type=\"element node\" data-element-id=\"4\" data-node-id=\"4\" data-label-name=\"right_ear\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_5\" data-type=\"element node\" data-element-id=\"5\" data-node-id=\"5\" data-label-name=\"left_ear\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_6\" data-type=\"element node\" data-element-id=\"6\" data-node-id=\"6\" data-label-name=\"right_shoulder\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_7\" data-type=\"element node\" data-element-id=\"7\" data-node-id=\"7\" data-label-name=\"left_shoulder\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_8\" data-type=\"element node\" data-element-id=\"8\" data-node-id=\"8\" data-label-name=\"right_elbow\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_9\" data-type=\"element node\" data-element-id=\"9\" data-node-id=\"9\" data-label-name=\"left_elbow\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_10\" data-type=\"element node\" data-element-id=\"10\" data-node-id=\"10\" data-label-name=\"right_wrist\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_11\" data-type=\"element node\" data-element-id=\"11\" data-node-id=\"11\" data-label-name=\"left_wrist\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_12\" data-type=\"element node\" data-element-id=\"12\" data-node-id=\"12\" data-label-name=\"right_hip\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_13\" data-type=\"element node\" data-element-id=\"13\" data-node-id=\"13\" data-label-name=\"left_hip\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_14\" data-type=\"element node\" data-element-id=\"14\" data-node-id=\"14\" data-label-name=\"right_knee\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_15\" data-type=\"element node\" data-element-id=\"15\" data-node-id=\"15\" data-label-name=\"left_knee\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_16\" data-type=\"element node\" data-element-id=\"16\" data-node-id=\"16\" data-label-name=\"right_ankle\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <circle id=\"node_17\" data-type=\"element node\" data-element-id=\"17\" data-node-id=\"17\" data-label-name=\"left_ankle\" cx=\"50\" cy=\"50\" r=\"3\" />\n  <line id=\"edge_1_2\" data-type=\"edge\" data-node-from=\"1\" data-node-to=\"2\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_1_3\" data-type=\"edge\" data-node-from=\"1\" data-node-to=\"3\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_2_4\" data-type=\"edge\" data-node-from=\"2\" data-node-to=\"4\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_3_5\" data-type=\"edge\" data-node-from=\"3\" data-node-to=\"5\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_6_7\" data-type=\"edge\" data-node-from=\"6\" data-node-to=\"7\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_6_8\" data-type=\"edge\" data-node-from=\"6\" data-node-to=\"8\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_8_10\" data-type=\"edge\" data-node-from=\"8\" data-node-to=\"10\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_7_9\" data-type=\"edge\" data-node-from=\"7\" data-node-to=\"9\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_9_11\" data-type=\"edge\" data-node-from=\"9\" data-node-to=\"11\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_6_12\" data-type=\"edge\" data-node-from=\"6\" data-node-to=\"12\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_7_13\" data-type=\"edge\" data-node-from=\"7\" data-node-to=\"13\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_12_13\" data-type=\"edge\" data-node-from=\"12\" data-node-to=\"13\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_12_14\" data-type=\"edge\" data-node-from=\"12\" data-node-to=\"14\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_14_16\" data-type=\"edge\" data-node-from=\"14\" data-node-to=\"16\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_13_15\" data-type=\"edge\" data-node-from=\"13\" data-node-to=\"15\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n  <line id=\"edge_15_17\" data-type=\"edge\" data-node-from=\"15\" data-node-to=\"17\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\" stroke=\"red\" stroke-width=\"1\" />\n</svg>"
+        }
+      ]
+
+spec:
+  description: 9Router Human Pose 17 Detector (COCO 17-Keypoint Human Skeleton via local 9Router)
+  runtime: 'python:3.11'
+  handler: main:handler
+  eventTimeout: 60s
+
+  env:
+    - name: NINEROUTER_URL
+      value: 'http://host.docker.internal:20128'
+    - name: VISION_MODEL
+      value: 'ag/gemini-3.8-flash-low'
+    - name: POSE17_MODEL
+      value: 'ag/gemini-3.8-flash-low'
+    - name: DETECTION_MODE
+      value: 'human_pose_17'
+    - name: NINEROUTER_TIMEOUT
+      value: '45.0'
+    - name: MAX_IMAGE_SIZE
+      value: '1280'
+    - name: MAX_TOKENS
+      value: '2000'
+    - name: FEEDBACK_DATA_DIR
+      value: '/opt/nuclio/feedback'
+    - name: FEEDBACK_DB_PATH
+      value: '/opt/nuclio/feedback/feedback.sqlite3'
+
+  volumes:
+    - volume:
+        name: feedback-data
+        hostPath:
+          path: 'D:/tool-cvat/.tool-cvat'
+      volumeMount:
+        name: feedback-data
+        mountPath: '/opt/nuclio/feedback'
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 2
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432 # 32MB
+
+  build:
+    image: cvat.custom.ninerouter.human.pose.17
+    baseImage: python:3.11-slim
+    directives:
+      preCopy:
+        - kind: RUN
+          value: pip install --no-cache-dir requests pillow pyyaml
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume

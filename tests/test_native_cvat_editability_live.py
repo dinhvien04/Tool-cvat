@@ -28,6 +28,14 @@ from core.geometry import (
     multi_polygon_to_cvat_mask,
     rasterize_polygons_to_mask,
 )
+from core.pose_face_schema import (
+    POSE17_KEYPOINTS,
+    VF50_LANDMARKS,
+    KeypointElement,
+    SkeletonInstance,
+    parse_and_sanitize_pose17_instance,
+    parse_and_sanitize_vf50_instance,
+)
 from core.taxonomy import (
     BOX_MASK_LABELS,
     POLYGON_MASK_LABELS,
@@ -194,6 +202,53 @@ class TestShapeContractSpecifications:
         # Polyline must be atomic: no group_id allowed
         assert "group_id" not in validated[0]
 
+    def test_skeleton_shape_specification(self):
+        """Verify Pose17 and VF50 skeletons satisfy native CVAT structural constraints:
+        - Shape type 'skeleton'
+        - Parent points must be empty list [] (CVAT rejects non-empty points on skeleton)
+        - Child elements must have type 'points' with len(points) == 2 ([x, y])
+        - Outside and occluded flags are preserved and unlocked
+        """
+        # 1. Pose17 instance
+        raw_pose = {
+            "keypoints": {
+                kp: [float(i * 10), float(i * 15), 2]
+                for i, kp in enumerate(POSE17_KEYPOINTS)
+            },
+            "confidence": 0.95,
+        }
+        pose_inst = parse_and_sanitize_pose17_instance(raw_pose, img_width=1000, img_height=1000)
+        assert pose_inst is not None
+        pose_dict = pose_inst.to_cvat_dict()
+        assert pose_dict["type"] == "skeleton"
+        assert pose_dict["label"] == "person"
+        assert len(pose_dict["elements"]) == 17
+        for elem in pose_dict["elements"]:
+            assert elem["type"] == "points"
+            assert len(elem["points"]) == 2
+            assert elem["outside"] is False
+            assert elem["occluded"] is False
+
+        # 2. VF50 instance
+        raw_vf50 = {
+            "landmarks": {
+                lm: [float(i * 5), float(i * 8), 2]
+                for i, lm in enumerate(VF50_LANDMARKS)
+            },
+            "confidence": 0.98,
+        }
+        vf50_inst = parse_and_sanitize_vf50_instance(raw_vf50, img_width=1000, img_height=1000)
+        assert vf50_inst is not None
+        vf50_dict = vf50_inst.to_cvat_dict()
+        assert vf50_dict["type"] == "skeleton"
+        assert vf50_dict["label"] == "face"
+        assert len(vf50_dict["elements"]) == 50
+        for elem in vf50_dict["elements"]:
+            assert elem["type"] == "points"
+            assert len(elem["points"]) == 2
+            assert elem["outside"] is False
+            assert elem["occluded"] is False
+
 
 class TestLiveCVATEditRoundTrip:
     """Live verification against local CVAT instance (Task 15, Job 15)."""
@@ -323,4 +378,150 @@ class TestLiveCVATEditRoundTrip:
             assert r_del.status_code in (200, 204)
 
             r_final = session.get(f"{CVAT_BASE_URL}/api/jobs/15/annotations", timeout=10)
+            assert len(r_final.json().get("shapes", [])) == initial_count
+
+    def test_live_skeleton_edit_roundtrip(self):
+        """Live round-trip verification for native CVAT Skeleton Editability:
+        - Ingests a skeleton shape with child elements (type: 'points').
+        - Verifies assigned IDs and structure: parent points=[], elements have len(points)==2.
+        - Simulates human dragging of independent keypoints and occluded toggle.
+        - Updates via PATCH /api/jobs/<id>/annotations?action=update.
+        - Reloads and asserts exact preservation of moved points and untouched coordinates.
+        - Verifies clean cascaded deletion of parent and child elements.
+        """
+        session = get_live_cvat_session()
+        if not session:
+            pytest.skip("Local CVAT instance (http://localhost:18080) not available or token missing")
+
+        # Discover a job and skeleton label (Job 12, Label 13 on local instance)
+        target_job_id = None
+        skeleton_label = None
+
+        # Try Job 12 first
+        r_check_12 = session.get(f"{CVAT_BASE_URL}/api/jobs/12", timeout=5)
+        if r_check_12.status_code == 200:
+            r_label_13 = session.get(f"{CVAT_BASE_URL}/api/labels/13", timeout=5)
+            if r_label_13.status_code == 200 and r_label_13.json().get("type") == "skeleton":
+                target_job_id = 12
+                skeleton_label = r_label_13.json()
+
+        if not target_job_id or not skeleton_label:
+            pytest.skip("No accessible CVAT job with skeleton label found for live testing")
+
+        sublabels = skeleton_label["sublabels"]
+        sublabel_map = {s["name"]: s["id"] for s in sublabels}
+        label_id = skeleton_label["id"]
+
+        # 1. Query initial shape count
+        r_init = session.get(f"{CVAT_BASE_URL}/api/jobs/{target_job_id}/annotations", timeout=10)
+        assert r_init.status_code == 200
+        initial_count = len(r_init.json().get("shapes", []))
+
+        # 2. Build test skeleton
+        elements = [
+            {
+                "type": "points",
+                "label_id": s["id"],
+                "frame": 0,
+                "group": 0,
+                "source": "auto",
+                "occluded": False,
+                "outside": False,
+                "z_order": 0,
+                "rotation": 0.0,
+                "points": [float(200 + idx * 8), float(150 + idx * 10)],
+                "attributes": [],
+            }
+            for idx, s in enumerate(sublabels)
+        ]
+
+        test_skel = {
+            "type": "skeleton",
+            "label_id": label_id,
+            "frame": 0,
+            "group": 0,
+            "source": "auto",
+            "occluded": False,
+            "outside": False,
+            "z_order": 0,
+            "rotation": 0.0,
+            "points": [],
+            "attributes": [],
+            "elements": elements,
+        }
+
+        # 3. Create on CVAT
+        r_create = session.patch(
+            f"{CVAT_BASE_URL}/api/jobs/{target_job_id}/annotations?action=create",
+            json={"shapes": [test_skel], "tracks": [], "tags": []},
+            timeout=10,
+        )
+        assert r_create.status_code in (200, 201), f"Create failed: {r_create.text}"
+        created_shapes = r_create.json()["shapes"]
+        assert len(created_shapes) == 1
+        c_skel = created_shapes[0]
+        skel_id = c_skel["id"]
+        assert c_skel["type"] == "skeleton"
+        assert c_skel["points"] == []
+        assert len(c_skel["elements"]) == len(sublabels)
+
+        try:
+            # 4. Simulate human drag of individual keypoints
+            nose_elem = next(e for e in c_skel["elements"] if e["label_id"] == sublabel_map["nose"])
+            wrist_elem = next(e for e in c_skel["elements"] if e["label_id"] == sublabel_map["right_wrist"])
+            ankle_elem = next(e for e in c_skel["elements"] if e["label_id"] == sublabel_map["right_ankle"])
+
+            orig_ankle_pts = list(ankle_elem["points"])
+            new_nose_pts = [215.0, 165.0]
+            new_wrist_pts = [310.0, 275.0]
+
+            nose_elem["points"] = new_nose_pts
+            wrist_elem["points"] = new_wrist_pts
+            ankle_elem["occluded"] = True
+
+            # 5. Apply update via PATCH ?action=update
+            r_update = session.patch(
+                f"{CVAT_BASE_URL}/api/jobs/{target_job_id}/annotations?action=update",
+                json={"shapes": [c_skel], "tracks": [], "tags": []},
+                timeout=10,
+            )
+            assert r_update.status_code in (200, 204), f"Update failed: {r_update.text}"
+
+            # 6. Reload and verify exact preservation
+            r_reload = session.get(f"{CVAT_BASE_URL}/api/jobs/{target_job_id}/annotations", timeout=10)
+            assert r_reload.status_code == 200
+            reloaded_shapes = r_reload.json()["shapes"]
+            assert len(reloaded_shapes) == 1
+            r_skel = reloaded_shapes[0]
+            assert r_skel["id"] == skel_id
+
+            reloaded_elems = {e["label_id"]: e for e in r_skel["elements"]}
+            r_nose = reloaded_elems[sublabel_map["nose"]]
+            r_wrist = reloaded_elems[sublabel_map["right_wrist"]]
+            r_ankle = reloaded_elems[sublabel_map["right_ankle"]]
+
+            assert r_nose["points"] == new_nose_pts
+            assert r_wrist["points"] == new_wrist_pts
+            assert r_ankle["occluded"] is True
+            assert r_ankle["points"] == orig_ankle_pts
+
+            # Verify untouched elements remained completely intact
+            for elem in c_skel["elements"]:
+                lid = elem["label_id"]
+                if lid not in (sublabel_map["nose"], sublabel_map["right_wrist"]):
+                    assert reloaded_elems[lid]["points"] == elem["points"]
+
+        finally:
+            # 7. Clean up
+            r_curr = session.get(f"{CVAT_BASE_URL}/api/jobs/{target_job_id}/annotations", timeout=10)
+            curr_shapes = r_curr.json().get("shapes", [])
+            if curr_shapes:
+                r_del = session.patch(
+                    f"{CVAT_BASE_URL}/api/jobs/{target_job_id}/annotations?action=delete",
+                    json={"shapes": curr_shapes, "tracks": [], "tags": []},
+                    timeout=10,
+                )
+                assert r_del.status_code in (200, 204)
+
+            r_final = session.get(f"{CVAT_BASE_URL}/api/jobs/{target_job_id}/annotations", timeout=10)
             assert len(r_final.json().get("shapes", [])) == initial_count

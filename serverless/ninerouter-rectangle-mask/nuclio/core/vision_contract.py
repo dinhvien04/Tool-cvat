@@ -944,8 +944,8 @@ Rules:
 2. Geometry Complexity: Delineate each region boundary with approximately 12 to 80 useful vertices. Capture meaningful curves without dense redundant coordinate spam along straight edges.
 3. Relevant Regions Only: Detect primary continuous surface/structural regions. Do NOT fragment large contiguous surfaces into dozens of micro-polygons.
 4. Independent region tasks:
-   - Evaluate EVERY allowed label independently; do not force the labels to be mutually exclusive.
-   - If "area/drivable" is allowed and a directly traversable vehicle road surface is visible, you MUST return an "area/drivable" polygon even if you also return "road".
+   - Evaluate EVERY allowed label independently; labels are not mutually exclusive.
+   - If "area/drivable" is allowed and a directly traversable vehicle road surface is visible, you MUST return an "area/drivable" polygon even if you also return "road". Never replace "area/drivable" with "road".
    - If "area/alternative" is allowed and an adjacent/alternative drivable road surface is visible, return it independently.
    - "road" is semantic road-surface segmentation and may overlap drivable-area polygons.
 5. Allowed Labels: Select labels ONLY from the allowed list above. Match label strings EXACTLY, preserving exact casing, spaces, and underscores. Do not rename, substitute, or invent labels.

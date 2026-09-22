@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from app.config import AppConfig, LabelConfig
+from app.config import DEFAULT_VISION_MODEL, AppConfig, LabelConfig
 
 
 def test_label_config_loading():
@@ -26,7 +26,7 @@ def test_app_config_defaults():
     cfg = AppConfig.load()
     assert cfg.ninerouter_url.startswith("http://")
     assert cfg.max_image_size == 1600
-    assert cfg.vision_model == "ag/gemini-3.8-flash-high"
+    assert cfg.vision_model == DEFAULT_VISION_MODEL
     assert len(cfg.labels.bbox_labels) == 13
 
 

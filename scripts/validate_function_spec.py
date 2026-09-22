@@ -25,6 +25,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from app.feedback import ALL_31_LABELS
 from core.taxonomy import BOX_MASK_LABELS, POLYGON_MASK_LABELS, POLYLINE_LABELS
+from core.pose_face_schema import POSE17_KEYPOINTS, VF50_LANDMARKS, validate_svg_node_ids
 
 VALID_FUNCTION_KINDS = {"detector", "interactor", "tracker", "reid"}
 VALID_CVAT_LABEL_TYPES = {"rectangle", "polygon", "polyline", "points", "mask", "skeleton", "any"}
@@ -175,6 +176,86 @@ def validate_function_yaml(yaml_path: Path) -> Tuple[bool, List[str]]:
                     f"ninerouter-polyline label '{item.get('name')}' must have type 'polyline', got '{item.get('type')}'"
                 )
 
+    elif "ninerouter-human-pose-17" in str(yaml_path) or fn_name == "ninerouter-human-pose-17":
+        if len(label_names) != 1:
+            errors.append(
+                f"ninerouter-human-pose-17 must have exactly 1 parent label, but found {len(label_names)} in {yaml_path}"
+            )
+        elif label_names[0] not in ("person", "body"):
+            errors.append(
+                f"ninerouter-human-pose-17 parent label must be 'person', got {label_names[0]!r} in {yaml_path}"
+            )
+        for item in spec_items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "skeleton":
+                errors.append(
+                    f"ninerouter-human-pose-17 parent label must have type 'skeleton', got {item.get('type')!r} in {yaml_path}"
+                )
+            sublabels = item.get("sublabels", [])
+            if not isinstance(sublabels, list) or len(sublabels) != 17:
+                errors.append(
+                    f"ninerouter-human-pose-17 must have exactly 17 sublabels, got {len(sublabels) if isinstance(sublabels, list) else type(sublabels)} in {yaml_path}"
+                )
+            else:
+                sub_names = [s.get("name") for s in sublabels if isinstance(s, dict)]
+                missing_kps = set(POSE17_KEYPOINTS) - set(sub_names)
+                if missing_kps:
+                    errors.append(f"ninerouter-human-pose-17 missing keypoints: {sorted(missing_kps)}")
+                for sub in sublabels:
+                    if isinstance(sub, dict) and sub.get("type") != "points":
+                        errors.append(
+                            f"ninerouter-human-pose-17 sublabel '{sub.get('name')}' must have type 'points', got '{sub.get('type')}'"
+                        )
+            svg_content = item.get("svg", "")
+            if not svg_content:
+                errors.append(f"ninerouter-human-pose-17 missing 'svg' in skeleton spec in {yaml_path}")
+            else:
+                is_valid_svg, svg_errs = validate_svg_node_ids(svg_content, expected_node_ids=set(range(1, 18)))
+                if not is_valid_svg:
+                    errors.extend([f"Pose17 SVG error: {e}" for e in svg_errs])
+
+    elif "ninerouter-face-vf50" in str(yaml_path) or fn_name == "ninerouter-face-vf50":
+        if len(label_names) != 1:
+            errors.append(
+                f"ninerouter-face-vf50 must have exactly 1 parent label, but found {len(label_names)} in {yaml_path}"
+            )
+        elif label_names[0] not in ("face", "head"):
+            errors.append(
+                f"ninerouter-face-vf50 parent label must be 'face', got {label_names[0]!r} in {yaml_path}"
+            )
+        for item in spec_items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "skeleton":
+                errors.append(
+                    f"ninerouter-face-vf50 parent label must have type 'skeleton', got {item.get('type')!r} in {yaml_path}"
+                )
+            sublabels = item.get("sublabels", [])
+            if not isinstance(sublabels, list) or len(sublabels) != 50:
+                errors.append(
+                    f"ninerouter-face-vf50 must have exactly 50 sublabels, got {len(sublabels) if isinstance(sublabels, list) else type(sublabels)} in {yaml_path}"
+                )
+            else:
+                sub_names = [s.get("name") for s in sublabels if isinstance(s, dict)]
+                missing_lms = set(VF50_LANDMARKS) - set(sub_names)
+                if missing_lms:
+                    errors.append(f"ninerouter-face-vf50 missing landmarks: {sorted(missing_lms)}")
+                for sub in sublabels:
+                    if isinstance(sub, dict) and sub.get("type") != "points":
+                        errors.append(
+                            f"ninerouter-face-vf50 sublabel '{sub.get('name')}' must have type 'points', got '{sub.get('type')}'"
+                        )
+            svg_content = item.get("svg", "")
+            if not svg_content:
+                errors.append(f"ninerouter-face-vf50 missing 'svg' in skeleton spec in {yaml_path}")
+            else:
+                # Accept both 0..49 and 1..50 indexing for node IDs
+                is_valid_svg_0, svg_errs_0 = validate_svg_node_ids(svg_content, expected_node_ids=set(range(0, 50)))
+                is_valid_svg_1, svg_errs_1 = validate_svg_node_ids(svg_content, expected_node_ids=set(range(1, 51)))
+                if not (is_valid_svg_0 or is_valid_svg_1):
+                    errors.extend([f"VF50 SVG error: {e}" for e in svg_errs_0])
+
     elif "ninerouter-vision-31" in str(yaml_path) or fn_name == "ninerouter-vision-31":
         if len(label_names) != 31:
             errors.append(
@@ -196,6 +277,8 @@ def validate_all_detectors() -> Dict[str, Tuple[bool, List[str]]]:
         REPO_ROOT / "serverless" / "ninerouter-rectangle-mask" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-polygon-mask" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-polyline" / "nuclio" / "function.yaml",
+        REPO_ROOT / "serverless" / "ninerouter-human-pose-17" / "nuclio" / "function.yaml",
+        REPO_ROOT / "serverless" / "ninerouter-face-vf50" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-vision" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-vision-mask" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-vision-box-mask" / "nuclio" / "function.yaml",

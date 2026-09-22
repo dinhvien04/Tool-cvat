@@ -23,7 +23,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
-    [ValidateSet("legacy", "rectangle-mask", "polygon-mask", "polyline", "all-9router")]
+    [ValidateSet("legacy", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "week2", "human-pose-17", "face-vf50", "all-9router")]
     [string]$Target = "legacy",
 
     [Parameter(Mandatory = $false)]
@@ -83,6 +83,21 @@ switch ($Target) {
     "polyline" {
         $targetsToRemove = @("ninerouter-polyline")
     }
+    "rectangle-tracker" {
+        $targetsToRemove = @("ninerouter-rectangle-tracker")
+    }
+    "human-pose-17" {
+        $targetsToRemove = @("ninerouter-human-pose-17")
+    }
+    "face-vf50" {
+        $targetsToRemove = @("ninerouter-face-vf50")
+    }
+    "week2" {
+        $targetsToRemove = @(
+            "ninerouter-human-pose-17",
+            "ninerouter-face-vf50"
+        )
+    }
     "all-9router" {
         $targetsToRemove = @(
             "ninerouter-vision-31",
@@ -91,7 +106,10 @@ switch ($Target) {
             "ninerouter-vision",
             "ninerouter-rectangle-mask",
             "ninerouter-polygon-mask",
-            "ninerouter-polyline"
+            "ninerouter-polyline",
+            "ninerouter-rectangle-tracker",
+            "ninerouter-human-pose-17",
+            "ninerouter-face-vf50"
         )
     }
 }

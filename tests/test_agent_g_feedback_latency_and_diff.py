@@ -673,9 +673,14 @@ class TestFeedbackRoundTripIntegration:
         # Step 2: Human Manual Edits in CVAT
         # ---------------------------------------------------------------------
         # Annotator corrects the label to 'truck' and adds an omitted 'pedestrian'
+        human_mask = {"type": "mask", "label": "truck", "group": 1, "frame": 0}
+        if "mask" in mask0:
+            human_mask["mask"] = mask0["mask"]
+        if "points" in mask0:
+            human_mask["points"] = list(mask0["points"])
         human_shapes = [
             {"type": "rectangle", "label": "truck", "points": list(rect0["points"]), "group": 1, "frame": 0},
-            {"type": "mask", "label": "truck", "points": list(mask0["points"]), "group": 1, "frame": 0},
+            human_mask,
             {"type": "rectangle", "label": "pedestrian", "points": [500.0, 150.0, 560.0, 300.0], "group": 2, "frame": 0},
             {"type": "mask", "label": "pedestrian", "points": [500.0, 150.0, 560.0, 150.0, 560.0, 300.0, 500.0, 300.0], "group": 2, "frame": 0},
         ]
@@ -722,7 +727,16 @@ class TestFeedbackRoundTripIntegration:
             captured_prompts.append(kwargs.get("prompt", ""))
             captured_visual_examples.append(kwargs.get("visual_examples"))
             return VisionResponse(
-                content=json.dumps({"objects": [{"label": "truck", "box_2d": [100, 100, 400, 400], "confidence": 0.95}]}),
+                content=json.dumps({
+                    "objects": [
+                        {
+                            "label": "truck",
+                            "box_2d": [100, 100, 400, 400],
+                            "mask": [[100, 100], [400, 100], [400, 400], [100, 400]],
+                            "confidence": 0.95,
+                        }
+                    ]
+                }),
                 raw_response={},
                 duration_seconds=0.15,
                 model="ag/gemini-3.8-flash-high",

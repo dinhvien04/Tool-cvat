@@ -9,6 +9,7 @@ from app.config import (
     DEFAULT_NINEROUTER_TIMEOUT,
     DEFAULT_NINEROUTER_URL_CONTAINER,
     DEFAULT_NINEROUTER_URL_HOST,
+    DEFAULT_VISION_MODEL,
     AppConfig,
     get_default_ninerouter_url,
     is_running_in_container,
@@ -51,4 +52,4 @@ def test_app_config_phase2_defaults():
     """Verify AppConfig load respects Phase 2 defaults."""
     cfg = AppConfig.load()
     assert cfg.ninerouter_timeout == DEFAULT_NINEROUTER_TIMEOUT
-    assert cfg.vision_model == "ag/gemini-3.8-flash-high"
+    assert cfg.vision_model == DEFAULT_VISION_MODEL

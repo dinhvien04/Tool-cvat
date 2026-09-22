@@ -1,0 +1,147 @@
+schema_name: week2_pose17
+schema_version: "1.1"
+authoritative_source: "Week2_Guideline_HumanPose17_HocVien_v1.1.docx"
+laterality_convention: viewer  # R on right side of image/viewer, L on left side of image/viewer
+expected_point_count: 17
+parent_labels:
+  - name: person
+    type: skeleton
+
+sublabels:
+  - id: 1
+    name: "1"
+    semantic_name: "Nose"
+    anatomical: "Chop mui"
+    side: "center"
+  - id: 2
+    name: "2"
+    semantic_name: "R Eye"
+    anatomical: "Tam dong tu mat phia PHAI khung hinh"
+    side: "right"
+  - id: 3
+    name: "3"
+    semantic_name: "L Eye"
+    anatomical: "Tam dong tu mat phia TRAI khung hinh"
+    side: "left"
+  - id: 4
+    name: "4"
+    semantic_name: "R Ear"
+    anatomical: "Ong tai phia PHAI khung hinh"
+    side: "right"
+  - id: 5
+    name: "5"
+    semantic_name: "L Ear"
+    anatomical: "Ong tai phia TRAI khung hinh"
+    side: "left"
+  - id: 6
+    name: "6"
+    semantic_name: "R Shoulder"
+    anatomical: "Tam khop vai phia PHAI khung hinh"
+    side: "right"
+  - id: 7
+    name: "7"
+    semantic_name: "L Shoulder"
+    anatomical: "Tam khop vai phia TRAI khung hinh"
+    side: "left"
+  - id: 8
+    name: "8"
+    semantic_name: "R Elbow"
+    anatomical: "Tam khop khuyu phia PHAI khung hinh"
+    side: "right"
+  - id: 9
+    name: "9"
+    semantic_name: "L Elbow"
+    anatomical: "Tam khop khuyu phia TRAI khung hinh"
+    side: "left"
+  - id: 10
+    name: "10"
+    semantic_name: "R Wrist"
+    anatomical: "Tam khop co tay phia PHAI khung hinh"
+    side: "right"
+  - id: 11
+    name: "11"
+    semantic_name: "L Wrist"
+    anatomical: "Tam khop co tay phia TRAI khung hinh"
+    side: "left"
+  - id: 12
+    name: "12"
+    semantic_name: "R Hip"
+    anatomical: "Tam khop hang phia PHAI khung hinh"
+    side: "right"
+  - id: 13
+    name: "13"
+    semantic_name: "L Hip"
+    anatomical: "Tam khop hang phia TRAI khung hinh"
+    side: "left"
+  - id: 14
+    name: "14"
+    semantic_name: "R Knee"
+    anatomical: "Tam khop goi phia PHAI khung hinh"
+    side: "right"
+  - id: 15
+    name: "15"
+    semantic_name: "L Knee"
+    anatomical: "Tam khop goi phia TRAI khung hinh"
+    side: "left"
+  - id: 16
+    name: "16"
+    semantic_name: "R Ankle"
+    anatomical: "Tam khop co chan phia PHAI khung hinh"
+    side: "right"
+  - id: 17
+    name: "17"
+    semantic_name: "L Ankle"
+    anatomical: "Tam khop co chan phia TRAI khung hinh"
+    side: "left"
+
+edges:
+  - from: 1
+    to: 2
+  - from: 1
+    to: 3
+  - from: 2
+    to: 4
+  - from: 3
+    to: 5
+  - from: 4
+    to: 6
+  - from: 5
+    to: 7
+  - from: 6
+    to: 7
+  - from: 6
+    to: 8
+  - from: 8
+    to: 10
+  - from: 7
+    to: 9
+  - from: 9
+    to: 11
+  - from: 6
+    to: 12
+  - from: 7
+    to: 13
+  - from: 12
+    to: 13
+  - from: 12
+    to: 14
+  - from: 14
+    to: 16
+  - from: 13
+    to: 15
+  - from: 15
+    to: 17
+
+visibility_mapping:
+  0:
+    outside: true
+    occluded: false
+    description: "Not labeled / outside image frame"
+  1:
+    outside: false
+    occluded: true
+    description: "Labeled but occluded"
+  2:
+    outside: false
+    occluded: false
+    description: "Visible"

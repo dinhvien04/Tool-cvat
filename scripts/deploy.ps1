@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
-    [ValidateSet("three", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "three-with-tracker", "all")]
+    [ValidateSet("three", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "three-with-tracker", "week2", "human-pose-17", "face-vf50", "active-all", "all")]
     [string]$Target = "three",
 
     [Parameter(Mandatory = $false)]
@@ -42,6 +42,12 @@ param (
     [string]$RectangleTrackerModel = $env:RECTANGLE_TRACKER_MODEL,
 
     [Parameter(Mandatory = $false)]
+    [string]$Pose17Model = $env:POSE17_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$Vf50Model = $env:VF50_MODEL,
+
+    [Parameter(Mandatory = $false)]
     [string]$NineRouterKey = $env:NINEROUTER_KEY,
 
     [Parameter(Mandatory = $false)]
@@ -61,9 +67,11 @@ if (-not $RectangleMaskModel) { $RectangleMaskModel = "ag/gemini-3.8-flash-low" 
 if (-not $PolygonMaskModel) { $PolygonMaskModel = "ag/gemini-3.8-flash-low" }
 if (-not $PolylineModel) { $PolylineModel = "ag/gemini-3.8-flash-low" }
 if (-not $RectangleTrackerModel) { $RectangleTrackerModel = "ag/gemini-3.8-flash-low" }
+if (-not $Pose17Model) { $Pose17Model = $VisionModel }
+if (-not $Vf50Model) { $Vf50Model = $VisionModel }
 
 Write-Host "======================================================================" -ForegroundColor Cyan
-Write-Host " CVAT x 9Router - Deploy Streamlined 3-Detector Suite" -ForegroundColor Cyan
+Write-Host " CVAT x 9Router - Deploy Streamlined Detector Suite" -ForegroundColor Cyan
 Write-Host "======================================================================" -ForegroundColor Cyan
 Write-Host "Target: $Target" -ForegroundColor Gray
 
@@ -108,11 +116,40 @@ switch ($Target) {
             @{ Name = "ninerouter-rectangle-tracker"; DisplayName = "9Router Rectangle Tracker"; Mode = "rectangle_tracker" }
         )
     }
+    "human-pose-17" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-human-pose-17"; DisplayName = "9Router Human Pose 17"; Mode = "human_pose_17" }
+        )
+    }
+    "face-vf50" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-face-vf50"; DisplayName = "9Router Face Landmark VF-50"; Mode = "face_vf50" }
+        )
+    }
+    "week2" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-human-pose-17"; DisplayName = "9Router Human Pose 17"; Mode = "human_pose_17" },
+            @{ Name = "ninerouter-face-vf50"; DisplayName = "9Router Face Landmark VF-50"; Mode = "face_vf50" }
+        )
+    }
+    "active-all" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-rectangle-mask"; DisplayName = "9Router Rectangle + Mask"; Mode = "rectangle_mask" },
+            @{ Name = "ninerouter-polygon-mask"; DisplayName = "9Router Polygon + Mask"; Mode = "polygon_mask" },
+            @{ Name = "ninerouter-polyline"; DisplayName = "9Router Polyline"; Mode = "polyline" },
+            @{ Name = "ninerouter-human-pose-17"; DisplayName = "9Router Human Pose 17"; Mode = "human_pose_17" },
+            @{ Name = "ninerouter-face-vf50"; DisplayName = "9Router Face Landmark VF-50"; Mode = "face_vf50" },
+            @{ Name = "ninerouter-rectangle-tracker"; DisplayName = "9Router Rectangle Tracker"; Mode = "rectangle_tracker" }
+        )
+    }
     "all" {
         $functionsToDeploy = @(
             @{ Name = "ninerouter-rectangle-mask"; DisplayName = "9Router Rectangle + Mask"; Mode = "rectangle_mask" },
             @{ Name = "ninerouter-polygon-mask"; DisplayName = "9Router Polygon + Mask"; Mode = "polygon_mask" },
-            @{ Name = "ninerouter-polyline"; DisplayName = "9Router Polyline"; Mode = "polyline" }
+            @{ Name = "ninerouter-polyline"; DisplayName = "9Router Polyline"; Mode = "polyline" },
+            @{ Name = "ninerouter-human-pose-17"; DisplayName = "9Router Human Pose 17"; Mode = "human_pose_17" },
+            @{ Name = "ninerouter-face-vf50"; DisplayName = "9Router Face Landmark VF-50"; Mode = "face_vf50" },
+            @{ Name = "ninerouter-rectangle-tracker"; DisplayName = "9Router Rectangle Tracker"; Mode = "rectangle_tracker" }
         )
     }
 }
@@ -275,6 +312,16 @@ foreach ($fn in $functionsToDeploy) {
         }
         $detectorEnvVar = "RECTANGLE_TRACKER_MODEL=$fnModel"
         $fnTimeout = $RectangleTrackerTimeout
+    } elseif ($fnName -eq "ninerouter-human-pose-17") {
+        if ($Pose17Model -and $Pose17Model.Trim() -ne "") {
+            $fnModel = $Pose17Model.Trim()
+        }
+        $detectorEnvVar = "POSE17_MODEL=$fnModel"
+    } elseif ($fnName -eq "ninerouter-face-vf50") {
+        if ($Vf50Model -and $Vf50Model.Trim() -ne "") {
+            $fnModel = $Vf50Model.Trim()
+        }
+        $detectorEnvVar = "VF50_MODEL=$fnModel"
     }
     Write-Host "Active model for $($fnName): $fnModel" -ForegroundColor Green
     Write-Host "Request timeout for $($fnName): $fnTimeout s" -ForegroundColor Gray

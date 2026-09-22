@@ -20,6 +20,8 @@ SERVERLESS_TARGETS = (
     "serverless/ninerouter-rectangle-mask/nuclio",
     "serverless/ninerouter-polygon-mask/nuclio",
     "serverless/ninerouter-polyline/nuclio",
+    "serverless/ninerouter-human-pose-17/nuclio",
+    "serverless/ninerouter-face-vf50/nuclio",
 )
 
 

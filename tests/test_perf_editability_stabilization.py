@@ -286,7 +286,16 @@ class TestPolicyPromptAndConfiguration:
         large_img = Image.new("RGB", (1600, 1200), color=(120, 140, 160))
 
         fake_resp = VisionResponse(
-            content=json.dumps({"objects": []}),
+            content=json.dumps({
+                "objects": [
+                    {
+                        "label": "car",
+                        "box_2d": [100, 100, 400, 400],
+                        "mask": [[100, 100], [400, 100], [400, 400], [100, 400]],
+                        "confidence": 0.95,
+                    }
+                ]
+            }),
             raw_response={"choices": [{"message": {"content": "ok"}}]},
             duration_seconds=0.1,
             model="ag/gemini-3.8-flash-high",
