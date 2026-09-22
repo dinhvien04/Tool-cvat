@@ -348,6 +348,37 @@ class PersonPose17:
         """Safely fetch keypoint by name."""
         return self.keypoints.get(name.strip().lower())
 
+    def derive_bbox(self, pad_ratio: float = 0.05) -> Optional[List[int]]:
+        """Derive bounding box [ymin, xmin, ymax, xmax] in normalized [0..1000] from active keypoints."""
+        active = [kp for kp in self.keypoints.values() if not kp.is_outside]
+        if not active:
+            return self.box_2d
+        xs = [kp.x for kp in active]
+        ys = [kp.y for kp in active]
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        w, h = xmax - xmin, ymax - ymin
+        pad_x = w * pad_ratio
+        pad_y = h * pad_ratio
+        return [
+            int(max(0.0, min(1000.0, round(ymin - pad_y)))),
+            int(max(0.0, min(1000.0, round(xmin - pad_x)))),
+            int(max(0.0, min(1000.0, round(ymax + pad_y)))),
+            int(max(0.0, min(1000.0, round(xmax + pad_x)))),
+        ]
+
+    def get_center(self) -> Optional[Tuple[float, float]]:
+        """Derive center coordinates (cx, cy) in normalized [0..1000] space."""
+        active = [kp for kp in self.keypoints.values() if not kp.is_outside]
+        if not active:
+            if self.box_2d:
+                return ((self.box_2d[1] + self.box_2d[3]) * 0.5, (self.box_2d[0] + self.box_2d[2]) * 0.5)
+            return None
+        return (
+            round(sum(kp.x for kp in active) / len(active), 2),
+            round(sum(kp.y for kp in active) / len(active), 2),
+        )
+
     def to_cvat_skeleton(
         self,
         width: int,
@@ -1289,6 +1320,37 @@ class VF50Face:
                 res.append(lm)
         return res
 
+    def derive_bbox(self, pad_ratio: float = 0.05) -> Optional[List[int]]:
+        """Derive bounding box [ymin, xmin, ymax, xmax] in normalized [0..1000] from active landmarks."""
+        active = [lm for lm in self.landmarks.values() if not lm.is_outside]
+        if not active:
+            return self.box_2d
+        xs = [lm.x for lm in active]
+        ys = [lm.y for lm in active]
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        w, h = xmax - xmin, ymax - ymin
+        pad_x = w * pad_ratio
+        pad_y = h * pad_ratio
+        return [
+            int(max(0.0, min(1000.0, round(ymin - pad_y)))),
+            int(max(0.0, min(1000.0, round(xmin - pad_x)))),
+            int(max(0.0, min(1000.0, round(ymax + pad_y)))),
+            int(max(0.0, min(1000.0, round(xmax + pad_x)))),
+        ]
+
+    def get_center(self) -> Optional[Tuple[float, float]]:
+        """Derive center coordinates (cx, cy) in normalized [0..1000] space."""
+        active = [lm for lm in self.landmarks.values() if not lm.is_outside]
+        if not active:
+            if self.box_2d:
+                return ((self.box_2d[1] + self.box_2d[3]) * 0.5, (self.box_2d[0] + self.box_2d[2]) * 0.5)
+            return None
+        return (
+            round(sum(lm.x for lm in active) / len(active), 2),
+            round(sum(lm.y for lm in active) / len(active), 2),
+        )
+
     def to_cvat_component_skeletons(
         self,
         width: int,
@@ -1809,7 +1871,14 @@ def parse_vf50_response(
                 try:
                     pt_id = int(key)
                 except ValueError:
-                    continue
+                    if "_" in str(key):
+                        suffix = str(key).split("_")[-1]
+                        try:
+                            pt_id = int(suffix)
+                        except ValueError:
+                            continue
+                    else:
+                        continue
                 if 0 <= pt_id < VF50_POINTS_COUNT:
                     lm = _parse_single_vf50_landmark(pt_id, val, crop_box=crop_box, orig_w=orig_w, orig_h=orig_h)
                     if lm:
@@ -1979,34 +2048,39 @@ def build_cvat_vf50_spec() -> List[Dict[str, Any]]:
     """
     specs: List[Dict[str, Any]] = []
 
-    for comp_name in VF50_COMPONENT_NAMES:
+    for idx, comp_name in enumerate(VF50_COMPONENT_NAMES, start=1):
         cfg = VF50_COMPONENT_CONFIG[comp_name]
         edges = VF50_EDGES_BY_COMPONENT[comp_name]
+        node_offset = cfg["start"]
 
         sublabels = [
-            {"name": str(pt_id), "type": "points", "attributes": []}
+            {"id": pt_id - node_offset + 1, "name": str(pt_id), "type": "points", "attributes": []}
             for pt_id in range(cfg["start"], cfg["end"] + 1)
         ]
 
         # Generate minimal valid SVG template for CVAT UI
-        svg_lines = []
-        node_offset = cfg["start"]
-        for p1, p2 in edges:
-            n1 = p1 - node_offset + 1
-            n2 = p2 - node_offset + 1
-            svg_lines.append(f'<line data-type="edge" data-node-from="{n1}" data-node-to="{n2}"></line>')
-
         svg_circles = []
         for pt_id in range(cfg["start"], cfg["end"] + 1):
             n_id = pt_id - node_offset + 1
             svg_circles.append(
-                f'<circle r="0.75" data-type="element node" data-element-id="{n_id}" '
+                f'<circle id="node_{n_id}" cx="50" cy="50" r="3" '
+                f'data-type="element node" data-element-id="{n_id}" '
                 f'data-node-id="{n_id}" data-label-name="{pt_id}"></circle>'
             )
 
-        svg_content = "\n".join(svg_lines + svg_circles)
+        svg_lines = []
+        for p1, p2 in edges:
+            n1 = p1 - node_offset + 1
+            n2 = p2 - node_offset + 1
+            svg_lines.append(
+                f'<line id="edge_{n1}_{n2}" data-type="edge" '
+                f'data-node-from="{n1}" data-node-to="{n2}" stroke="red" stroke-width="1"></line>'
+            )
+
+        svg_content = f'<svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">{"".join(svg_circles + svg_lines)}</svg>'
 
         spec_item = {
+            "id": idx,
             "name": comp_name,
             "type": "skeleton",
             "attributes": [],

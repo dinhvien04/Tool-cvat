@@ -25,11 +25,22 @@ from core.quality_gate import (
     assess_vf50_quality,
     assess_quality,
     detect_coordinate_axis_swap,
+    derive_skeleton_bbox,
+    derive_skeleton_center,
     verify_mirrored_laterality_invariance,
     verify_laterality_convention,
     Pose17QualityReport,
     VF50QualityReport,
     LateralityVerificationResult,
+)
+from core.skeleton_contract import (
+    PersonPose17,
+    PoseKeypoint,
+    VF50Face,
+    VF50Landmark,
+    VISIBILITY_OUTSIDE,
+    VISIBILITY_OCCLUDED,
+    VISIBILITY_VISIBLE,
 )
 
 
@@ -485,4 +496,141 @@ def test_pose17_corner_cluster_dump_detected():
     report = assess_pose17_quality(pose)
     assert report.needs_refine is True
     assert any("corner_cluster_dump" in r for r in report.reasons)
+
+
+# ==============================================================================
+# AUDIT TESTS: VIEWER PERSPECTIVE, BOUNDING BOX, CENTER, & CVAT FLAGS
+# ==============================================================================
+
+def test_strict_viewer_laterality_pose17_even_odd():
+    """Audit: Strict viewer perspective laterality for Pose 17 (R_* even > L_* odd in x)."""
+    # Create VinFast Pose 17 where even (Right) has larger x than odd (Left)
+    vinfast_viewer_pose: Dict[str, Tuple[float, float, int, float]] = {
+        "nose": (500.0, 300.0, 2, 0.98),          # 1
+        "right_eye": (520.0, 285.0, 2, 0.96),     # 2: Right in frame -> larger x
+        "left_eye": (480.0, 285.0, 2, 0.96),      # 3: Left in frame -> smaller x
+        "right_ear": (540.0, 290.0, 2, 0.92),     # 4: Right -> larger x
+        "left_ear": (460.0, 290.0, 2, 0.92),      # 5: Left -> smaller x
+        "right_shoulder": (570.0, 360.0, 2, 0.95),# 6: Right -> larger x
+        "left_shoulder": (430.0, 360.0, 2, 0.95), # 7: Left -> smaller x
+        "right_elbow": (600.0, 450.0, 2, 0.93),   # 8: Right -> larger x
+        "left_elbow": (400.0, 450.0, 2, 0.93),    # 9: Left -> smaller x
+        "right_wrist": (620.0, 530.0, 2, 0.90),   # 10: Right -> larger x
+        "left_wrist": (380.0, 530.0, 2, 0.90),    # 11: Left -> smaller x
+        "right_hip": (550.0, 550.0, 2, 0.95),     # 12: Right -> larger x
+        "left_hip": (450.0, 550.0, 2, 0.95),      # 13: Left -> smaller x
+        "right_knee": (550.0, 660.0, 2, 0.92),    # 14: Right -> larger x
+        "left_knee": (450.0, 660.0, 2, 0.92),     # 15: Left -> smaller x
+        "right_ankle": (560.0, 770.0, 2, 0.88),   # 16: Right -> larger x
+        "left_ankle": (440.0, 770.0, 2, 0.88),    # 17: Left -> smaller x
+    }
+    res = verify_laterality_convention(vinfast_viewer_pose, schema_type="pose17", expected_convention=LATERALITY_VIEWER)
+    assert res.is_valid is True
+    assert res.detected_convention == LATERALITY_VIEWER
+
+    # Invert a pair (left_shoulder given larger x than right_shoulder)
+    inverted = dict(vinfast_viewer_pose)
+    inverted["left_shoulder"] = (580.0, 360.0, 2, 0.95)
+    inverted["right_shoulder"] = (420.0, 360.0, 2, 0.95)
+    res_inv = verify_laterality_convention(inverted, schema_type="pose17", expected_convention=LATERALITY_VIEWER)
+    assert res_inv.is_valid is False
+    assert any("laterality_inversion" in r for r in res_inv.reasons)
+
+
+def test_strict_viewer_laterality_vf50_eyebrows_and_eyes():
+    """Audit: Strict viewer perspective laterality for VF-50 (longmaytrai/mattrai < longmayphai/matphai)."""
+    face = make_canonical_vf50()
+    res = verify_laterality_convention(face, schema_type="vf50", expected_convention=LATERALITY_VIEWER)
+    assert res.is_valid is True
+    assert res.detected_convention == LATERALITY_VIEWER
+
+    # Invert eyebrows only
+    inverted_eb = dict(face)
+    for i in range(5):
+        inverted_eb[i] = face[5 + i]
+        inverted_eb[5 + i] = face[i]
+    res_eb = verify_laterality_convention(inverted_eb, schema_type="vf50", expected_convention=LATERALITY_VIEWER)
+    assert res_eb.is_valid is False
+    assert any("eyebrow_laterality_inversion" in r for r in res_eb.reasons)
+
+
+def test_bounding_box_and_center_derivation():
+    """Audit: Bounding box derivation and center coordinate calculation for Pose 17 and VF-50."""
+    pose = make_canonical_pose17()
+    bbox_pose = derive_skeleton_bbox(pose, schema_type="pose17")
+    assert bbox_pose is not None
+    ymin, xmin, ymax, xmax = bbox_pose
+    assert 0 <= ymin < ymax <= 1000
+    assert 0 <= xmin < xmax <= 1000
+
+    center_pose = derive_skeleton_center(pose, schema_type="pose17")
+    assert center_pose is not None
+    cx, cy = center_pose
+    assert xmin <= cx <= xmax
+    assert ymin <= cy <= ymax
+
+    # PersonPose17 instance methods
+    person = PersonPose17(label="person")
+    for k, v in pose.items():
+        person.keypoints[k] = PoseKeypoint(name=k, x=v[0], y=v[1], visibility=v[2])
+    p_bbox = person.derive_bbox()
+    p_center = person.get_center()
+    assert p_bbox is not None
+    assert p_center is not None
+    assert abs(p_center[0] - cx) < 2.0
+
+    # VF50Face instance methods
+    face = make_canonical_vf50()
+    vf_bbox = derive_skeleton_bbox(face, schema_type="vf50")
+    vf_center = derive_skeleton_center(face, schema_type="vf50")
+    assert vf_bbox is not None
+    assert vf_center is not None
+
+    vf_obj = VF50Face(face_id=1)
+    for k, v in face.items():
+        vf_obj.landmarks[k] = VF50Landmark(id=k, name=str(k), x=v[0], y=v[1], visibility=v[2])
+    obj_bbox = vf_obj.derive_bbox()
+    obj_center = vf_obj.get_center()
+    assert obj_bbox is not None
+    assert obj_center is not None
+    assert abs(obj_center[0] - vf_center[0]) < 2.0
+
+
+def test_cvat_missing_elements_outside_occluded_flags():
+    """Audit: Missing elements get outside=True, occluded=False, confidence=0.0; occluded get outside=False, occluded=True."""
+    person = PersonPose17(label="person")
+    # Only populate nose as visible and left_eye as occluded, rest missing
+    person.keypoints["nose"] = PoseKeypoint(name="nose", x=500.0, y=300.0, visibility=VISIBILITY_VISIBLE)
+    person.keypoints["left_eye"] = PoseKeypoint(name="left_eye", x=515.0, y=285.0, visibility=VISIBILITY_OCCLUDED)
+
+    cvat_skel = person.to_cvat_skeleton(width=1920, height=1080)
+    elems = {el["label"]: el for el in cvat_skel["elements"]}
+
+    # nose: visible
+    assert elems["nose"]["outside"] is False
+    assert elems["nose"]["occluded"] is False
+
+    # left_eye: occluded
+    assert elems["left_eye"]["outside"] is False
+    assert elems["left_eye"]["occluded"] is True
+
+    # right_ankle: missing -> outside
+    assert elems["right_ankle"]["outside"] is True
+    assert elems["right_ankle"]["occluded"] is False
+
+    # VF-50 components
+    vf_obj = VF50Face(face_id=1)
+    vf_obj.landmarks[10] = VF50Landmark(id=10, name="10", x=500.0, y=450.0, visibility=VISIBILITY_OCCLUDED)
+    comp_skels = vf_obj.to_cvat_component_skeletons(width=1920, height=1080, group_id=1)
+    songmui_skel = next(s for s in comp_skels if s["label"] == "songmui")
+    songmui_elems = {el["label"]: el for el in songmui_skel["elements"]}
+
+    # Point 10: occluded
+    assert songmui_elems["10"]["outside"] is False
+    assert songmui_elems["10"]["occluded"] is True
+
+    # Point 11: default missing -> outside
+    assert songmui_elems["11"]["outside"] is True
+    assert songmui_elems["11"]["occluded"] is False
+
 

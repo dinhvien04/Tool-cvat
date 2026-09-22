@@ -19,6 +19,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -31,6 +32,7 @@ if str(ROOT) not in sys.path:
 
 import requests
 
+from app.client import NineRouterClient
 from core.pose_face_schema import (
     POSE17_KEYPOINTS,
     VF50_LANDMARKS,
@@ -109,45 +111,27 @@ def execute_direct_9router_request(
     api_key: Optional[str],
     model: str,
     prompt: str,
-    image_b64: str,
+    image_bytes: bytes,
     timeout: float,
 ) -> Dict[str, Any]:
-    """Execute raw HTTP request to 9Router OpenAI-compatible chat completion endpoint."""
-    url = f"{base_url.rstrip('/')}/v1/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-                ],
-            }
-        ],
-        "temperature": 0.0,
-        "max_tokens": 2048,
-    }
-
+    """Execute request to 9Router using NineRouterClient."""
+    client = NineRouterClient(base_url=base_url, api_key=api_key, timeout=timeout)
     t0 = time.perf_counter()
-    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    resp = client.send_vision_request(
+        model=model,
+        image_bytes_or_b64=image_bytes,
+        prompt=prompt,
+        temperature=0.0,
+        max_tokens=2048,
+        timeout=timeout,
+    )
     client_elapsed = time.perf_counter() - t0
-    resp.raise_for_status()
-    data = resp.json()
-
-    choices = data.get("choices", [])
-    content = choices[0].get("message", {}).get("content", "") if choices else ""
-    usage = data.get("usage", {})
 
     return {
-        "content": content,
-        "reported_api_sec": float(data.get("duration", client_elapsed)),
+        "content": resp.content,
+        "reported_api_sec": float(resp.duration_seconds),
         "client_elapsed_sec": client_elapsed,
-        "usage": usage,
+        "usage": resp.usage or {},
     }
 
 
@@ -186,7 +170,7 @@ def profile_single_iteration(
             api_key=api_key,
             model=model,
             prompt=prompt,
-            image_b64=image_b64,
+            image_bytes=image_bytes,
             timeout=timeout,
         )
         remote_api_sec = raw_res["reported_api_sec"]
@@ -196,7 +180,13 @@ def profile_single_iteration(
 
     # Local parsing and sanitization
     t_parse_start = time.perf_counter()
-    parsed_json = json.loads(content)
+    clean_content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
+    try:
+        parsed_json = json.loads(clean_content)
+    except Exception:
+        # If response is not direct JSON, attempt to locate json substring
+        m_json = re.search(r"\{.*\}", clean_content, re.DOTALL)
+        parsed_json = json.loads(m_json.group(0)) if m_json else {}
     if mode == "pose17":
         instance = parse_and_sanitize_pose17_instance(parsed_json, img_width=1280, img_height=720)
     else:

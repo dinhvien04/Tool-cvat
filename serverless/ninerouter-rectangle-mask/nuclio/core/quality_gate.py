@@ -220,6 +220,65 @@ def _bbox_from_points(points: Sequence[Sequence[float]]) -> Optional[Tuple[float
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def derive_skeleton_bbox(
+    data: Any,
+    schema_type: str = "pose17",
+    pad_ratio: float = 0.05,
+) -> Optional[List[int]]:
+    """Derive bounding box [ymin, xmin, ymax, xmax] in normalized [0..1000] from skeleton keypoints.
+
+    Works across Pose 17 and VF-50 generic dicts, lists, or instance objects.
+    """
+    schema_clean = str(schema_type).strip().lower()
+    pts: List[Tuple[float, float]] = []
+    if "pose" in schema_clean:
+        kp_map = _extract_pose17_points(data)
+        pts = [(v[0], v[1]) for v in kp_map.values() if v[2] > 0]
+    elif "vf50" in schema_clean or "face" in schema_clean:
+        lm_map = _extract_vf50_points(data)
+        pts = [(v[0], v[1]) for v in lm_map.values() if v[2] > 0]
+
+    if not pts:
+        return None
+
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    xmin, xmax = min(xs), max(xs)
+    ymin, ymax = min(ys), max(ys)
+    w, h = xmax - xmin, ymax - ymin
+    pad_x = w * pad_ratio
+    pad_y = h * pad_ratio
+    return [
+        int(max(0.0, min(1000.0, round(ymin - pad_y)))),
+        int(max(0.0, min(1000.0, round(xmin - pad_x)))),
+        int(max(0.0, min(1000.0, round(ymax + pad_y)))),
+        int(max(0.0, min(1000.0, round(xmax + pad_x)))),
+    ]
+
+
+def derive_skeleton_center(
+    data: Any,
+    schema_type: str = "pose17",
+) -> Optional[Tuple[float, float]]:
+    """Derive center coordinates (cx, cy) in normalized [0..1000] space from skeleton keypoints."""
+    schema_clean = str(schema_type).strip().lower()
+    pts: List[Tuple[float, float]] = []
+    if "pose" in schema_clean:
+        kp_map = _extract_pose17_points(data)
+        pts = [(v[0], v[1]) for v in kp_map.values() if v[2] > 0]
+    elif "vf50" in schema_clean or "face" in schema_clean:
+        lm_map = _extract_vf50_points(data)
+        pts = [(v[0], v[1]) for v in lm_map.values() if v[2] > 0]
+
+    if not pts:
+        return None
+
+    return (
+        round(sum(p[0] for p in pts) / len(pts), 2),
+        round(sum(p[1] for p in pts) / len(pts), 2),
+    )
+
+
 def _bbox_iou_xyxy(a: Sequence[float], b: Sequence[float]) -> float:
     ax1, ay1, ax2, ay2 = map(float, a)
     bx1, by1, bx2, by2 = map(float, b)
@@ -589,6 +648,24 @@ def verify_laterality_convention(
                 is_valid = False
                 reasons.append("laterality_inversion: viewer left has larger x than viewer right")
 
+        # Verify symmetric left/right pairs
+        pair_inversions: List[str] = []
+        for left_k, right_k in POSE17_PAIRED_KEYPOINTS:
+            lp = pts.get(left_k)
+            rp = pts.get(right_k)
+            if lp and rp and lp[2] > 0 and rp[2] > 0:
+                if target_conv == LATERALITY_VIEWER:
+                    # In viewer convention, left_k (odd) must have smaller x than right_k (even)
+                    if lp[0] > rp[0] + 5.0:
+                        pair_inversions.append(f"{left_k} ({lp[0]:.1f}) > {right_k} ({rp[0]:.1f})")
+                elif target_conv == LATERALITY_SUBJECT and is_frontal:
+                    # In subject convention for frontal, left_k must have larger x than right_k
+                    if lp[0] < rp[0] - 5.0:
+                        pair_inversions.append(f"{left_k} ({lp[0]:.1f}) < {right_k} ({rp[0]:.1f})")
+        if pair_inversions:
+            is_valid = False
+            reasons.append(f"paired_laterality_inversions: {pair_inversions}")
+
         return LateralityVerificationResult(
             is_valid=is_valid,
             detected_convention=detected,
@@ -628,6 +705,19 @@ def verify_laterality_convention(
             if delta_x > 0:
                 is_valid = False
                 reasons.append("laterality_inversion: subject right eye has larger x than left eye")
+
+        # Check eyebrows (longmaytrai 0..4 vs longmayphai 5..9)
+        left_eb_pts = [pts_map[i] for i in range(0, 5) if i in pts_map]
+        right_eb_pts = [pts_map[i] for i in range(5, 10) if i in pts_map]
+        if left_eb_pts and right_eb_pts:
+            c_left_eb = sum(p[0] for p in left_eb_pts) / len(left_eb_pts)
+            c_right_eb = sum(p[0] for p in right_eb_pts) / len(right_eb_pts)
+            if target_conv == LATERALITY_VIEWER and c_left_eb > c_right_eb:
+                is_valid = False
+                reasons.append(f"eyebrow_laterality_inversion: longmaytrai ({c_left_eb:.1f}) > longmayphai ({c_right_eb:.1f})")
+            elif target_conv == LATERALITY_SUBJECT and c_left_eb < c_right_eb:
+                is_valid = False
+                reasons.append(f"eyebrow_laterality_inversion: subject right eyebrow ({c_right_eb:.1f}) > left eyebrow ({c_left_eb:.1f})")
 
         return LateralityVerificationResult(
             is_valid=is_valid,
