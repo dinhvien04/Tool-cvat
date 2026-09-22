@@ -1,12 +1,14 @@
+import os
 import time
 import requests
 
-CVAT_URL = "http://localhost:18080"
-TOKEN = "984527795df646f41ee018bab7b3e424dfaae443"
+CVAT_URL = os.getenv("CVAT_URL", "http://localhost:18080")
+TOKEN = os.getenv("CVAT_TOKEN", "")
 HEADERS = {
-    "Authorization": f"Token {TOKEN}",
     "Content-Type": "application/json",
 }
+if TOKEN:
+    HEADERS["Authorization"] = f"Token {TOKEN}"
 
 functions_to_test = [
     ("ninerouter-polyline", "Polyline"),
