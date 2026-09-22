@@ -537,6 +537,7 @@ class TestVF50PromptAndSpec:
     def test_cvat_spec_structure(self):
         specs = build_cvat_vf50_spec()
         assert len(specs) == 7
+        total_sublabels = 0
         for spec in specs:
             assert spec["type"] == "skeleton"
             assert spec["attributes"] == []
@@ -544,3 +545,152 @@ class TestVF50PromptAndSpec:
             assert "svg" in spec
             assert "<circle" in spec["svg"]
             assert "<line" in spec["svg"]
+            total_sublabels += len(spec["sublabels"])
+        assert total_sublabels == 50
+
+    def test_function_yaml_validates(self):
+        from pathlib import Path
+        from scripts.validate_function_spec import validate_function_yaml
+        yaml_path = Path(__file__).resolve().parent.parent / "serverless" / "ninerouter-face-vf50" / "nuclio" / "function.yaml"
+        is_valid, errs = validate_function_yaml(yaml_path)
+        assert is_valid is True, f"function.yaml validation failed: {errs}"
+
+
+# ==============================================================================
+# SECTION 10: MODEL HANDLER INTEGRATION
+# ==============================================================================
+
+class TestVF50ModelHandler:
+    """Verify ModelHandler infer lifecycle and 7-component output formatting."""
+
+    @pytest.fixture
+    def mock_handler(self, monkeypatch):
+        import importlib.util
+        from pathlib import Path
+
+        def mock_resolve(self, requested_model):
+            return "mock-gemini-vision"
+
+        monkeypatch.setattr("app.client.NineRouterClient.resolve_vision_model", mock_resolve)
+
+        handler_path = Path(__file__).resolve().parent.parent / "serverless" / "ninerouter-face-vf50" / "nuclio" / "model_handler.py"
+        spec = importlib.util.spec_from_file_location("vf50_model_handler", handler_path)
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        handler = mod.ModelHandler(base_url="http://mock:20128", api_key="test-key", model="mock-gemini-vision")
+        return handler
+
+    def test_handler_emits_7_components_for_single_face(self, mock_handler, monkeypatch):
+        import io
+        from PIL import Image
+        from app.client import VisionResponse
+
+        # Build mock canonical face JSON
+        mock_face = {
+            "id": 1,
+            "confidence": 0.98,
+            "landmarks": [
+                {"id": i, "point": [400 + (i % 10) * 10, 300 + (i // 10) * 10], "visibility": 2, "confidence": 0.95}
+                for i in range(50)
+            ],
+        }
+        mock_resp = VisionResponse(
+            content=json.dumps({"faces": [mock_face]}),
+            raw_response={},
+            duration_seconds=0.2,
+            model="mock-gemini-vision",
+            status_code=200,
+        )
+        monkeypatch.setattr(mock_handler.client, "send_vision_request", lambda **kwargs: mock_resp)
+
+        img = Image.new("RGB", (640, 480), color=(100, 100, 100))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        img_bytes = buf.getvalue()
+
+        shapes = mock_handler.infer(img_bytes, threshold=0.5)
+        # Exactly 7 component skeletons
+        assert len(shapes) == 7
+        labels = [s["label"] for s in shapes]
+        assert labels == list(VF50_COMPONENT_NAMES)
+        for s in shapes:
+            assert s["type"] == "skeleton"
+            assert s["group"] == 1
+            for el in s["elements"]:
+                assert el["type"] == "points"
+                assert len(el["points"]) == 2
+                assert el["label"].isdigit()
+
+    def test_handler_multi_face_groups(self, mock_handler, monkeypatch):
+        import io
+        from PIL import Image
+        from app.client import VisionResponse
+
+        face1 = create_canonical_frontal_face(face_id=1)
+        face2 = create_canonical_frontal_face(face_id=2)
+        mock_face1 = {
+            "id": 1,
+            "confidence": 0.98,
+            "landmarks": [
+                {"id": lm.id, "point": [lm.x, lm.y], "visibility": lm.visibility, "confidence": lm.confidence}
+                for lm in face1.landmarks.values()
+            ],
+        }
+        mock_face2 = {
+            "id": 2,
+            "confidence": 0.95,
+            "landmarks": [
+                {"id": lm.id, "point": [lm.x, lm.y], "visibility": lm.visibility, "confidence": lm.confidence}
+                for lm in face2.landmarks.values()
+            ],
+        }
+        mock_resp = VisionResponse(
+            content=json.dumps({"faces": [mock_face1, mock_face2]}),
+            raw_response={},
+            duration_seconds=0.2,
+            model="mock-gemini-vision",
+            status_code=200,
+        )
+        monkeypatch.setattr(mock_handler.client, "send_vision_request", lambda **kwargs: mock_resp)
+
+        img = Image.new("RGB", (640, 480), color=(100, 100, 100))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+
+        shapes = mock_handler.infer(buf.getvalue(), threshold=0.5)
+        # 2 faces * 7 components = 14 skeletons
+        assert len(shapes) == 14
+        groups_face1 = {s["group"] for s in shapes[:7]}
+        groups_face2 = {s["group"] for s in shapes[7:]}
+        assert groups_face1 == {1}
+        assert groups_face2 == {2}
+
+    def test_handler_confidence_threshold_filtering(self, mock_handler, monkeypatch):
+        import io
+        from PIL import Image
+        from app.client import VisionResponse
+
+        mock_face_low_conf = {
+            "id": 1,
+            "confidence": 0.3,
+            "landmarks": [{"id": i, "point": [200, 300], "visibility": 2} for i in range(50)],
+        }
+        mock_resp = VisionResponse(
+            content=json.dumps({"faces": [mock_face_low_conf]}),
+            raw_response={},
+            duration_seconds=0.2,
+            model="mock-gemini-vision",
+            status_code=200,
+        )
+        monkeypatch.setattr(mock_handler.client, "send_vision_request", lambda **kwargs: mock_resp)
+
+        img = Image.new("RGB", (640, 480), color=(100, 100, 100))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+
+        # Threshold 0.5 filters out 0.3 face -> returns empty list
+        shapes = mock_handler.infer(buf.getvalue(), threshold=0.5)
+        assert shapes == []
+

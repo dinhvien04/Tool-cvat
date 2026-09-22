@@ -1384,6 +1384,7 @@ class VF50Face:
             }
             if group_id is not None:
                 skel_dict["group_id"] = int(group_id)
+                skel_dict["group"] = int(group_id)
 
             skeletons.append(skel_dict)
 
@@ -1419,6 +1420,7 @@ class VF50Face:
         }
         if group_id is not None:
             skel_dict["group_id"] = int(group_id)
+            skel_dict["group"] = int(group_id)
         return skel_dict
 
 

@@ -39,10 +39,10 @@ from app.config import (
     mask_api_key,
 )
 from app.parser import clean_json_string
+from core.pose_face_schema import VF50_LANDMARKS, VF50_EDGES
 from core.skeleton_contract import (
-    VF50_LANDMARKS,
     VF50_COMPONENT_NAMES,
-    build_vf50_prompt,
+    build_vf50_prompt as contract_build_vf50_prompt,
     parse_vf50_response,
     faces_to_cvat_skeletons,
     assess_vf50_quality,
@@ -54,40 +54,9 @@ DEFAULT_VF50_MAX_TOKENS = 2500
 DEFAULT_VF50_MAX_IMAGE_SIZE = 1280
 
 
-def build_vf50_prompt(landmarks: Sequence[str]) -> str:
+def build_vf50_prompt(landmarks: Optional[Sequence[str]] = None) -> str:
     """Build strict, deterministic prompt for 9Router VF50 facial landmark vision model."""
-    return (
-        "Detect all faces and estimate their 50 VinAI facial landmarks in this image.\n"
-        "The 50 landmarks are partitioned into components:\n"
-        "- longmaytrai (00..04): left eyebrow (viewer's left / image left)\n"
-        "- longmayphai (05..09): right eyebrow (viewer's right / image right)\n"
-        "- songmui (10..13): nose bridge\n"
-        "- mattrai (14..21): left eye\n"
-        "- matphai (22..29): right eye\n"
-        "- moingoai (30..41): outer lip contour\n"
-        "- moitrong (42..49): inner lip contour\n"
-        "Coordinate convention:\n"
-        "- Coordinates must be normalized integers [x, y] in range [0, 1000] relative to image width and height.\n"
-        "- Visibility flag:\n"
-        "    0 = outside image frame or unobserved\n"
-        "    1 = present but occluded\n"
-        "    2 = clearly visible\n"
-        "Return STRICT JSON only, matching this structure:\n"
-        "{\n"
-        '  "faces": [\n'
-        "    {\n"
-        '      "id": 1,\n'
-        '      "label": "face",\n'
-        '      "confidence": 0.98,\n'
-        '      "landmarks": {\n'
-        '        "longmaytrai_00": [x, y, 2],\n'
-        "        ...\n"
-        "      }\n"
-        "    }\n"
-        "  ]\n"
-        "}\n"
-        'If no faces are found, return {"faces": []}.'
-    )
+    return contract_build_vf50_prompt()
 
 
 class ModelHandler:
