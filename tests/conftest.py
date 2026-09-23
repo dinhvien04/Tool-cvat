@@ -26,17 +26,7 @@ FORBIDDEN_HOSTS = {
 
 def _is_forbidden_target(host: Any, port: int) -> bool:
     """Return True if (host, port) matches forbidden offline test targets."""
-    if port not in FORBIDDEN_PORTS:
-        return False
-    if not isinstance(host, str):
-        return True
-    host_clean = host.lower().strip()
-    return (
-        host_clean in FORBIDDEN_HOSTS
-        or host_clean.startswith("127.")
-        or host_clean.endswith(".local")
-        or host_clean == ""
-    )
+    return port in FORBIDDEN_PORTS
 
 
 @pytest.fixture(autouse=True)

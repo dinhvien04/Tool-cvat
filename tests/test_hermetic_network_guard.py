@@ -48,6 +48,15 @@ def test_hermetic_guard_blocks_connect_ex():
     assert "Hermetic offline test violation" in str(exc_info.value)
 
 
+def test_hermetic_guard_blocks_remote_ip_on_forbidden_port():
+    """Guards against any host IP attempting connections to forbidden internal ports."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    with pytest.raises(pytest.fail.Exception) as exc_info:
+        sock.connect(("192.168.1.100", 20128))
+    assert "Hermetic offline test violation" in str(exc_info.value)
+    assert "20128" in str(exc_info.value)
+
+
 @pytest.mark.live
 def test_hermetic_guard_allows_live_marked_test():
     """Tests decorated with @pytest.mark.live bypass the hermetic guard."""

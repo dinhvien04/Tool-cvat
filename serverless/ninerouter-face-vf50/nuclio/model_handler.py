@@ -50,6 +50,7 @@ from core.skeleton_contract import (
     assess_vf50_quality,
     is_vf50_face_degenerate,
     is_vf50_face_salvageable,
+    merge_vf50_landmarks,
 )
 from core.week2_schema import get_build_sha, load_vf50
 
@@ -398,19 +399,22 @@ class ModelHandler:
                 orig_h=orig_h,
             )
             if refined_faces:
-                refined_face = refined_faces[0]
-                refined_face.face_id = face.face_id
-                if refined_face.box_2d is None and face.box_2d is not None:
-                    refined_face.box_2d = list(face.box_2d)
-                if refined_face.confidence <= 0.0 or refined_face.confidence == 1.0:
-                    refined_face.confidence = face.confidence
+                raw_refined = refined_faces[0]
+                raw_refined.face_id = face.face_id
+                if raw_refined.box_2d is None and face.box_2d is not None:
+                    raw_refined.box_2d = list(face.box_2d)
+                if raw_refined.confidence <= 0.0 or raw_refined.confidence == 1.0:
+                    raw_refined.confidence = face.confidence
+
+                # Deterministically merge Pass 1 and Pass 2 face landmarks
+                merged_face = merge_vf50_landmarks(face, raw_refined, actual_crop_box)
                 q_orig = assess_vf50_quality(face, width=orig_w, height=orig_h)
-                q_new = assess_vf50_quality(refined_face, width=orig_w, height=orig_h)
+                q_new = assess_vf50_quality(merged_face, width=orig_w, height=orig_h)
                 if q_new.score >= q_orig.score:
                     logger.info(
                         f"Crop refinement improved face {face.face_id} quality from {q_orig.score:.2f} to {q_new.score:.2f}"
                     )
-                    return refined_face
+                    return merged_face
                 else:
                     logger.debug(
                         f"Initial face {face.face_id} retained: orig score {q_orig.score:.2f} >= crop score {q_new.score:.2f}"

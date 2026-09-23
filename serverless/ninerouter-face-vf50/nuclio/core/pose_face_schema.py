@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from core.week2_schema import (
+    SchemaValidationError,
     load_pose17,
     load_vf50,
     map_cvat_to_visibility,
@@ -77,7 +78,8 @@ VF50_COMPONENT_COUNTS: Dict[str, int] = {
     c.name: c.point_count for c in _vf50.components
 }
 VF50_LANDMARKS: Tuple[str, ...] = vf50_landmarks()
-assert len(VF50_LANDMARKS) == 50, f"VF50 must have exactly 50 landmarks, got {len(VF50_LANDMARKS)}"
+if len(VF50_LANDMARKS) != 50:
+    raise SchemaValidationError(f"VF50 must have exactly 50 landmarks, got {len(VF50_LANDMARKS)}")
 
 # Point IDs are continuous 0..49
 VF50_LANDMARK_TO_ID: Dict[str, int] = {

@@ -25,10 +25,13 @@ from core.skeleton_contract import (
     map_cvat_to_visibility,
     map_visibility_to_cvat,
     merge_refined_keypoint,
+    merge_vf50_landmarks,
     normalize_keypoint,
     parse_pose17_response,
     poses_to_cvat_skeletons,
     reproject_crop_point,
+    VF50Face,
+    VF50Landmark,
 )
 
 
@@ -607,5 +610,80 @@ class TestMergeRefinedKeypoint:
     def test_both_none_returns_none(self):
         crop_bbox = [100.0, 200.0, 600.0, 700.0]
         assert merge_refined_keypoint("nose", None, None, crop_bbox) is None
+
+
+class TestMergeVF50Landmarks:
+    """Verify deterministic landmark-level merging between Pass 1 and Pass 2 for VF50 faces."""
+
+    @pytest.fixture
+    def crop_bbox(self):
+        return [200.0, 200.0, 600.0, 600.0]
+
+    def test_case_d_fallback_when_pass2_omits_landmark(self, crop_bbox):
+        f1 = VF50Face(face_id=1, confidence=0.9)
+        f1.landmarks[0] = VF50Landmark(id=0, name="0", x=300.0, y=250.0, visibility=2, confidence=0.85)
+
+        # Pass 2 omitted landmark 0 (default vis=0, conf=0)
+        f2 = VF50Face(face_id=1, confidence=0.95)
+        f2.landmarks[0] = VF50Landmark(id=0, name="0", x=0.0, y=0.0, visibility=0, confidence=0.0)
+
+        merged = merge_vf50_landmarks(f1, f2, crop_bbox)
+        assert merged.landmarks[0].visibility == 2
+        assert merged.landmarks[0].x == 300.0
+        assert merged.landmarks[0].y == 250.0
+        assert merged.landmarks[0].confidence == 0.85
+
+    def test_case_b_accepts_pass2_occluded_landmark(self, crop_bbox):
+        f1 = VF50Face(face_id=1, confidence=0.8)
+        f1.landmarks[10] = VF50Landmark(id=10, name="10", x=400.0, y=350.0, visibility=2, confidence=0.7)
+
+        # Pass 2 determined landmark 10 is physically occluded
+        f2 = VF50Face(face_id=1, confidence=0.95)
+        f2.landmarks[10] = VF50Landmark(id=10, name="10", x=402.0, y=352.0, visibility=1, confidence=0.9)
+
+        merged = merge_vf50_landmarks(f1, f2, crop_bbox)
+        assert merged.landmarks[10].visibility == 1
+        assert merged.landmarks[10].x == 402.0
+        assert merged.landmarks[10].y == 352.0
+
+    def test_happy_path_accepts_pass2_visible_landmark(self, crop_bbox):
+        f1 = VF50Face(face_id=1, confidence=0.8)
+        f1.landmarks[14] = VF50Landmark(id=14, name="14", x=320.0, y=280.0, visibility=2, confidence=0.6)
+
+        f2 = VF50Face(face_id=1, confidence=0.95)
+        f2.landmarks[14] = VF50Landmark(id=14, name="14", x=325.0, y=282.0, visibility=2, confidence=0.98)
+
+        merged = merge_vf50_landmarks(f1, f2, crop_bbox)
+        assert merged.landmarks[14].visibility == 2
+        assert merged.landmarks[14].x == 325.0
+        assert merged.landmarks[14].y == 282.0
+        assert merged.landmarks[14].confidence == 0.98
+
+    def test_case_a_retains_pass1_when_outside_crop(self, crop_bbox):
+        # Pass 1 detected chin/mouth at y=750 (outside crop ymax=600)
+        f1 = VF50Face(face_id=1, confidence=0.85)
+        f1.landmarks[39] = VF50Landmark(id=39, name="39", x=400.0, y=750.0, visibility=2, confidence=0.9)
+
+        # Pass 2 did not see it because crop was [200..600]
+        f2 = VF50Face(face_id=1, confidence=0.95)
+        f2.landmarks[39] = VF50Landmark(id=39, name="39", x=0.0, y=0.0, visibility=0, confidence=0.5)
+
+        merged = merge_vf50_landmarks(f1, f2, crop_bbox)
+        assert merged.landmarks[39].visibility == 2
+        assert merged.landmarks[39].x == 400.0
+        assert merged.landmarks[39].y == 750.0
+
+    def test_case_c_respects_pass2_outside_when_inside_crop(self, crop_bbox):
+        # Pass 1 had landmark 16 at [340, 260] (inside crop [200..600])
+        f1 = VF50Face(face_id=1, confidence=0.85)
+        f1.landmarks[16] = VF50Landmark(id=16, name="16", x=340.0, y=260.0, visibility=2, confidence=0.9)
+
+        # Pass 2 inspected crop and verified absent / unlabelable (vis=0)
+        f2 = VF50Face(face_id=1, confidence=0.95)
+        f2.landmarks[16] = VF50Landmark(id=16, name="16", x=0.0, y=0.0, visibility=0, confidence=0.8)
+
+        merged = merge_vf50_landmarks(f1, f2, crop_bbox)
+        # Must respect Pass 2 determination, do NOT restore Pass 1
+        assert merged.landmarks[16].visibility == 0
 
 

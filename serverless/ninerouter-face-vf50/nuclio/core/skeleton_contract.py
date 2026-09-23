@@ -37,6 +37,7 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set
 logger = logging.getLogger(__name__)
 
 from core.week2_schema import (
+    SchemaValidationError,
     load_pose17,
     load_vf50,
     pose17_coco_keypoints,
@@ -1085,7 +1086,6 @@ def merge_refined_keypoint(
         # and Pass 1 coordinate lies INSIDE the crop bounds (Pass 2 actually inspected this region).
         # -> Do NOT restore Pass 1!
         return [round(norm_x, 1), round(norm_y, 1), VISIBILITY_OUTSIDE]
-        return [round(norm_x, 1), round(norm_y, 1), VISIBILITY_OUTSIDE]
 
 
 def generate_cvat_pose17_svg(sublabel_names: Optional[Sequence[str]] = None) -> str:
@@ -1199,7 +1199,8 @@ VF50_EDGES_BY_COMPONENT: Dict[str, Tuple[Tuple[int, int], ...]] = vf50_edges_by_
 
 # All 47 edges across all 7 skeletons
 VF50_ALL_EDGES: Tuple[Tuple[int, int], ...] = vf50_all_edges()
-assert len(VF50_ALL_EDGES) == 47, f"VF-50 must have exactly 47 edges, got {len(VF50_ALL_EDGES)}"
+if len(VF50_ALL_EDGES) != 47:
+    raise SchemaValidationError(f"VF-50 must have exactly 47 edges, got {len(VF50_ALL_EDGES)}")
 
 # The 12 canonical anchor points defined in VinFast Guideline Section 5.5
 VF50_ANCHOR_POINTS: Tuple[int, ...] = (0, 4, 5, 9, 10, 13, 14, 18, 22, 26, 30, 36)
@@ -1574,6 +1575,92 @@ def _has_self_intersection(points: Sequence[Tuple[float, float]]) -> bool:
             if _segments_intersect(p1, p2, p3, p4):
                 return True
     return False
+
+
+def merge_vf50_landmarks(
+    initial_face: VF50Face,
+    refined_face: VF50Face,
+    crop_bbox: Sequence[Union[int, float]],
+) -> VF50Face:
+    """Deterministically merge Pass 1 global face detection and Pass 2 crop refinement landmarks.
+
+    Implements a 5-case landmark-level resolution policy:
+      - Case D (Omitted in Pass 2): Pass 2 omitted the landmark or emitted default (vis=0, conf=0)
+        while Pass 1 had an active detection -> fallback to Pass 1 landmark.
+      - Case B (Occluded): Pass 2 refined the landmark as physically occluded (vis=1) ->
+        use Pass 2 coordinates and vis=1.
+      - Case A (Outside Crop): Pass 2 says vis=0, but Pass 1 coordinate lies OUTSIDE
+        the crop bounds [ymin, xmin, ymax, xmax] -> retain Pass 1 active detection.
+      - Case C (Inside Crop Verified Absent): Pass 2 says vis=0, and Pass 1 was INSIDE
+        the crop bounds -> respect Pass 2 determination (vis=0).
+      - Happy Path (Visible): Pass 2 says vis=2 -> use Pass 2 refined landmark.
+    """
+    if len(crop_bbox) < 4:
+        raise ValueError("crop_bbox must contain [ymin, xmin, ymax, xmax]")
+
+    c_ymin, c_xmin, c_ymax, c_xmax = [float(v) for v in crop_bbox[:4]]
+    merged_landmarks: Dict[int, VF50Landmark] = {}
+
+    for pt_id in range(VF50_POINTS_COUNT):
+        p1 = initial_face.landmarks.get(pt_id)
+        p2 = refined_face.landmarks.get(pt_id)
+
+        has_p1 = (
+            p1 is not None
+            and not p1.is_outside
+            and 0.0 <= p1.x <= 1000.0
+            and 0.0 <= p1.y <= 1000.0
+            and not (math.isnan(p1.x) or math.isnan(p1.y))
+        )
+        has_p2 = (
+            p2 is not None
+            and 0.0 <= p2.x <= 1000.0
+            and 0.0 <= p2.y <= 1000.0
+            and not (math.isnan(p2.x) or math.isnan(p2.y))
+        )
+
+        if not has_p2:
+            if p1 is not None:
+                merged_landmarks[pt_id] = p1
+            continue
+
+        # Case D: Pass 2 response omitted point (confidence == 0.0 and visibility == VISIBILITY_OUTSIDE)
+        if p2.is_outside and p2.confidence <= 0.0 and has_p1:
+            merged_landmarks[pt_id] = p1
+            continue
+
+        # Happy path: Pass 2 clearly visible
+        if p2.is_visible:
+            merged_landmarks[pt_id] = p2
+            continue
+
+        # Case B: Pass 2 physically occluded
+        if p2.is_occluded:
+            merged_landmarks[pt_id] = p2
+            continue
+
+        # Pass 2 says outside (vis == 0)
+        if not has_p1:
+            merged_landmarks[pt_id] = p2
+            continue
+
+        p1_inside_crop = (
+            (c_xmin - 5.0) <= p1.x <= (c_xmax + 5.0)
+            and (c_ymin - 5.0) <= p1.y <= (c_ymax + 5.0)
+        )
+        if not p1_inside_crop:
+            # Case A: Out-of-crop preservation
+            merged_landmarks[pt_id] = p1
+        else:
+            # Case C: Pass 2 inspected crop and verified absent
+            merged_landmarks[pt_id] = p2
+
+    return VF50Face(
+        face_id=refined_face.face_id if refined_face.face_id is not None else initial_face.face_id,
+        box_2d=list(refined_face.box_2d) if refined_face.box_2d is not None else (list(initial_face.box_2d) if initial_face.box_2d is not None else None),
+        confidence=max(initial_face.confidence, refined_face.confidence),
+        landmarks=merged_landmarks,
+    )
 
 
 # ==============================================================================
