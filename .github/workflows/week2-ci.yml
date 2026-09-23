@@ -9,12 +9,16 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
@@ -29,7 +33,7 @@ jobs:
         run: python scripts/sync_serverless_modules.py --check --target all
 
       - name: Run tests
-        run: python -m pytest tests/ -x --tb=short -q
+        run: python -m pytest tests/ -x --tb=short -q -m "not live"
 
       - name: Validate YAML schemas
         if: contains(github.event_name, 'push') || contains(github.event_name, 'pull_request')
