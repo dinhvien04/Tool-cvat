@@ -64,7 +64,8 @@ class TestKeypointTopology:
             assert KEYPOINT_INDEX_MAP[name] == idx
 
     def test_skeleton_edges_connectivity(self):
-        assert len(POSE17_SKELETON_EDGES) == 16
+        # 18 edges per config/week2_pose17.yaml (includes ear-to-shoulder)
+        assert len(POSE17_SKELETON_EDGES) == 18
         for p1, p2 in POSE17_SKELETON_EDGES:
             assert p1 in POSE17_KEYPOINTS_SET
             assert p2 in POSE17_KEYPOINTS_SET
@@ -413,7 +414,7 @@ class TestCVATSpecHelper:
         assert "svg" in spec
         svg = spec["svg"]
         assert svg.count("<circle") == 17
-        assert svg.count("<line") == 16
+        assert svg.count("<line") == 18  # 18 edges per authoritative YAML
         for nid in range(1, 18):
             assert f'data-node-id="{nid}"' in svg
 

@@ -298,14 +298,30 @@ class TestCvatSkeletonGeneration:
         sublabel_names = [elem["label"] for s in shapes for elem in s["elements"]]
         assert sublabel_names == [str(i) for i in range(50)]
 
-    def test_single_face_unified_parent_mode(self):
+    def test_single_face_unified_parent_mode_removed(self):
+        """Legacy to_cvat_single_skeleton was removed in Phase 4.
+        Verify it no longer exists and component mode is the only path."""
         face = create_canonical_frontal_face(face_id=1)
-        shape = face.to_cvat_single_skeleton(width=1280, height=720, label="face", group_id=10)
+        assert not hasattr(face, 'to_cvat_single_skeleton'), \
+            "Legacy to_cvat_single_skeleton should have been removed"
+        # Component mode should still work
+        shapes = face.to_cvat_component_skeletons(width=1280, height=720, group_id=10)
+        assert len(shapes) == 7
+        assert all(s["type"] == "skeleton" for s in shapes)
 
-        assert shape["type"] == "skeleton"
-        assert shape["label"] == "face"
-        assert shape["group_id"] == 10
-        assert len(shape["elements"]) == 50
+    def test_faces_to_cvat_always_emits_7_components_per_face(self):
+        """as_components parameter is deprecated but kept for backward compat.
+        Regardless of its value, output must always be 7 component skeletons per face."""
+        face = create_canonical_frontal_face(face_id=1)
+        shapes_default = faces_to_cvat_skeletons([face], width=1280, height=720)
+        shapes_explicit = faces_to_cvat_skeletons([face], width=1280, height=720, as_components=True)
+        assert len(shapes_default) == 7
+        assert len(shapes_explicit) == 7
+        for shapes in (shapes_default, shapes_explicit):
+            labels = [s["label"] for s in shapes]
+            assert labels == list(VF50_COMPONENT_NAMES)
+            for s in shapes:
+                assert s["type"] == "skeleton"
 
     def test_zero_faces_emits_empty_list(self):
         shapes = faces_to_cvat_skeletons([], width=1280, height=720)
@@ -464,6 +480,29 @@ class TestVF50QualityGate:
         shapes = faces_to_cvat_skeletons([face], width=640, height=480, filter_corrupt=True, fallback_on_corrupt=True)
         # Should be dropped because it is a true geometric collapse (< 15 normalized units diagonal)
         assert shapes == []
+
+    def test_multi_face_fallback_salvages_up_to_5(self):
+        """When all faces are rejected by strict quality gate, fallback salvages up to 5 highest-scoring."""
+        faces = []
+        for i in range(8):
+            face = create_canonical_frontal_face(face_id=i + 1)
+            # Induce anomalies to fail strict quality gate but remain salvageable (active >= 15)
+            face.landmarks[16].y = face.landmarks[20].y + 50.0  # eyelid inversion
+            face.landmarks[24].y = face.landmarks[28].y + 50.0  # eyelid inversion
+            face.landmarks[42].x = face.landmarks[30].x - 60.0  # lip protrusion
+            face.landmarks[11].y = face.landmarks[10].y - 20.0  # nose non-monotonic
+            face.confidence = 0.90 - i * 0.01
+            faces.append(face)
+
+        shapes = faces_to_cvat_skeletons(
+            faces, width=640, height=480,
+            filter_corrupt=True, fallback_on_corrupt=True,
+        )
+        # Should salvage exactly 5 faces (max), each with 7 components = 35 shapes
+        assert len(shapes) == 5 * 7
+        # All salvaged faces must have distinct group_ids
+        group_ids = {s.get("group_id") for s in shapes if "group_id" in s}
+        assert len(group_ids) == 5
 
 
 # ==============================================================================
