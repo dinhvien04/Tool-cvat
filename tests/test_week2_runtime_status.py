@@ -241,6 +241,47 @@ class TestAnalyzeFunctionRuntime:
             assert strict_rep["ready"] is False
             assert any("BUILD SHA MISMATCH" in d for d in strict_rep["drift_details"])
 
+    def test_deployed_build_sha_missing_strict_mode(self, mock_pose17_cfg):
+        canonical_spec = get_canonical_cvat_spec("pose17")
+        repo_sha = "2222222222222222222222222222222222222222"
+
+        mock_inspect = {
+            "State": {
+                "Status": "running",
+                "Health": {"Status": "healthy"},
+            },
+            "NetworkSettings": {"Ports": {}},
+            "Config": {
+                "Env": ["VISION_MODEL=ag/gemini-3.8-flash-low"],
+                "Labels": {
+                    "nuclio.io/annotations": json.dumps({
+                        "spec": json.dumps(canonical_spec),
+                    }),
+                },
+            },
+        }
+
+        with mock.patch("scripts.week2_runtime_status.get_container_inspect", return_value=mock_inspect), \
+             mock.patch("scripts.week2_runtime_status.get_git_head_sha", return_value=repo_sha), \
+             mock.patch("scripts.week2_runtime_status.get_nuclio_dashboard_spec", return_value=canonical_spec), \
+             mock.patch("scripts.week2_runtime_status.get_cvat_lambda_spec", return_value=canonical_spec):
+
+            # Non-strict mode: build_sha_match is False, spec_drift is False, ready is True
+            non_strict = analyze_function_runtime("pose17", mock_pose17_cfg, strict=False)
+            assert non_strict["build_sha"] is None
+            assert non_strict["build_sha_match"] is False
+            assert non_strict["spec_drift"] is False
+            assert non_strict["ready"] is True
+            assert any("BUILD SHA MISSING" in d for d in non_strict["drift_details"])
+
+            # Strict mode: build_sha missing escalates to spec_drift True and ready False
+            strict_rep = analyze_function_runtime("pose17", mock_pose17_cfg, strict=True)
+            assert strict_rep["build_sha"] is None
+            assert strict_rep["build_sha_match"] is False
+            assert strict_rep["spec_drift"] is True
+            assert strict_rep["ready"] is False
+            assert any("BUILD SHA MISSING" in d for d in strict_rep["drift_details"])
+
     def test_legacy_monolithic_face_detection(self):
         repo_root = Path(__file__).resolve().parent.parent
         vf50_cfg = {

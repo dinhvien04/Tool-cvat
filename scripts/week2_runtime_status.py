@@ -313,15 +313,23 @@ def analyze_function_runtime(key: str, cfg: Dict[str, Any], *, strict: bool = Fa
     report["build_sha"] = container_build_sha
     if container_build_sha and git_head:
         report["build_sha_match"] = (container_build_sha == git_head)
+        if container_build_sha != git_head:
+            report["drift_details"].append(
+                f"BUILD SHA MISMATCH: Container deployed at {container_build_sha[:12]}, repo is at {git_head[:12]}"
+            )
+            if strict:
+                report["spec_drift"] = True
     elif not container_build_sha:
         report["build_sha_match"] = False
         report["drift_details"].append(
             "BUILD SHA MISSING: Container does not have TOOL_CVAT_BUILD_SHA environment variable"
         )
-
-    if container_build_sha and git_head and container_build_sha != git_head:
+        if strict:
+            report["spec_drift"] = True
+    elif not git_head:
+        report["build_sha_match"] = False
         report["drift_details"].append(
-            f"BUILD SHA MISMATCH: Container deployed at {container_build_sha[:12]}, repo is at {git_head[:12]}"
+            f"BUILD SHA UNVERIFIED: Container has {container_build_sha[:12]} but cannot determine repo git HEAD"
         )
         if strict:
             report["spec_drift"] = True
@@ -476,6 +484,9 @@ def main() -> int:
                 print(f"    - {d}")
         else:
             print("  DRIFT           : NO (100% SHA-256 spec alignment)")
+            if r["drift_details"]:
+                for d in r["drift_details"]:
+                    print(f"    - (info) {d}")
 
         print(f"  Ready           : {'YES' if r['ready'] else 'NO - REDEPLOY NEEDED'}")
 

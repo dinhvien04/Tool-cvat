@@ -124,12 +124,11 @@ class TestPose17SublabelMapping:
         assert len(errors) == 0
 
     def test_case_c_uppercase_and_normalized_aliases(self):
-        """Case C: uppercase/normalized aliases ('NOSE', 'RIGHT_EYE', 'R Eye', 'L_Ear', etc.)."""
+        """Case C: uppercase/normalized aliases ('NOSE', 'R Eye', 'L_Ear', etc.)."""
         aliases = [
             "NOSE",
-            "RIGHT_EYE",
+            "R Eye",
             "left_eye",
-            "R Eye",  # Not standard, but tests normalization if present, or let's test R_Ear
             "r_ear",
             "L_EAR",
             "Right_Shoulder",
@@ -145,6 +144,7 @@ class TestPose17SublabelMapping:
             "right_ankle",
             "L_ANKLE",
         ]
+        assert len(aliases) == 17
         task_labels = _make_pose17_task_labels(aliases)
         payload, diagnostics = build_compatible_mapping_payload("ninerouter-human-pose-17", task_labels)
 
@@ -156,7 +156,7 @@ class TestPose17SublabelMapping:
         assert len(person_map["sublabels"]) == 17
 
         assert person_map["sublabels"]["nose"]["name"] == "NOSE"
-        assert person_map["sublabels"]["right_eye"]["name"] == "RIGHT_EYE"
+        assert person_map["sublabels"]["right_eye"]["name"] == "R Eye"
         assert person_map["sublabels"]["right_ear"]["name"] == "r_ear"
         assert person_map["sublabels"]["left_ear"]["name"] == "L_EAR"
         assert person_map["sublabels"]["left_shoulder"]["name"] == "left-shoulder"
@@ -169,6 +169,36 @@ class TestPose17SublabelMapping:
         is_valid, errors = validate_cvat_mapping(mapping, model_spec, task_labels)
         assert is_valid, f"CVAT validation errors: {errors}"
         assert len(errors) == 0
+
+    def test_case_c_r_eye_and_l_eye_normalization(self):
+        """Case C: explicitly tests 'R Eye' and 'L Eye' normalization with dot and space variants."""
+        aliases = [
+            "NOSE",
+            "R Eye",
+            "L Eye",
+            "r.ear",
+            "l.ear",
+            "Right_Shoulder",
+            "left-shoulder",
+            "R_Elbow",
+            "LEFT_ELBOW",
+            "right-wrist",
+            "L Wrist",
+            "RIGHT_HIP",
+            "Left_Hip",
+            "r_knee",
+            "LEFT_KNEE",
+            "right_ankle",
+            "L_ANKLE",
+        ]
+        task_labels = _make_pose17_task_labels(aliases)
+        payload, diagnostics = build_compatible_mapping_payload("ninerouter-human-pose-17", task_labels)
+        assert payload is not None
+        person_map = payload["mapping"]["person"]
+        assert person_map["sublabels"]["right_eye"]["name"] == "R Eye"
+        assert person_map["sublabels"]["left_eye"]["name"] == "L Eye"
+        assert person_map["sublabels"]["right_ear"]["name"] == "r.ear"
+        assert person_map["sublabels"]["left_ear"]["name"] == "l.ear"
 
 
 class TestPose17CompletenessValidation:
@@ -388,6 +418,46 @@ class TestCVAT2751ContractSimulation:
         is_valid, errors = validate_cvat_mapping(mapping, model_spec, task_labels)
         assert not is_valid
         assert any("Duplicate mapping" in e for e in errors)
+
+    def test_incompatible_label_type_rejected(self):
+        """Mapping a skeleton model label to a non-skeleton task label is rejected."""
+        model_spec = get_model_spec("ninerouter-human-pose-17")
+        task_labels = [
+            {
+                "id": 1,
+                "name": "person",
+                "type": "rectangle",
+                "attributes": [],
+                "sublabels": [],
+            }
+        ]
+        mapping = {"person": {"name": "person", "attributes": {}}}
+        is_valid, errors = validate_cvat_mapping(mapping, model_spec, task_labels)
+        assert not is_valid
+        assert any("[INCOMPATIBLE_TYPE]" in e for e in errors)
+
+    def test_malformed_non_dict_mapping_items_handled_safely(self):
+        """Non-dict mapping item or non-dict sublabel item produces validation errors without crashing."""
+        model_spec = get_model_spec("ninerouter-human-pose-17")
+        task_labels = _make_pose17_task_labels(list(POSE17_KEYPOINTS))
+
+        # Case 1: non-dict top-level mapping item
+        mapping_str = {"person": "person"}
+        is_valid, errors = validate_cvat_mapping(mapping_str, model_spec, task_labels)
+        assert not is_valid
+        assert any("must be a dictionary" in e for e in errors)
+
+        # Case 2: non-dict sublabel item
+        mapping_sub_str = {
+            "person": {
+                "name": "person",
+                "attributes": {},
+                "sublabels": {"nose": "nose"},
+            }
+        }
+        is_valid, errors = validate_cvat_mapping(mapping_sub_str, model_spec, task_labels)
+        assert not is_valid
+        assert any("must be a dictionary" in e for e in errors)
 
 
 class TestPreflightCLIExecution:

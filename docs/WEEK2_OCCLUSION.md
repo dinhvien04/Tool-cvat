@@ -15,13 +15,28 @@ In CVAT 2.75.1, occlusion for skeleton elements is a first-class native concept.
 
 ## 2. Canonical Visibility Mapping Contract
 
-The 9Router vision model produces a 3-level discrete visibility flag for each keypoint or facial landmark, conforming to standard COCO and VinFast guidelines. The serverless detector translates these flags deterministically into CVAT's native boolean representation using `core.week2_schema.map_visibility_to_cvat`:
+The 9Router vision model produces a 3-level discrete visibility flag for each keypoint or facial landmark, conforming to standard COCO and VinFast guidelines. The serverless detector normalizes inputs and translates these flags deterministically into CVAT's native boolean representation using `core.week2_schema.normalize_visibility` and `core.week2_schema.map_visibility_to_cvat`:
 
 | 9Router Visibility Flag | Semantic Meaning | CVAT `outside` | CVAT `occluded` | Canvas Rendering Behavior |
 | :---: | :--- | :---: | :---: | :--- |
 | **`2`** | **Clearly Visible** | `False` | `False` | Solid point, solid incident skeleton bone edges |
 | **`1`** | **Occluded / Covered** | `False` | `True` | Solid point with occluded marker, **dashed** incident edges (`stroke-dasharray: 5`) |
 | **`0`** | **Outside Frame / Untracked** | `True` | `False` | Hidden / bypassed point, incident skeleton bone edges omitted |
+
+### Visibility Normalization Specification (`normalize_visibility`)
+
+To guarantee system resilience across diverse vision backends and manual CSV/JSON inputs:
+
+- **Authoritative Canonical Values**: `0`, `1`, `2`.
+- **Accepted String Aliases**: `"0"`, `"1"`, `"2"`, `"outside"`, `"occluded"`, `"visible"` (case-insensitive, trimmed).
+- **Strict Mode (`strict=True`)**:
+  - Validates strictly against canonical values and accepted string aliases.
+  - Any out-of-range integer (`-1`, `3`, `100`), non-finite float (`NaN`, `Inf`), ambiguous string (`"banana"`, `"uncertain"`, `"partial"`), boolean (`True`, `False`), or `None` immediately raises `ValueError`.
+- **Non-Strict Mode (`strict=False`)**:
+  - Deterministic safe resolution with configurable fallback `default` (defaults to `2` for production continuity, or `0` for defensive fail-closed pipelines).
+  - Tolerates boolean values (`True -> 2`, `False -> 0`).
+  - Resolves legacy aliases (`"absent" -> 0`, `"false" -> 0`, `"partial" -> 1`, `"true" -> 2`).
+  - Unparseable strings, invalid types, and out-of-range numerics safely resolve to `default`.
 
 ### Invariant Equations
 
@@ -31,6 +46,7 @@ outside = (vis == 0)
 occluded = (vis == 1)
 
 # Reverse mapping (CVAT -> Model / Exporter)
+# Invariant: outside=True and occluded=True is forbidden (raises ValueError in strict mode)
 if outside:
     vis = 0
 elif occluded:
@@ -91,6 +107,7 @@ When automated detections from 9Router are loaded into CVAT:
 ## 6. Implementation Verification
 
 Hermetic verification of this contract is enforced in:
+- `core/week2_schema.py::normalize_visibility()`
 - `core/week2_schema.py::map_visibility_to_cvat()`
 - `core/week2_schema.py::map_cvat_to_visibility()`
 - `core/skeleton_contract.py::VF50Landmark.to_cvat_element()`

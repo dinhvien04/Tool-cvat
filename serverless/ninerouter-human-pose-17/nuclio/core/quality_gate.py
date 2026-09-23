@@ -4,7 +4,7 @@ The gate does not call any model. It identifies structurally valid but suspiciou
 validates anatomical vs. viewer laterality invariants, checks coordinate bounds, ensures
 topological nesting, and detects axis swaps (x vs y) for:
 1. Master 31-label instance/region/line detections (rectangle_mask, polygon_mask, polyline).
-2. Human Pose 17 keypoint skeletons (COCO-17 topology, subject/anatomical laterality).
+2. Human Pose 17 keypoint skeletons (VinFast Week-2 HumanPose-17 topology, viewer-space laterality).
 3. Face Landmark VF-50 (VinFast 7-component face topology, viewer laterality).
 """
 
@@ -24,6 +24,7 @@ try:
         pose17_paired_keypoints,
         pose17_rigid_paired_keypoints,
         pose17_articulated_paired_keypoints,
+        pose17_laterality_convention,
         vf50_component_point_counts,
         vf50_eyelid_opposing_pairs,
     )
@@ -41,6 +42,7 @@ LATERALITY_VIEWER: str = "viewer"    # Image/screen left/right (viewer's left/ri
 
 if _HAS_WEEK2_SCHEMA:
     _pose17 = load_pose17()
+    DEFAULT_POSE17_LATERALITY: str = pose17_laterality_convention()
 
     # Canonical 17 keypoints in indexed VinFast order derived from load_pose17()
     POSE17_KEYPOINTS: Tuple[str, ...] = pose17_coco_keypoints()
@@ -82,6 +84,7 @@ if _HAS_WEEK2_SCHEMA:
     VF50_EYELID_OPPOSING_PAIRS: Tuple[Tuple[int, int], ...] = vf50_eyelid_opposing_pairs()
 else:
     # Graceful fallbacks for isolated 3-detector serverless targets where Week 2 schemas are omitted
+    DEFAULT_POSE17_LATERALITY = LATERALITY_VIEWER
     POSE17_KEYPOINTS = ()
     POSE17_KEYPOINTS_SET = frozenset()
     POSE17_PAIRED_KEYPOINTS = ()
@@ -609,7 +612,7 @@ def verify_laterality_convention(
     schema_clean = str(schema_type).strip().lower()
 
     if "pose" in schema_clean:
-        target_conv = expected_convention or LATERALITY_SUBJECT
+        target_conv = expected_convention or DEFAULT_POSE17_LATERALITY
         pts = _extract_pose17_points(data)
         ls = pts.get("left_shoulder")
         rs = pts.get("right_shoulder")
@@ -862,12 +865,14 @@ getattr(test_mirrored_laterality_invariance, "__dict__", {})["__test__"] = False
 def assess_pose17_quality(
     data: Any,
     *,
-    laterality_convention: str = LATERALITY_SUBJECT,
+    laterality_convention: Optional[str] = None,
     min_visible_keypoints: int = 4,
     min_confidence: float = 0.30,
     refine_score_threshold: float = 0.76,
 ) -> Pose17QualityReport:
     """Rigorous deterministic quality gate for Human Pose 17 skeletons.
+
+    Defaults to the canonical Week-2 schema laterality convention ('viewer').
 
     Validation checks:
     1. 17 exact expected keypoint names.
@@ -878,6 +883,7 @@ def assess_pose17_quality(
     6. Left/Right rigid laterality vs. soft articulated crossing (crossed arms/legs).
     7. Adaptive torso-scale proportion check and 0-span degenerate collapse detection.
     """
+    effective_laterality = laterality_convention if laterality_convention is not None else DEFAULT_POSE17_LATERALITY
     pts = _extract_pose17_points(data)
     reasons: List[str] = []
     hard_errors: List[str] = []
@@ -1032,7 +1038,7 @@ def assess_pose17_quality(
                     reasons.append(f"inverted_vertical_orientation: shoulders (y={shoulder_y:.1f}) below hips (y={hip_y:.1f})")
 
     # 7. Laterality verification (Rigid anchors vs Articulated crossed limbs)
-    lat_result = verify_laterality_convention(pts, schema_type="pose17", expected_convention=laterality_convention)
+    lat_result = verify_laterality_convention(pts, schema_type="pose17", expected_convention=effective_laterality)
     if not lat_result.is_valid:
         score -= 0.30
         hard_errors.extend(lat_result.hard_errors)
@@ -1480,7 +1486,7 @@ def assess_quality(
                 suspect_count=1,
                 hard_errors=["empty_pose_detection"],
             )
-        conv = laterality_convention or LATERALITY_SUBJECT
+        conv = laterality_convention or DEFAULT_POSE17_LATERALITY
         sub_reports = [assess_pose17_quality(it, laterality_convention=conv, refine_score_threshold=refine_score_threshold) for it in items]
         avg_score = sum(r.score for r in sub_reports) / max(1, len(sub_reports))
         reasons: List[str] = []

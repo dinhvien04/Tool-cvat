@@ -34,6 +34,7 @@ from core.week2_schema import (
     load_vf50,
     map_cvat_to_visibility,
     map_visibility_to_cvat,
+    normalize_visibility,
     pose17_coco_keypoints,
     pose17_edges_0indexed,
     pose17_edges_as_coco_names,
@@ -163,10 +164,79 @@ class TestVisibilityContract:
         assert map_cvat_to_visibility(outside=False, occluded=True) == VISIBILITY_OCCLUDED
         assert map_cvat_to_visibility(outside=False, occluded=False) == VISIBILITY_VISIBLE
 
+    def test_map_cvat_to_visibility_forbidden_invariant(self):
+        # Invariant: outside=True and occluded=True is forbidden
+        # Non-strict mode: outside takes precedence (returns 0)
+        assert map_cvat_to_visibility(outside=True, occluded=True, strict=False) == VISIBILITY_OUTSIDE
+        # Strict mode: raises ValueError
+        import pytest
+        with pytest.raises(ValueError, match="cannot be simultaneously outside and occluded"):
+            map_cvat_to_visibility(outside=True, occluded=True, strict=True)
+
     def test_visibility_round_trip(self):
         for vis in (VISIBILITY_OUTSIDE, VISIBILITY_OCCLUDED, VISIBILITY_VISIBLE):
             outside, occluded = map_visibility_to_cvat(vis)
             assert map_cvat_to_visibility(outside=outside, occluded=occluded) == vis
+
+    def test_normalize_visibility_valid_strict(self):
+        # Valid integer inputs
+        assert normalize_visibility(0, strict=True) == VISIBILITY_OUTSIDE
+        assert normalize_visibility(1, strict=True) == VISIBILITY_OCCLUDED
+        assert normalize_visibility(2, strict=True) == VISIBILITY_VISIBLE
+
+        # Valid string representations
+        assert normalize_visibility("0", strict=True) == VISIBILITY_OUTSIDE
+        assert normalize_visibility("1", strict=True) == VISIBILITY_OCCLUDED
+        assert normalize_visibility("2", strict=True) == VISIBILITY_VISIBLE
+        assert normalize_visibility("outside", strict=True) == VISIBILITY_OUTSIDE
+        assert normalize_visibility("occluded", strict=True) == VISIBILITY_OCCLUDED
+        assert normalize_visibility("visible", strict=True) == VISIBILITY_VISIBLE
+
+        # Case-insensitive and whitespace trimmed
+        assert normalize_visibility("  OUTSIDE  ", strict=True) == VISIBILITY_OUTSIDE
+        assert normalize_visibility("Occluded", strict=True) == VISIBILITY_OCCLUDED
+        assert normalize_visibility("  VISIBLE ", strict=True) == VISIBILITY_VISIBLE
+
+    def test_normalize_visibility_invalid_strict_raises_value_error(self):
+        import pytest
+        invalid_inputs = [
+            -1, -100, 3, 100,
+            "banana", "partial", "uncertain", "unknown",
+            None, True, False,
+            float("inf"), float("-inf"), float("nan"),
+            [1], {"vis": 2},
+        ]
+        for bad_val in invalid_inputs:
+            with pytest.raises(ValueError):
+                normalize_visibility(bad_val, strict=True)
+
+    def test_normalize_visibility_non_strict_fallbacks(self):
+        # Out-of-range numerics default to VISIBILITY_VISIBLE
+        assert normalize_visibility(-1, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(3, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(100, strict=False) == VISIBILITY_VISIBLE
+
+        # Unknown strings default to VISIBILITY_VISIBLE
+        assert normalize_visibility("banana", strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility("uncertain", strict=False) == VISIBILITY_VISIBLE
+
+        # None defaults to VISIBILITY_VISIBLE
+        assert normalize_visibility(None, strict=False) == VISIBILITY_VISIBLE
+
+        # Booleans resolve deterministically (True -> 2, False -> 0)
+        assert normalize_visibility(True, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(False, strict=False) == VISIBILITY_OUTSIDE
+
+        # Non-strict legacy aliases
+        assert normalize_visibility("absent", strict=False) == VISIBILITY_OUTSIDE
+        assert normalize_visibility("false", strict=False) == VISIBILITY_OUTSIDE
+        assert normalize_visibility("partial", strict=False) == VISIBILITY_OCCLUDED
+        assert normalize_visibility("true", strict=False) == VISIBILITY_VISIBLE
+
+        # Custom default fallback (e.g. fail-closed VISIBILITY_OUTSIDE)
+        assert normalize_visibility(-1, strict=False, default=VISIBILITY_OUTSIDE) == VISIBILITY_OUTSIDE
+        assert normalize_visibility("banana", strict=False, default=VISIBILITY_OUTSIDE) == VISIBILITY_OUTSIDE
+        assert normalize_visibility(None, strict=False, default=VISIBILITY_OUTSIDE) == VISIBILITY_OUTSIDE
 
 
 class TestSpecFingerprintingAndBuildSha:

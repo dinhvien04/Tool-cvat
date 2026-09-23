@@ -52,30 +52,32 @@ def make_canonical_pose17(
     center_x: float = 500.0,
     center_y: float = 500.0,
     scale: float = 1.0,
+    convention: str = LATERALITY_VIEWER,
 ) -> Dict[str, Tuple[float, float, int, float]]:
     """Build a realistic frontal upright Pose 17 skeleton.
-    Subject convention:
-    - Subject's left is viewer's right (larger x: x > center_x).
-    - Subject's right is viewer's left (smaller x: x < center_x).
+    Canonical VinFast Week-2 uses viewer convention:
+    - Viewer's left is on screen left (smaller x: x < center_x).
+    - Viewer's right is on screen right (larger x: x > center_x).
     """
+    sign = -1.0 if convention == LATERALITY_VIEWER else 1.0
     return {
         "nose": (center_x, center_y - 200.0 * scale, 2, 0.98),
-        "left_eye": (center_x + 15.0 * scale, center_y - 215.0 * scale, 2, 0.96),
-        "right_eye": (center_x - 15.0 * scale, center_y - 215.0 * scale, 2, 0.96),
-        "left_ear": (center_x + 35.0 * scale, center_y - 210.0 * scale, 2, 0.92),
-        "right_ear": (center_x - 35.0 * scale, center_y - 210.0 * scale, 2, 0.92),
-        "left_shoulder": (center_x + 70.0 * scale, center_y - 140.0 * scale, 2, 0.95),
-        "right_shoulder": (center_x - 70.0 * scale, center_y - 140.0 * scale, 2, 0.95),
-        "left_elbow": (center_x + 95.0 * scale, center_y - 50.0 * scale, 2, 0.93),
-        "right_elbow": (center_x - 95.0 * scale, center_y - 50.0 * scale, 2, 0.93),
-        "left_wrist": (center_x + 110.0 * scale, center_y + 30.0 * scale, 2, 0.90),
-        "right_wrist": (center_x - 110.0 * scale, center_y + 30.0 * scale, 2, 0.90),
-        "left_hip": (center_x + 45.0 * scale, center_y + 50.0 * scale, 2, 0.95),
-        "right_hip": (center_x - 45.0 * scale, center_y + 50.0 * scale, 2, 0.95),
-        "left_knee": (center_x + 50.0 * scale, center_y + 160.0 * scale, 2, 0.92),
-        "right_knee": (center_x - 50.0 * scale, center_y + 160.0 * scale, 2, 0.92),
-        "left_ankle": (center_x + 55.0 * scale, center_y + 270.0 * scale, 2, 0.88),
-        "right_ankle": (center_x - 55.0 * scale, center_y + 270.0 * scale, 2, 0.88),
+        "left_eye": (center_x + sign * 15.0 * scale, center_y - 215.0 * scale, 2, 0.96),
+        "right_eye": (center_x - sign * 15.0 * scale, center_y - 215.0 * scale, 2, 0.96),
+        "left_ear": (center_x + sign * 35.0 * scale, center_y - 210.0 * scale, 2, 0.92),
+        "right_ear": (center_x - sign * 35.0 * scale, center_y - 210.0 * scale, 2, 0.92),
+        "left_shoulder": (center_x + sign * 70.0 * scale, center_y - 140.0 * scale, 2, 0.95),
+        "right_shoulder": (center_x - sign * 70.0 * scale, center_y - 140.0 * scale, 2, 0.95),
+        "left_elbow": (center_x + sign * 95.0 * scale, center_y - 50.0 * scale, 2, 0.93),
+        "right_elbow": (center_x - sign * 95.0 * scale, center_y - 50.0 * scale, 2, 0.93),
+        "left_wrist": (center_x + sign * 110.0 * scale, center_y + 30.0 * scale, 2, 0.90),
+        "right_wrist": (center_x - sign * 110.0 * scale, center_y + 30.0 * scale, 2, 0.90),
+        "left_hip": (center_x + sign * 45.0 * scale, center_y + 50.0 * scale, 2, 0.95),
+        "right_hip": (center_x - sign * 45.0 * scale, center_y + 50.0 * scale, 2, 0.95),
+        "left_knee": (center_x + sign * 50.0 * scale, center_y + 160.0 * scale, 2, 0.92),
+        "right_knee": (center_x - sign * 50.0 * scale, center_y + 160.0 * scale, 2, 0.92),
+        "left_ankle": (center_x + sign * 55.0 * scale, center_y + 270.0 * scale, 2, 0.88),
+        "right_ankle": (center_x - sign * 55.0 * scale, center_y + 270.0 * scale, 2, 0.88),
     }
 
 
@@ -176,9 +178,18 @@ def make_canonical_vf50(
 # SECTION 3 TESTS: LATERALITY MUST BE PROVEN
 # ==============================================================================
 
+def test_pose17_viewer_laterality_convention():
+    """Prove that Pose 17 canonical Week-2 viewer convention expects left_shoulder < right_shoulder."""
+    pose = make_canonical_pose17(convention=LATERALITY_VIEWER)
+    res = verify_laterality_convention(pose, schema_type="pose17", expected_convention=LATERALITY_VIEWER)
+    assert res.is_valid is True
+    assert res.detected_convention == LATERALITY_VIEWER
+    assert res.delta_x < 0  # left_shoulder (430) < right_shoulder (570)
+
+
 def test_pose17_subject_laterality_convention():
     """Prove that Pose 17 anatomical subject convention expects left_shoulder > right_shoulder."""
-    pose = make_canonical_pose17()
+    pose = make_canonical_pose17(convention=LATERALITY_SUBJECT)
     res = verify_laterality_convention(pose, schema_type="pose17", expected_convention=LATERALITY_SUBJECT)
     assert res.is_valid is True
     assert res.detected_convention == LATERALITY_SUBJECT
@@ -211,7 +222,7 @@ def test_vf50_inverted_laterality_flagged():
 
 def test_mirrored_pose17_subject_invariance():
     """Section 3 proof: Under horizontal flip, exchanging symmetric left<->right labels restores anatomical invariant."""
-    pose = make_canonical_pose17()
+    pose = make_canonical_pose17(convention=LATERALITY_SUBJECT)
     is_invariant, msg = verify_mirrored_laterality_invariance(pose, schema_type="pose17", convention=LATERALITY_SUBJECT)
     assert is_invariant is True
     assert "verified" in msg
@@ -282,10 +293,10 @@ def test_pose17_inverted_vertical_orientation_detected():
     """Shoulders below hips in upright pose must trigger inverted orientation failure."""
     pose = make_canonical_pose17()
     # Place shoulders at y=600 while hips at y=450
-    pose["left_shoulder"] = (570.0, 600.0, 2, 0.9)
-    pose["right_shoulder"] = (430.0, 600.0, 2, 0.9)
-    pose["left_hip"] = (545.0, 450.0, 2, 0.9)
-    pose["right_hip"] = (455.0, 450.0, 2, 0.9)
+    pose["left_shoulder"] = (430.0, 600.0, 2, 0.9)
+    pose["right_shoulder"] = (570.0, 600.0, 2, 0.9)
+    pose["left_hip"] = (455.0, 450.0, 2, 0.9)
+    pose["right_hip"] = (545.0, 450.0, 2, 0.9)
 
     report = assess_pose17_quality(pose)
     assert report.needs_refine is True
@@ -309,7 +320,7 @@ def test_pose17_excessive_limb_length_detected():
     report = assess_pose17_quality(pose)
     assert report.needs_refine is True
     assert "right_elbow-right_wrist" in report.suspect_bones
-    assert any("excessive_bone_length" in r or "disproportionate_bone" in r for r in report.reasons)
+    assert any("excessive_bone_length" in r or "excessive_arm_length" in r or "disproportionate_bone" in r for r in report.reasons)
 
 
 # ==============================================================================
@@ -460,25 +471,25 @@ def test_master_assess_quality_pose17_corrupted_triggers_refine():
 
 def test_pose17_numeric_indices_parsed_correctly():
     """VinFast guideline numeric sublabels '1'..'17' correctly resolve to canonical joints."""
-    # Build dictionary with numeric string keys '1'..'17'
+    # Build dictionary with numeric string keys '1'..'17' in canonical viewer convention
     numeric_pose: Dict[str, Tuple[float, float, int, float]] = {
         "1": (500.0, 300.0, 2, 0.98),   # nose
-        "2": (485.0, 285.0, 2, 0.96),   # right_eye
-        "3": (515.0, 285.0, 2, 0.96),   # left_eye
-        "4": (465.0, 290.0, 2, 0.92),   # right_ear
-        "5": (535.0, 290.0, 2, 0.92),   # left_ear
-        "6": (430.0, 360.0, 2, 0.95),   # right_shoulder
-        "7": (570.0, 360.0, 2, 0.95),   # left_shoulder
-        "8": (405.0, 450.0, 2, 0.93),   # right_elbow
-        "9": (595.0, 450.0, 2, 0.93),   # left_elbow
-        "10": (390.0, 530.0, 2, 0.90),  # right_wrist
-        "11": (610.0, 530.0, 2, 0.90),  # left_wrist
-        "12": (455.0, 550.0, 2, 0.95),  # right_hip
-        "13": (545.0, 550.0, 2, 0.95),  # left_hip
-        "14": (450.0, 660.0, 2, 0.92),  # right_knee
-        "15": (550.0, 660.0, 2, 0.92),  # left_knee
-        "16": (445.0, 770.0, 2, 0.88),  # right_ankle
-        "17": (555.0, 770.0, 2, 0.88),  # left_ankle
+        "2": (515.0, 285.0, 2, 0.96),   # right_eye (R_* even: viewer right -> larger x)
+        "3": (485.0, 285.0, 2, 0.96),   # left_eye (L_* odd: viewer left -> smaller x)
+        "4": (535.0, 290.0, 2, 0.92),   # right_ear
+        "5": (465.0, 290.0, 2, 0.92),   # left_ear
+        "6": (570.0, 360.0, 2, 0.95),   # right_shoulder
+        "7": (430.0, 360.0, 2, 0.95),   # left_shoulder
+        "8": (595.0, 450.0, 2, 0.93),   # right_elbow
+        "9": (405.0, 450.0, 2, 0.93),   # left_elbow
+        "10": (610.0, 530.0, 2, 0.90),  # right_wrist
+        "11": (390.0, 530.0, 2, 0.90),  # left_wrist
+        "12": (545.0, 550.0, 2, 0.95),  # right_hip
+        "13": (455.0, 550.0, 2, 0.95),  # left_hip
+        "14": (550.0, 660.0, 2, 0.92),  # right_knee
+        "15": (450.0, 660.0, 2, 0.92),  # left_knee
+        "16": (555.0, 770.0, 2, 0.88),  # right_ankle
+        "17": (445.0, 770.0, 2, 0.88),  # left_ankle
     }
     report = assess_pose17_quality(numeric_pose)
     assert report.is_valid is True
@@ -662,14 +673,14 @@ def test_pose17_forward_lean_pose_soft_warning():
     """Driver leaning forward to reach footwell/glovebox has shoulders and head below hips."""
     pose = make_canonical_pose17()
     # Hips at y=450, shoulders at y=560 (below hips), nose at y=580 (also below hips)
-    pose["left_hip"] = (545.0, 450.0, 2, 0.95)
-    pose["right_hip"] = (455.0, 450.0, 2, 0.95)
-    pose["left_shoulder"] = (570.0, 560.0, 2, 0.95)
-    pose["right_shoulder"] = (430.0, 560.0, 2, 0.95)
+    pose["left_hip"] = (455.0, 450.0, 2, 0.95)
+    pose["right_hip"] = (545.0, 450.0, 2, 0.95)
+    pose["left_shoulder"] = (430.0, 560.0, 2, 0.95)
+    pose["right_shoulder"] = (570.0, 560.0, 2, 0.95)
     pose["nose"] = (500.0, 580.0, 2, 0.95)
     # Ankles planted on floor at y=750
-    pose["left_ankle"] = (550.0, 750.0, 2, 0.9)
-    pose["right_ankle"] = (450.0, 750.0, 2, 0.9)
+    pose["left_ankle"] = (450.0, 750.0, 2, 0.9)
+    pose["right_ankle"] = (550.0, 750.0, 2, 0.9)
 
     report = assess_pose17_quality(pose)
     # Must remain valid (soft warning rather than dropping skeleton)
@@ -682,17 +693,17 @@ def test_pose17_forward_lean_pose_soft_warning():
 def test_pose17_crossed_limbs_tolerated_as_soft_warning():
     """Crossed arms (wrists crossed) and crossed legs (ankles crossed) do not fail laterality."""
     pose = make_canonical_pose17()
-    # Canonical subject convention: left_wrist x=610 > right_wrist x=390
-    # Cross wrists: left_wrist reaches across to screen left (x=380), right_wrist to screen right (x=620)
-    pose["left_wrist"] = (380.0, 530.0, 2, 0.92)
-    pose["right_wrist"] = (620.0, 530.0, 2, 0.92)
+    # In canonical viewer convention: left_wrist x=390 < right_wrist x=610
+    # Cross wrists: left_wrist reaches across to screen right (x=620), right_wrist to screen left (x=380)
+    pose["left_wrist"] = (620.0, 530.0, 2, 0.92)
+    pose["right_wrist"] = (380.0, 530.0, 2, 0.92)
 
-    # Cross ankles: left_ankle reaches to screen left (x=430), right_ankle to screen right (x=570)
-    pose["left_ankle"] = (430.0, 770.0, 2, 0.90)
-    pose["right_ankle"] = (570.0, 770.0, 2, 0.90)
+    # Cross ankles: left_ankle reaches to screen right (x=570), right_ankle to screen left (x=430)
+    pose["left_ankle"] = (570.0, 770.0, 2, 0.90)
+    pose["right_ankle"] = (430.0, 770.0, 2, 0.90)
 
     # Rigid pairs (eyes, ears, shoulders, hips) remain uncrossed
-    lat_res = verify_laterality_convention(pose, schema_type="pose17", expected_convention=LATERALITY_SUBJECT)
+    lat_res = verify_laterality_convention(pose, schema_type="pose17", expected_convention=LATERALITY_VIEWER)
     assert lat_res.is_valid is True
     assert any("left_wrist" in c for c in lat_res.crossed_limbs)
     assert any("left_ankle" in c for c in lat_res.crossed_limbs)
@@ -708,12 +719,12 @@ def test_pose17_seated_driver_horizontal_thighs_adaptive_torso_scale():
     """Seated driver with foreshortened torso and horizontal thighs passes adaptive scale checks."""
     pose = make_canonical_pose17()
     # Driver seated: shoulders at y=350, hips at y=500, knees horizontal at y=510
-    pose["left_shoulder"] = (570.0, 350.0, 2, 0.95)
-    pose["right_shoulder"] = (430.0, 350.0, 2, 0.95)
-    pose["left_hip"] = (545.0, 500.0, 2, 0.95)
-    pose["right_hip"] = (455.0, 500.0, 2, 0.95)
-    pose["left_knee"] = (550.0, 510.0, 2, 0.92)   # horizontal thigh
-    pose["right_knee"] = (450.0, 510.0, 2, 0.92)  # horizontal thigh
+    pose["left_shoulder"] = (430.0, 350.0, 2, 0.95)
+    pose["right_shoulder"] = (570.0, 350.0, 2, 0.95)
+    pose["left_hip"] = (455.0, 500.0, 2, 0.95)
+    pose["right_hip"] = (545.0, 500.0, 2, 0.95)
+    pose["left_knee"] = (450.0, 510.0, 2, 0.92)   # horizontal thigh
+    pose["right_knee"] = (550.0, 510.0, 2, 0.92)  # horizontal thigh
 
     report = assess_pose17_quality(pose)
     assert report.is_valid is True
@@ -737,8 +748,8 @@ def test_hard_errors_vs_soft_warnings_separation():
 
     # 3. Soft warning: Crossed arms only
     crossed_pose = make_canonical_pose17()
-    crossed_pose["left_wrist"] = (390.0, 530.0, 2, 0.92)
-    crossed_pose["right_wrist"] = (610.0, 530.0, 2, 0.92)
+    crossed_pose["left_wrist"] = (610.0, 530.0, 2, 0.92)
+    crossed_pose["right_wrist"] = (390.0, 530.0, 2, 0.92)
     cross_report = assess_pose17_quality(crossed_pose)
     assert cross_report.is_valid is True
     assert cross_report.needs_refine is True

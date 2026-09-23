@@ -751,37 +751,139 @@ def poses_to_cvat_skeletons(
     return skeletons
 
 
-def build_pose17_prompt(parent_label: str = DEFAULT_PARENT_LABEL) -> str:
-    """Generate strict, deterministic prompt for 9Router vision inference for Pose 17."""
-    kp_list_str = ", ".join(f'"{kp}"' for kp in POSE17_KEYPOINTS)
+POSE17_OCCLUSION_INSTRUCTIONS: str = (
+    "Physical Occlusion vs Optical Blur (Confidence != Occlusion!):\n"
+    "- Physical Occlusion (visibility = 1): A keypoint is physically occluded / obstructed by an opaque physical object "
+    "(e.g. steering wheel, seat back, headrest, dashboard, center console, door trim, passenger body, or own torso). "
+    "Predict its estimated true anatomical position BEHIND the occluder (do NOT place the occluded joint on the occluder's border/rim) "
+    "and set visibility = 1 (occluded).\n"
+    "  * RIGHT_WRIST hidden behind steering wheel -> estimate true wrist center behind wheel (NOT on wheel rim) -> visibility = 1\n"
+    "  * RIGHT_ELBOW behind seat back / door -> estimate anatomical elbow location -> visibility = 1\n"
+    "  * HIP hidden by car seat cushion -> estimate anatomical hip center -> visibility = 1\n"
+    "  * KNEE behind dashboard / lower steering column -> estimate anatomical knee -> visibility = 1\n"
+    "- Optical Degradation / Low Confidence (visibility = 2): If a keypoint is within direct line of sight but degraded by "
+    "motion blur, camera defocus, dark cabin lighting, deep shadows, or sensor noise, it is STILL VISIBLE: set visibility = 2. "
+    "Express visual uncertainty through a lower 'confidence' score (e.g. 0.35 - 0.70), NOT by setting visibility = 1. "
+    "Optical blur is NOT occlusion; Confidence != Occlusion!\n"
+    "- Outside Frame (visibility = 0): Keypoints completely outside the camera's field of view, cropped out, or beyond image boundary.\n"
+    "  * ANKLE or FOOT cut off below image border -> visibility = 0\n"
+)
+
+
+def build_pose17_prompt(
+    parent_label: Union[str, Sequence[str]] = DEFAULT_PARENT_LABEL,
+    keypoints: Optional[Sequence[str]] = None,
+) -> str:
+    """Generate strict, deterministic prompt for 9Router vision inference for Pose 17.
+
+    Derives keypoints, laterality semantics, and edge connectivity directly from canonical load_pose17().
+    """
+    if isinstance(parent_label, (list, tuple)):
+        keypoints = parent_label
+        parent_label = DEFAULT_PARENT_LABEL
+
+    schema = load_pose17()
+    effective_keypoints = tuple(keypoints) if keypoints is not None else tuple(schema.id_to_coco_name[kp.id] for kp in schema.keypoints)
+    kps_str = ", ".join(f'"{k}"' for k in effective_keypoints)
+
+    right_kps = [schema.id_to_coco_name[i] for i in sorted(schema.right_keypoint_ids) if schema.id_to_coco_name[i] in effective_keypoints]
+    left_kps = [schema.id_to_coco_name[i] for i in sorted(schema.left_keypoint_ids) if schema.id_to_coco_name[i] in effective_keypoints]
+    right_str = ", ".join(right_kps)
+    left_str = ", ".join(left_kps)
+
+    kp_desc_lines = []
+    for kp in schema.keypoints:
+        coco_name = schema.id_to_coco_name[kp.id]
+        if coco_name in effective_keypoints:
+            extra = f" - {kp.anatomical}" if getattr(kp, "anatomical", None) else ""
+            kp_desc_lines.append(f"  * {coco_name}: {kp.semantic_name}{extra} [{kp.side}]")
+    kp_desc_block = "\n".join(kp_desc_lines)
+
+    laterality_explanation = (
+        "VinFast Viewer-Perspective Convention (MANDATORY):\n"
+        "VinFast Week-2 HumanPose-17 uses a canonical 17-joint topology with explicit VinFast viewer-space point naming below (RIGHT/LEFT refer to displayed image sides):\n"
+        f"- 'right_*' ({right_str}) refer to the VIEWER'S RIGHT side of the displayed image/frame (larger X coordinate).\n"
+        "  For example, 'right_eye' means the eye appearing on the RIGHT side of the image, NOT the anatomical right of the person.\n"
+        "  Similarly, right_ear, right_shoulder, right_elbow, right_wrist, right_hip, right_knee, right_ankle are on the image's right.\n"
+        f"- 'left_*' ({left_str}) refer to the VIEWER'S LEFT side of the displayed image/frame (smaller X coordinate).\n"
+        "  For example, 'left_eye' means the eye appearing on the LEFT side of the image.\n"
+        "- 'nose': center line of the face.\n"
+    ) if schema.laterality_convention == "viewer" else ""
+
     return (
         f"Perform multi-person 2D Human Pose Estimation (VinFast Week-2 HumanPose-17 topology) on this image.\n"
         f"Parent label is '{parent_label}'.\n"
-        f"Detect all persons and estimate their 17 standard keypoints:\n"
-        f"[{kp_list_str}].\n"
-        f"Coordinate convention:\n"
-        f"- Normalize all keypoint (x, y) coordinates to integers in [0, 1000] range relative to image width and height.\n"
-        f"- Visibility flag:\n"
-        f"    0 = outside image frame / untracked\n"
-        f"    1 = occluded / covered\n"
-        f"    2 = clearly visible\n"
-        f"- Output MUST be strict, valid JSON with no markdown and no extraneous text:\n"
-        f'{{\n'
-        f'  "people": [\n'
-        f'    {{\n'
-        f'      "id": 1,\n'
+        f"Detect all persons and estimate their 17 keypoints: [{kps_str}].\n"
+        f"Canonical Keypoint Metadata:\n{kp_desc_block}\n"
+        f"{laterality_explanation}"
+        "Kinematic Chain & Cabin Constraints:\n"
+        "- Enforce strict anatomical connectivity: shoulder -> elbow -> wrist, and hip -> knee -> ankle.\n"
+        "- Wrists and elbows MUST attach to their corresponding limb; NEVER predict floating wrists or elbows in the cabin background, roof lining, or car seats.\n"
+        "- If a person is seated (e.g. driver or passenger) and lower limbs or hands are occluded behind steering wheel or seats, set visibility flag = 1 (occluded) or 0 (outside), do NOT hallucinate floating joints.\n"
+        f"{POSE17_OCCLUSION_INSTRUCTIONS}"
+        "Coordinate & Visibility Convention:\n"
+        "- Normalize all keypoint (x, y) coordinates to integers in [0, 1000] range relative to image width and height.\n"
+        "- Bounding box 'box_2d': [ymin, xmin, ymax, xmax] in [0, 1000].\n"
+        "- Visibility flag: 0 = outside image frame, 1 = present but occluded, 2 = clearly visible.\n"
+        "- Output MUST be strict, valid JSON with no markdown and no extraneous text:\n"
+        "{\n"
+        '  "people": [\n'
+        "    {\n"
+        '      "id": 1,\n'
         f'      "label": "{parent_label}",\n'
-        f'      "confidence": 0.95,\n'
-        f'      "keypoints": [\n'
-        f'        {{"name": "nose", "point": [x, y], "visibility": 2, "confidence": 0.98}},\n'
-        f'        {{"name": "right_eye", "point": [x, y], "visibility": 2, "confidence": 0.95}},\n'
-        f'        {{"name": "left_eye", "point": [x, y], "visibility": 2, "confidence": 0.95}},\n'
-        f'        ...\n'
-        f'      ]\n'
-        f'    }}\n'
-        f'  ]\n'
-        f'}}\n'
-        f'If no persons are present, return {{"people": []}}.'
+        '      "confidence": 0.95,\n'
+        '      "box_2d": [ymin, xmin, ymax, xmax],\n'
+        '      "keypoints": {\n'
+        '        "nose": [x, y, 2],\n'
+        '        "right_eye": [x, y, 2],\n'
+        '        "left_eye": [x, y, 2],\n'
+        "        ...\n"
+        "      }\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        'If no persons are present, return {"people": []}.'
+    )
+
+
+def build_pose17_crop_prompt(keypoints: Optional[Sequence[str]] = None) -> str:
+    """Build targeted prompt for high-resolution person crop refinement (Pass 2).
+
+    Keypoints, perspective conventions, and occlusion rules are derived from canonical schema metadata.
+    """
+    schema = load_pose17()
+    effective_keypoints = tuple(keypoints) if keypoints is not None else tuple(schema.id_to_coco_name[kp.id] for kp in schema.keypoints)
+    kps_str = ", ".join(f'"{k}"' for k in effective_keypoints)
+
+    right_kps = [schema.id_to_coco_name[i] for i in sorted(schema.right_keypoint_ids) if schema.id_to_coco_name[i] in effective_keypoints]
+    left_kps = [schema.id_to_coco_name[i] for i in sorted(schema.left_keypoint_ids) if schema.id_to_coco_name[i] in effective_keypoints]
+    right_str = ", ".join(right_kps)
+    left_str = ", ".join(left_kps)
+
+    laterality_explanation = (
+        "Viewer Perspective (MANDATORY):\n"
+        "VinFast Week-2 HumanPose-17 uses a canonical 17-joint topology with explicit VinFast viewer-space point naming:\n"
+        f"- right_* ({right_str}) = viewer's right side of image/crop (larger X coordinate)\n"
+        f"- left_* ({left_str}) = viewer's left side of image/crop (smaller X coordinate)\n"
+    ) if schema.laterality_convention == "viewer" else ""
+
+    return (
+        "High-resolution close-up person crop refinement.\n"
+        f"Detect exactly the 17 keypoints according to VinFast Week-2 HumanPose-17 topology for the single person in this cropped image: [{kps_str}].\n"
+        f"{laterality_explanation}"
+        "Kinematic Chain & Anti-Floating Constraints:\n"
+        "- Strict limb connectivity: shoulder -> elbow -> wrist, and hip -> knee -> ankle. No floating joints!\n"
+        "- Coordinates: normalized integers [x, y] in [0, 1000] relative to THIS CROP.\n"
+        f"{POSE17_OCCLUSION_INSTRUCTIONS}"
+        "Return STRICT JSON only:\n"
+        "{\n"
+        '  "id": 1,\n'
+        '  "confidence": 0.98,\n'
+        '  "keypoints": {\n'
+        '    "nose": [x, y, 2],\n'
+        "    ...\n"
+        "  }\n"
+        "}\n"
     )
 
 
@@ -863,16 +965,6 @@ def build_cvat_pose17_spec(
     spec_dict: Dict[str, Any] = {
         "id": label_id,
         "name": effective_parent,
-        "type": "skeleton",
-        "attributes": [],
-        "sublabels": sublabels,
-    }
-    if include_svg:
-        spec_dict["svg"] = generate_cvat_pose17_svg(sublabel_names=names)
-    return spec_dict
-    spec_dict: Dict[str, Any] = {
-        "id": label_id,
-        "name": parent_label,
         "type": "skeleton",
         "attributes": [],
         "sublabels": sublabels,

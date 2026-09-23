@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import yaml
 from dataclasses import dataclass, field
@@ -117,45 +118,165 @@ VISIBILITY_OUTSIDE = 0    # Not labeled / outside image frame
 VISIBILITY_OCCLUDED = 1   # Present but occluded
 VISIBILITY_VISIBLE = 2    # Clearly visible
 
-def map_visibility_to_cvat(vis: Union[int, float, str, bool]) -> Tuple[bool, bool]:
+
+def normalize_visibility(
+    vis: Union[int, float, str, bool, None],
+    strict: bool = False,
+    default: int = VISIBILITY_VISIBLE,
+) -> int:
+    """Normalize input visibility value to canonical integer (0, 1, or 2).
+
+    Canonical Contract:
+      0 = outside image frame / untracked (CVAT: outside=True, occluded=False)
+      1 = present but physically occluded (CVAT: outside=False, occluded=True)
+      2 = clearly visible in direct line of sight (CVAT: outside=False, occluded=False)
+
+    Accepted explicit inputs (strict=True):
+      - 0, "0", "outside" -> 0 (VISIBILITY_OUTSIDE)
+      - 1, "1", "occluded" -> 1 (VISIBILITY_OCCLUDED)
+      - 2, "2", "visible"  -> 2 (VISIBILITY_VISIBLE)
+
+    Non-strict mode (strict=False) safe fallbacks:
+      - None defaults to default (default: VISIBILITY_VISIBLE = 2)
+      - Booleans: True -> 2 (visible), False -> 0 (outside)
+      - Legacy string aliases: 'absent', 'false' -> 0; 'partial' -> 1; 'true' -> 2
+      - Unrecognized values, out-of-range numbers, and invalid strings return default.
+
+    Strict mode (strict=True) rejections (raise ValueError):
+      - Negative numbers (-1, -5, etc.)
+      - Numbers > 2 (3, 100, etc.)
+      - Non-finite floats (NaN, Inf)
+      - Ambiguous / ungrounded strings ('partial', 'uncertain', 'banana', etc.)
+      - Booleans and None
+
+    Args:
+        vis: Input visibility value.
+        strict: If True, raise ValueError on any unrecognised or ambiguous input.
+        default: Fallback value when strict=False (default: VISIBILITY_VISIBLE = 2).
+
+    Returns:
+        Exact integer 0, 1, or 2.
+
+    Raises:
+        ValueError: If vis is invalid and strict=True.
+    """
+    if vis is None:
+        if strict:
+            raise ValueError("Visibility value cannot be None in strict mode")
+        return default
+
+    if isinstance(vis, bool):
+        if strict:
+            raise ValueError(
+                f"Boolean {vis} is not a valid strict visibility flag. "
+                f"Expected 0, 1, 2, 'outside', 'occluded', or 'visible'."
+            )
+        return VISIBILITY_VISIBLE if vis else VISIBILITY_OUTSIDE
+
+    if isinstance(vis, (int, float)):
+        if isinstance(vis, float) and (math.isnan(vis) or math.isinf(vis)):
+            if strict:
+                raise ValueError(f"Invalid non-finite visibility float: {vis}")
+            return default
+        try:
+            iv = int(round(float(vis)))
+        except (ValueError, TypeError, OverflowError) as e:
+            if strict:
+                raise ValueError(f"Cannot parse visibility numeric: {vis}") from e
+            return default
+        if iv in (VISIBILITY_OUTSIDE, VISIBILITY_OCCLUDED, VISIBILITY_VISIBLE):
+            return iv
+        if strict:
+            raise ValueError(f"Invalid numeric visibility: {vis} (must be 0, 1, or 2)")
+        return default
+
+    if isinstance(vis, str):
+        v = vis.strip().lower()
+        if v in ("0", "outside"):
+            return VISIBILITY_OUTSIDE
+        elif v in ("1", "occluded"):
+            return VISIBILITY_OCCLUDED
+        elif v in ("2", "visible"):
+            return VISIBILITY_VISIBLE
+        elif not strict:
+            if v in ("absent", "false"):
+                return VISIBILITY_OUTSIDE
+            elif v in ("partial",):
+                return VISIBILITY_OCCLUDED
+            elif v in ("true",):
+                return VISIBILITY_VISIBLE
+            return default
+        else:
+            raise ValueError(
+                f"Invalid visibility string: {vis!r}. "
+                f"Allowed: '0', '1', '2', 'outside', 'occluded', 'visible'."
+            )
+
+    if strict:
+        raise ValueError(f"Unsupported visibility type: {type(vis).__name__} ({vis!r})")
+    return default
+
+
+def map_visibility_to_cvat(
+    vis: Union[int, float, str, bool, None],
+    strict: bool = False,
+    default: int = VISIBILITY_VISIBLE,
+) -> Tuple[bool, bool]:
     """Map visibility flag to CVAT (outside, occluded) booleans.
 
     Args:
-        vis: Numeric (0, 1, 2), string ("outside", "occluded", "visible"), or boolean.
+        vis: Numeric (0, 1, 2), string ("outside", "occluded", "visible"), bool, or None.
+        strict: If True, invalid values raise ValueError. If False, invalid values
+                that cannot be normalized default safely to default.
+        default: Fallback integer (0, 1, or 2) when strict=False.
 
     Returns:
         (outside, occluded) tuple.
     """
-    if isinstance(vis, bool):
-        return (False, False) if vis else (True, False)
-    if isinstance(vis, str):
-        v = vis.strip().lower()
-        if v in ("0", "outside", "absent", "false"):
-            return (True, False)
-        elif v in ("1", "occluded", "partial"):
-            return (False, True)
-        else:
-            return (False, False)
-    try:
-        iv = int(round(float(vis)))
-    except (ValueError, TypeError):
-        iv = 2
-    if iv == 0:
+    norm_v = normalize_visibility(vis, strict=strict, default=default)
+    if norm_v == VISIBILITY_OUTSIDE:
         return (True, False)
-    elif iv == 1:
+    elif norm_v == VISIBILITY_OCCLUDED:
         return (False, True)
-    else:  # iv == 2 or any other value
+    else:
         return (False, False)
 
 
-def map_cvat_to_visibility(outside: bool, occluded: bool) -> int:
-    """Map CVAT (outside, occluded) booleans to visibility flag."""
-    if outside:
-        return 0
-    elif occluded:
-        return 1
+def map_cvat_to_visibility(outside: bool, occluded: bool, strict: bool = False) -> int:
+    """Map CVAT (outside, occluded) booleans to visibility flag.
+
+    Contract:
+        - outside=True,  occluded=False -> 0 (VISIBILITY_OUTSIDE)
+        - outside=False, occluded=True  -> 1 (VISIBILITY_OCCLUDED)
+        - outside=False, occluded=False -> 2 (VISIBILITY_VISIBLE)
+
+    Forbidden Invariant:
+        - outside=True,  occluded=True  -> Invalid state.
+          If strict=True: raises ValueError.
+          If strict=False: outside takes precedence, returns 0.
+
+    Args:
+        outside: CVAT outside attribute boolean.
+        occluded: CVAT occluded attribute boolean.
+        strict: If True, raises ValueError if outside and occluded are both True.
+
+    Returns:
+        0 (outside), 1 (occluded), or 2 (visible).
+    """
+    b_out = bool(outside)
+    b_occ = bool(occluded)
+    if b_out and b_occ:
+        if strict:
+            raise ValueError(
+                "Invalid CVAT state: a keypoint cannot be simultaneously outside and occluded."
+            )
+        return VISIBILITY_OUTSIDE
+    if b_out:
+        return VISIBILITY_OUTSIDE
+    elif b_occ:
+        return VISIBILITY_OCCLUDED
     else:
-        return 2
+        return VISIBILITY_VISIBLE
 
 
 # ─── Loader Functions (cached, validated) ──────────────────────────────────────
@@ -374,6 +495,20 @@ def pose17_coco_keypoints() -> Tuple[str, ...]:
     """
     schema = load_pose17()
     return tuple(schema.id_to_coco_name[kp.id] for kp in schema.keypoints)
+
+
+def pose17_semantic_keypoints() -> Tuple[str, ...]:
+    """Return Pose17 keypoint names in canonical VinFast 1..17 order.
+
+    Canonical accessor for VinFast Week-2 HumanPose-17 viewer-space keypoints.
+    Equivalent to pose17_coco_keypoints(), retained as the authoritative alias.
+    """
+    return pose17_coco_keypoints()
+
+
+def pose17_laterality_convention() -> str:
+    """Return canonical laterality convention for Pose17 ('viewer') from authoritative YAML."""
+    return load_pose17().laterality_convention
 
 
 def pose17_keypoint_descriptions() -> Dict[str, str]:

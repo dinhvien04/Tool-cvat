@@ -104,6 +104,10 @@ if (-not $resolvedBuildSha -or $resolvedBuildSha.Trim() -eq "" -or $resolvedBuil
     }
 }
 Write-Host "Deployment build revision SHA: $resolvedBuildSha" -ForegroundColor Gray
+if ($Strict -and (-not $resolvedBuildSha -or $resolvedBuildSha -eq "unknown")) {
+    Write-Error "Strict mode is enabled, but TOOL_CVAT_BUILD_SHA could not be resolved from environment or git HEAD."
+    exit 1
+}
 
 # Determine functions to deploy
 $functionsToDeploy = @()
@@ -510,11 +514,17 @@ if ($Target -in @("week2", "human-pose-17", "face-vf50", "active-all", "all")) {
     $statusArgs = @((Join-Path $ScriptDir "week2_runtime_status.py"))
     if ($Strict) {
         $statusArgs += "--strict"
+    } else {
+        $statusArgs += "--check"
     }
     python @statusArgs
-    if ($Strict -and $LASTEXITCODE -ne 0) {
-        Write-Error "Post-deployment strict verification failed. Spec drift or build SHA mismatch detected!"
-        exit 1
+    if ($LASTEXITCODE -ne 0) {
+        if ($Strict) {
+            Write-Error "Post-deployment strict verification failed. Spec drift or build SHA mismatch detected!"
+            exit 1
+        } else {
+            Write-Warning "Post-deployment verification reported unready containers or spec drift. Run with -Strict for zero-drift enforcement."
+        }
     }
 }
 

@@ -67,7 +67,7 @@ POSE17_KEYPOINT_SPECS: List[Tuple[int, str, List[str]]] = [
 def normalize_sublabel_name(val: str) -> str:
     """Normalize sublabel string: lowercase, hyphens/spaces to underscores, normalize prefixes."""
     s = str(val).strip().lower()
-    s = s.replace("-", "_").replace(" ", "_")
+    s = s.replace("-", "_").replace(" ", "_").replace(".", "_")
     while "__" in s:
         s = s.replace("__", "_")
     if s.startswith("r_"):
@@ -185,6 +185,13 @@ def validate_cvat_mapping(
                 errors.append(f"Model label {model_name!r} not found in model specification")
             continue
 
+        if not isinstance(mapping_item, dict):
+            errors.append(
+                f'Mapping item for model label "{model_name}" must be a dictionary, '
+                f'got {type(mapping_item).__name__}'
+            )
+            continue
+
         md_label = model_label_map[model_name]
         target_task_name = mapping_item.get("name", model_name)
 
@@ -196,6 +203,16 @@ def validate_cvat_mapping(
             continue
 
         db_label = task_label_map[target_task_name]
+
+        # Verify label type compatibility matching CVAT lambda_manager labels_compatible
+        md_type = md_label.get("type", "any")
+        db_type = db_label.get("type", "any")
+        if md_type != "any" and db_type != "any" and md_type != db_type:
+            errors.append(
+                f'[INCOMPATIBLE_TYPE] Model label "{model_name}" (type: {md_type}) '
+                f'and task label "{target_task_name}" (type: {db_type}) are not compatible'
+            )
+            continue
 
         if md_label.get("type") == "skeleton" and db_label.get("type") == "skeleton":
             if "sublabels" not in mapping_item:
@@ -231,6 +248,13 @@ def validate_cvat_mapping(
 
             target_subs_seen: Dict[str, str] = {}
             for md_sub_name, sub_map_item in sub_mapping.items():
+                if not isinstance(sub_map_item, dict):
+                    errors.append(
+                        f'Sublabel mapping for "{md_sub_name}" in skeleton "{model_name}" '
+                        f'must be a dictionary, got {type(sub_map_item).__name__}'
+                    )
+                    continue
+
                 if md_sub_name not in md_sub_names:
                     errors.append(
                         f'Model sublabel "{md_sub_name}" does not exist in model skeleton "{model_name}"'
