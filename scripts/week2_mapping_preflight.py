@@ -250,9 +250,10 @@ def build_compatible_mapping_payload(
                 face_label = task_label_map["face"]
                 face_subs = [s["name"] for s in face_label.get("sublabels", [])]
                 diagnostics.append(
-                    f"[INCOMPATIBLE TOPOLOGY] Task defines a monolithic skeleton 'face' with "
-                    f"{len(face_subs)} sublabels {face_subs}. The model defines 7 independent "
-                    f"component skeletons ({', '.join(VF50_COMPONENT_NAMES)}). "
+                    f"[INCOMPATIBLE_FULL_VF50] Task defines a monolithic skeleton 'face' with "
+                    f"{len(face_subs)} sublabels {face_subs}. The full VF-50 model defines 7 independent "
+                    f"component skeletons ({', '.join(VF50_COMPONENT_NAMES)}) with 50 total points. "
+                    f"An old 5-point face task is NOT equivalent to full VF-50. "
                     f"In CVAT 2.75.1, skeleton mapping cannot merge multiple model skeletons "
                     f"into a single task skeleton. Attempting to map 'face' without sublabels "
                     f"WILL trigger: Detection error occurred: Mapping for elements was not specified in skeleton 'face'."

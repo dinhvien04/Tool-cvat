@@ -5,11 +5,16 @@ Checks:
    - nuclio-nuclio-ninerouter-human-pose-17
    - nuclio-nuclio-ninerouter-face-vf50
 2. Deployed annotations (metadata.annotations.spec):
-   - Pose 17: 1 skeleton 'person', 17 sublabels, valid SVG
-   - Face VF-50: 7 component skeletons (VinFast spec) vs legacy 1 monolithic 'face'
-3. Drift status against repo HEAD files:
-   - serverless/ninerouter-human-pose-17/nuclio/function.yaml
-   - serverless/ninerouter-face-vf50/nuclio/function.yaml
+   - Pose 17: 1 skeleton 'person', 17 sublabels, 18 edges (including ear-to-shoulder), valid SVG
+   - Face VF-50: 7 component skeletons (VinFast spec) vs legacy 1 monolithic 'face', anatomical SVG
+3. Full SHA-256 Spec Fingerprinting across:
+   - Canonical YAML schema
+   - Canonical CVAT spec
+   - Repo HEAD function.yaml spec
+   - Deployed container annotations spec
+   - CVAT registry spec (Nuclio API)
+4. Runtime build SHA tracking:
+   - TOOL_CVAT_BUILD_SHA environment variable in container vs git rev-parse HEAD
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import argparse
 import json
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,8 +33,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from core.skeleton_contract import VF50_COMPONENT_NAMES, VF50_COMPONENT_CONFIG
+from core.skeleton_contract import (
+    VF50_COMPONENT_NAMES,
+    VF50_COMPONENT_CONFIG,
+    build_cvat_pose17_spec,
+    build_cvat_vf50_spec,
+)
 from core.pose_face_schema import POSE17_KEYPOINTS
+from core.week2_schema import (
+    compute_spec_fingerprint,
+    load_pose17,
+    load_vf50,
+)
 
 WEEK2_CONTAINERS = {
     "pose17": {
@@ -44,6 +60,23 @@ WEEK2_CONTAINERS = {
         "expected_labels": 7,
     },
 }
+
+
+def get_git_head_sha() -> Optional[str]:
+    """Return the current git HEAD commit SHA."""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(REPO_ROOT),
+        )
+        if res.returncode == 0:
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return None
 
 
 def get_container_inspect(container_name: str) -> Optional[Dict[str, Any]]:
@@ -79,28 +112,91 @@ def get_repo_spec(yaml_path: Path) -> Tuple[Optional[str], Optional[List[Dict[st
         return None, None
 
 
-def analyze_function_runtime(key: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+def get_canonical_cvat_spec(key: str) -> List[Dict[str, Any]]:
+    """Return authoritative CVAT spec dictionary list for the given detector key."""
+    if key == "pose17":
+        return [build_cvat_pose17_spec(parent_label="person")]
+    elif key == "vf50":
+        return build_cvat_vf50_spec()
+    raise ValueError(f"Unknown key: {key}")
+
+
+def get_canonical_yaml_fingerprint(key: str) -> str:
+    """Return authoritative YAML schema SHA-256 fingerprint."""
+    if key == "pose17":
+        return load_pose17().spec_fingerprint
+    elif key == "vf50":
+        return load_vf50().spec_fingerprint
+    raise ValueError(f"Unknown key: {key}")
+
+
+def get_nuclio_registered_spec(fn_name: str) -> Optional[List[Dict[str, Any]]]:
+    """Query Nuclio dashboard API for registered function specification."""
+    for host in ("127.0.0.1", "localhost"):
+        url = f"http://{host}:8070/api/functions/{fn_name}"
+        try:
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                ann = data.get("metadata", {}).get("annotations", {})
+                raw_spec = ann.get("spec")
+                if raw_spec:
+                    return json.loads(raw_spec) if isinstance(raw_spec, str) else raw_spec
+        except Exception:
+            continue
+    return None
+
+
+def analyze_function_runtime(key: str, cfg: Dict[str, Any], *, strict: bool = False) -> Dict[str, Any]:
     """Analyze runtime status and spec of a single Week-2 detector."""
     container_name = cfg["container_name"]
     yaml_path = cfg["yaml_path"]
+    fn_name = cfg["function_name"]
 
     repo_name, repo_spec = get_repo_spec(yaml_path)
+    git_head = get_git_head_sha()
+
+    canonical_cvat_spec = get_canonical_cvat_spec(key)
+    canonical_spec_fp = compute_spec_fingerprint(canonical_cvat_spec)
+    canonical_yaml_fp = get_canonical_yaml_fingerprint(key)
+    repo_spec_fp = compute_spec_fingerprint(repo_spec) if repo_spec else None
+
+    nuclio_spec = get_nuclio_registered_spec(fn_name)
+    cvat_registry_fp = compute_spec_fingerprint(nuclio_spec) if nuclio_spec else None
 
     report: Dict[str, Any] = {
         "key": key,
         "container_name": container_name,
-        "function_name": cfg["function_name"],
+        "function_name": fn_name,
         "deployed": False,
         "status": "NOT_FOUND",
         "health": "UNKNOWN",
         "ports": [],
         "env": {},
+        "build_sha": None,
+        "git_head_sha": git_head,
+        "build_sha_match": False,
         "deployed_spec_type": "UNKNOWN",
         "deployed_label_count": 0,
         "spec_drift": False,
         "drift_details": [],
+        "fingerprints": {
+            "canonical_yaml": canonical_yaml_fp,
+            "canonical_spec": canonical_spec_fp,
+            "repo_spec": repo_spec_fp,
+            "deployed_spec": None,
+            "cvat_registry": cvat_registry_fp,
+        },
         "ready": False,
     }
+
+    # Verify repo spec matches canonical contract
+    if repo_spec_fp != canonical_spec_fp:
+        report["spec_drift"] = True
+        report["drift_details"].append(
+            f"REPO DRIFT: repo function.yaml spec ({repo_spec_fp[:12] if repo_spec_fp else 'None'}) "
+            f"differs from canonical contract ({canonical_spec_fp[:12]})"
+        )
 
     info = get_container_inspect(container_name)
     if not info:
@@ -119,6 +215,44 @@ def analyze_function_runtime(key: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
             for b in host_bindings:
                 report["ports"].append(f"{b.get('HostPort')}->{container_port}")
 
+    # Environment variables
+    env_list = info.get("Config", {}).get("Env", [])
+    env_dict: Dict[str, str] = {}
+    for entry in env_list:
+        if "=" in entry:
+            k, v = entry.split("=", 1)
+            env_dict[k] = v
+    report["env"] = {
+        k: env_dict[k]
+        for k in (
+            "TOOL_CVAT_BUILD_SHA",
+            "VISION_MODEL",
+            "POSE17_MODEL",
+            "POSE17_REFINE_MODEL",
+            "VF50_MODEL",
+            "VF50_REFINE_MODEL",
+            "DETECTION_MODE",
+        )
+        if k in env_dict
+    }
+
+    container_build_sha = env_dict.get("TOOL_CVAT_BUILD_SHA")
+    report["build_sha"] = container_build_sha
+    if container_build_sha and git_head:
+        report["build_sha_match"] = (container_build_sha == git_head)
+    elif not container_build_sha:
+        report["build_sha_match"] = False
+        report["drift_details"].append(
+            "BUILD SHA MISSING: Container does not have TOOL_CVAT_BUILD_SHA environment variable"
+        )
+
+    if container_build_sha and git_head and container_build_sha != git_head:
+        report["drift_details"].append(
+            f"BUILD SHA MISMATCH: Container deployed at {container_build_sha[:12]}, repo is at {git_head[:12]}"
+        )
+        if strict:
+            report["spec_drift"] = True
+
     # Labels & annotations
     labels = info.get("Config", {}).get("Labels", {})
     raw_ann = labels.get("nuclio.io/annotations")
@@ -132,7 +266,6 @@ def analyze_function_runtime(key: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         report["drift_details"].append(f"Cannot parse container annotations JSON: {e}")
         return report
 
-    deployed_name = ann.get("name")
     raw_spec = ann.get("spec")
     try:
         deployed_spec = json.loads(raw_spec) if isinstance(raw_spec, str) else raw_spec
@@ -145,6 +278,9 @@ def analyze_function_runtime(key: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         return report
 
     report["deployed_label_count"] = len(deployed_spec)
+    deployed_spec_fp = compute_spec_fingerprint(deployed_spec)
+    report["fingerprints"]["deployed_spec"] = deployed_spec_fp
+
     label_names = [item.get("name") for item in deployed_spec if isinstance(item, dict)]
 
     if key == "vf50":
@@ -176,20 +312,36 @@ def analyze_function_runtime(key: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
             report["deployed_spec_type"] = f"UNEXPECTED_POSE17_LABELS_{label_names}"
             report["spec_drift"] = True
 
-    # Compare deployed spec against repo spec
-    if repo_spec:
-        # Check label count match
-        if len(repo_spec) != len(deployed_spec):
-            report["spec_drift"] = True
-            report["drift_details"].append(
-                f"Spec label count mismatch: repo has {len(repo_spec)}, container has {len(deployed_spec)}"
-            )
+    # Full SHA-256 fingerprint comparison: deployed vs repo
+    if repo_spec_fp and deployed_spec_fp != repo_spec_fp:
+        report["spec_drift"] = True
+        report["drift_details"].append(
+            f"FULL SPEC SHA-256 DRIFT: Deployed ({deployed_spec_fp[:12]}) differs from "
+            f"repo function.yaml ({repo_spec_fp[:12]})"
+        )
+
+    # Full SHA-256 fingerprint comparison: deployed vs canonical
+    if deployed_spec_fp != canonical_spec_fp:
+        report["spec_drift"] = True
+        report["drift_details"].append(
+            f"CANONICAL SPEC DRIFT: Deployed ({deployed_spec_fp[:12]}) differs from "
+            f"authoritative canonical contract ({canonical_spec_fp[:12]})"
+        )
+
+    # Full SHA-256 fingerprint comparison: deployed vs CVAT registry
+    if cvat_registry_fp and cvat_registry_fp != deployed_spec_fp:
+        report["spec_drift"] = True
+        report["drift_details"].append(
+            f"CVAT REGISTRY DRIFT: Nuclio dashboard registry ({cvat_registry_fp[:12]}) differs "
+            f"from container annotations ({deployed_spec_fp[:12]})"
+        )
 
     report["ready"] = (
         report["deployed"]
         and report["status"] == "running"
         and report["health"] in ("healthy", "none")
         and not report["spec_drift"]
+        and (report["build_sha_match"] or not strict)
     )
 
     return report
@@ -199,47 +351,59 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Week-2 AI Detector Runtime Status & Spec Drift Auditor")
     parser.add_argument("--json", action="store_true", help="Output JSON format")
     parser.add_argument("--check", action="store_true", help="Exit 1 if any function is drifted or not ready")
+    parser.add_argument("--strict", action="store_true", help="Enforce build SHA matching git HEAD in addition to spec drift")
     args = parser.parse_args()
 
     results: Dict[str, Dict[str, Any]] = {}
     all_ready = True
 
     for key, cfg in WEEK2_CONTAINERS.items():
-        res = analyze_function_runtime(key, cfg)
+        res = analyze_function_runtime(key, cfg, strict=args.strict)
         results[key] = res
         if not res["ready"]:
             all_ready = False
 
     if args.json:
         print(json.dumps(results, indent=2))
-        return 0 if all_ready or not args.check else 1
+        return 0 if all_ready or not (args.check or args.strict) else 1
 
-    print("=" * 75)
-    print("WEEK-2 DETECTOR RUNTIME STATUS & SPEC DRIFT REPORT")
-    print("=" * 75)
+    print("=" * 80)
+    print("WEEK-2 DETECTOR RUNTIME STATUS & SPEC FINGERPRINT REPORT")
+    print("=" * 80)
 
     for key, r in results.items():
+        fps = r["fingerprints"]
         print(f"\n[{r['function_name']}]")
-        print(f"  Container : {r['container_name']}")
-        print(f"  Status    : {r['status']} (health: {r['health']})")
-        print(f"  Ports     : {', '.join(r['ports']) if r['ports'] else 'None'}")
-        print(f"  Spec Type : {r['deployed_spec_type']} ({r['deployed_label_count']} labels)")
+        print(f"  Container     : {r['container_name']}")
+        print(f"  Status        : {r['status']} (health: {r['health']})")
+        print(f"  Ports         : {', '.join(r['ports']) if r['ports'] else 'None'}")
+        print(f"  Build SHA     : {r['build_sha'] or 'UNSET'} (git HEAD: {r['git_head_sha'] or 'UNKNOWN'}, match: {r['build_sha_match']})")
+        print(f"  Spec Type     : {r['deployed_spec_type']} ({r['deployed_label_count']} labels)")
+        print(f"  Canonical Spec: {fps['canonical_spec'][:16]}... (YAML: {fps['canonical_yaml'][:16]}...)")
+        print(f"  Repo Spec     : {fps['repo_spec'][:16] if fps['repo_spec'] else 'N/A'}...")
+        print(f"  Deployed Spec : {fps['deployed_spec'][:16] if fps['deployed_spec'] else 'N/A'}...")
+        print(f"  CVAT Registry : {fps['cvat_registry'][:16] if fps['cvat_registry'] else 'N/A'}...")
+        if r["env"]:
+            env_strs = [f"{k}={v}" for k, v in r["env"].items() if k != "TOOL_CVAT_BUILD_SHA"]
+            if env_strs:
+                print(f"  Active Env    : {', '.join(env_strs)}")
+
         if r["spec_drift"]:
-            print("  DRIFT     : YES - SPEC DRIFT DETECTED!")
+            print("  DRIFT         : YES - SPEC DRIFT DETECTED!")
             for d in r["drift_details"]:
                 print(f"    - {d}")
         else:
-            print("  DRIFT     : NO (Aligned with repo HEAD)")
+            print("  DRIFT         : NO (100% SHA-256 spec alignment)")
 
-        print(f"  Ready     : {'YES' if r['ready'] else 'NO - REDEPLOY NEEDED'}")
+        print(f"  Ready         : {'YES' if r['ready'] else 'NO - REDEPLOY NEEDED'}")
 
-    print("\n" + "=" * 75)
+    print("\n" + "=" * 80)
     if all_ready:
         print("ALL WEEK-2 DETECTORS ARE DEPLOYED, HEALTHY, AND SPEC-ALIGNED.")
         return 0
     else:
-        print("ONE OR MORE WEEK-2 DETECTORS REQUIRE REDEPLOYMENT.")
-        return 1 if args.check else 0
+        print("ONE OR MORE WEEK-2 DETECTORS REQUIRE REDEPLOYMENT OR HAVE DRIFT.")
+        return 1 if (args.check or args.strict) else 0
 
 
 if __name__ == "__main__":

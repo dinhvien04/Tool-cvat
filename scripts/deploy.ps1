@@ -45,7 +45,16 @@ param (
     [string]$Pose17Model = $env:POSE17_MODEL,
 
     [Parameter(Mandatory = $false)]
+    [string]$Pose17RefineModel = $env:POSE17_REFINE_MODEL,
+
+    [Parameter(Mandatory = $false)]
     [string]$Vf50Model = $env:VF50_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$Vf50RefineModel = $env:VF50_REFINE_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ToolCvatBuildSha = $env:TOOL_CVAT_BUILD_SHA,
 
     [Parameter(Mandatory = $false)]
     [string]$NineRouterKey = $env:NINEROUTER_KEY,
@@ -77,6 +86,16 @@ Write-Host "Target: $Target" -ForegroundColor Gray
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
+
+$resolvedBuildSha = $ToolCvatBuildSha
+if (-not $resolvedBuildSha -or $resolvedBuildSha.Trim() -eq "") {
+    try {
+        $resolvedBuildSha = (git rev-parse HEAD 2>$null).Trim()
+    } catch {
+        $resolvedBuildSha = "unknown"
+    }
+}
+Write-Host "Deployment build revision SHA: $resolvedBuildSha" -ForegroundColor Gray
 
 # Determine functions to deploy
 $functionsToDeploy = @()
@@ -285,6 +304,15 @@ $syncTargetParam = switch ($Target) {
 }
 Write-Host "Syncing canonical modules across serverless targets (target: $syncTargetParam)..." -ForegroundColor Gray
 python (Join-Path $ScriptDir "sync_serverless_modules.py") --target $syncTargetParam
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Module synchronization failed. Aborting deployment."
+    exit 1
+}
+python (Join-Path $ScriptDir "sync_serverless_modules.py") --check --target $syncTargetParam
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Pre-deployment drift check failed. Serverless copies are not aligned with root modules!"
+    exit 1
+}
 
 foreach ($fn in $functionsToDeploy) {
     $fnName = $fn.Name
@@ -301,6 +329,8 @@ foreach ($fn in $functionsToDeploy) {
     $fnModel = $resolvedVisionModel
     $fnTimeout = $NineRouterTimeout
     $detectorEnvVar = ""
+    $extraPoseRefine = $null
+    $extraVf50Refine = $null
     if ($fnName -eq "ninerouter-rectangle-mask") {
         if ($RectangleMaskModel -and $RectangleMaskModel.Trim() -ne "") {
             $fnModel = $RectangleMaskModel.Trim()
@@ -327,11 +357,17 @@ foreach ($fn in $functionsToDeploy) {
             $fnModel = $Pose17Model.Trim()
         }
         $detectorEnvVar = "POSE17_MODEL=$fnModel"
+        if ($Pose17RefineModel -and $Pose17RefineModel.Trim() -ne "") {
+            $extraPoseRefine = $Pose17RefineModel.Trim()
+        }
     } elseif ($fnName -eq "ninerouter-face-vf50") {
         if ($Vf50Model -and $Vf50Model.Trim() -ne "") {
             $fnModel = $Vf50Model.Trim()
         }
         $detectorEnvVar = "VF50_MODEL=$fnModel"
+        if ($Vf50RefineModel -and $Vf50RefineModel.Trim() -ne "") {
+            $extraVf50Refine = $Vf50RefineModel.Trim()
+        }
     }
     Write-Host "Active model for $($fnName): $fnModel" -ForegroundColor Green
     Write-Host "Request timeout for $($fnName): $fnTimeout s" -ForegroundColor Gray
@@ -375,6 +411,15 @@ foreach ($fn in $functionsToDeploy) {
         }
         if ($detectorEnvVar) {
             $extraEnvBash += "--env `"$detectorEnvVar`" "
+        }
+        if ($extraPoseRefine) {
+            $extraEnvBash += "--env `"POSE17_REFINE_MODEL=$extraPoseRefine`" "
+        }
+        if ($extraVf50Refine) {
+            $extraEnvBash += "--env `"VF50_REFINE_MODEL=$extraVf50Refine`" "
+        }
+        if ($resolvedBuildSha) {
+            $extraEnvBash += "--env `"TOOL_CVAT_BUILD_SHA=$resolvedBuildSha`" "
         }
 
         $bashScript = @"
@@ -432,6 +477,9 @@ nuctl deploy $fnName \
             "--env", "FEEDBACK_DB_PATH=/opt/nuclio/feedback/feedback.sqlite3"
         )
         if ($detectorEnvVar) { $deployArgs += @("--env", $detectorEnvVar) }
+        if ($extraPoseRefine) { $deployArgs += @("--env", "POSE17_REFINE_MODEL=$extraPoseRefine") }
+        if ($extraVf50Refine) { $deployArgs += @("--env", "VF50_REFINE_MODEL=$extraVf50Refine") }
+        if ($resolvedBuildSha) { $deployArgs += @("--env", "TOOL_CVAT_BUILD_SHA=$resolvedBuildSha") }
         if ($NineRouterKey) { $deployArgs += @("--env", "NINEROUTER_KEY=$NineRouterKey") }
         if ($CvatWebhookSecret) { $deployArgs += @("--env", "CVAT_WEBHOOK_SECRET=$CvatWebhookSecret") }
         & nuctl @deployArgs
@@ -442,6 +490,11 @@ nuctl deploy $fnName \
         exit 1
     }
     Write-Host "[SUCCESS] $fnDisplay ($fnName) deployed." -ForegroundColor Green
+}
+
+if ($Target -in @("week2", "human-pose-17", "face-vf50", "active-all", "all")) {
+    Write-Host "`n[Post-deploy] Verifying Week-2 runtime status and spec fingerprints..." -ForegroundColor Yellow
+    python (Join-Path $ScriptDir "week2_runtime_status.py")
 }
 
 Write-Host "`n======================================================================" -ForegroundColor Green
