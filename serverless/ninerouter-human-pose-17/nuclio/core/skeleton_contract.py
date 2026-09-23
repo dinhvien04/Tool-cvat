@@ -861,10 +861,14 @@ def build_pose17_crop_prompt(keypoints: Optional[Sequence[str]] = None) -> str:
     left_str = ", ".join(left_kps)
 
     laterality_explanation = (
-        "Viewer Perspective (MANDATORY):\n"
-        "VinFast Week-2 HumanPose-17 uses a canonical 17-joint topology with explicit VinFast viewer-space point naming:\n"
-        f"- right_* ({right_str}) = viewer's right side of image/crop (larger X coordinate)\n"
-        f"- left_* ({left_str}) = viewer's left side of image/crop (smaller X coordinate)\n"
+        "VinFast Viewer-Perspective Convention (MANDATORY):\n"
+        "VinFast Week-2 HumanPose-17 topology uses explicit VinFast viewer-space point naming (RIGHT/LEFT refer to displayed image sides):\n"
+        f"- 'right_*' ({right_str}) refer to the VIEWER'S RIGHT side of the displayed image/crop (larger X coordinate).\n"
+        "  For example, 'right_eye' means the eye appearing on the RIGHT side of the image/crop, NOT the anatomical right of the person.\n"
+        "  Similarly, right_ear, right_shoulder, right_elbow, right_wrist, right_hip, right_knee, right_ankle are on the crop's right.\n"
+        f"- 'left_*' ({left_str}) refer to the VIEWER'S LEFT side of the displayed image/crop (smaller X coordinate).\n"
+        "  For example, 'left_eye' means the eye appearing on the LEFT side of the image/crop.\n"
+        "- 'nose': center line of the face.\n"
     ) if schema.laterality_convention == "viewer" else ""
 
     return (
