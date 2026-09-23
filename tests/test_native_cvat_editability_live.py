@@ -320,6 +320,7 @@ class TestLiveCVATEditRoundTrip:
         harness.verify_zero_collateral_damage(final_shapes)
         assert len(final_shapes) == 100
 
+    @pytest.mark.live
     def test_live_production_jobs_read_only_access(self):
         """Verify that live production jobs (12, 13, 15) can be inspected in read-only mode."""
         session = get_live_cvat_session()
@@ -327,7 +328,10 @@ class TestLiveCVATEditRoundTrip:
             pytest.skip("Local CVAT instance (http://localhost:18080) not available or token missing")
 
         for jid in (12, 13, 15):
-            r = session.get(f"{CVAT_BASE_URL}/api/jobs/{jid}/annotations", timeout=10)
+            try:
+                r = session.get(f"{CVAT_BASE_URL}/api/jobs/{jid}/annotations", timeout=15)
+            except requests.exceptions.RequestException as e:
+                pytest.skip(f"CVAT server failed or timed out responding for job {jid}: {e}")
             if r.status_code == 200:
                 shapes = r.json().get("shapes", [])
                 # Read-only check: assert shape structure without mutating anything
@@ -336,6 +340,7 @@ class TestLiveCVATEditRoundTrip:
                     assert "type" in s
                     assert "points" in s
 
+    @pytest.mark.live
     def test_live_disposable_detectors_edit_roundtrip(self):
         """Live roundtrip verification for detector shapes on a disposable job."""
         session = get_live_cvat_session()
@@ -448,6 +453,7 @@ class TestLiveCVATEditRoundTrip:
             # 6. Clean up ONLY created test shapes via SafeAnnotationHarness
             harness.cleanup_live(session, CVAT_BASE_URL)
 
+    @pytest.mark.live
     def test_live_disposable_skeleton_edit_roundtrip(self):
         """Live roundtrip verification for skeleton editability on a disposable job."""
         session = get_live_cvat_session()

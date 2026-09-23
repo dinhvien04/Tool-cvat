@@ -26,7 +26,7 @@ import yaml
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
 
 # ─── Path Resolution ───────────────────────────────────────────────────────────
 _CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -47,6 +47,7 @@ class Keypoint:
     numeric_name: str    # "1", "2", ... or "0", "1", ...
     semantic_name: str   # "Nose", "R Eye", ... or "longmaytrai_00", ...
     side: str            # "center", "right", "left"
+    anatomical: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ class VF50Component:
     topology: str                        # "open" or "closed"
     keypoints: Tuple[Keypoint, ...]      # ordered points
     edges: Tuple[Tuple[int, int], ...]   # 0-based ID pairs
+    description: str = ""                # component description from schema
 
 
 @dataclass(frozen=True)
@@ -115,17 +117,34 @@ VISIBILITY_OUTSIDE = 0    # Not labeled / outside image frame
 VISIBILITY_OCCLUDED = 1   # Present but occluded
 VISIBILITY_VISIBLE = 2    # Clearly visible
 
-def map_visibility_to_cvat(vis: int) -> Tuple[bool, bool]:
+def map_visibility_to_cvat(vis: Union[int, float, str, bool]) -> Tuple[bool, bool]:
     """Map visibility flag to CVAT (outside, occluded) booleans.
+
+    Args:
+        vis: Numeric (0, 1, 2), string ("outside", "occluded", "visible"), or boolean.
 
     Returns:
         (outside, occluded) tuple.
     """
-    if vis == 0:
+    if isinstance(vis, bool):
+        return (False, False) if vis else (True, False)
+    if isinstance(vis, str):
+        v = vis.strip().lower()
+        if v in ("0", "outside", "absent", "false"):
+            return (True, False)
+        elif v in ("1", "occluded", "partial"):
+            return (False, True)
+        else:
+            return (False, False)
+    try:
+        iv = int(round(float(vis)))
+    except (ValueError, TypeError):
+        iv = 2
+    if iv == 0:
         return (True, False)
-    elif vis == 1:
+    elif iv == 1:
         return (False, True)
-    else:  # vis == 2
+    else:  # iv == 2 or any other value
         return (False, False)
 
 
@@ -191,6 +210,7 @@ def load_pose17() -> Pose17Schema:
             numeric_name=str(sl["name"]),
             semantic_name=sl["semantic_name"],
             side=sl.get("side", "center"),
+            anatomical=sl.get("anatomical"),
         )
         keypoints.append(kp)
         id_to_kp[kp.id] = kp
@@ -280,6 +300,7 @@ def load_vf50() -> VF50Schema:
                 numeric_name=str(sl["name"]),
                 semantic_name=sl["semantic_name"],
                 side="center",
+                anatomical=sl.get("anatomical"),
             )
             comp_kps.append(kp)
             all_keypoints.append(kp)
@@ -298,6 +319,7 @@ def load_vf50() -> VF50Schema:
             topology=comp_raw["topology"],
             keypoints=tuple(comp_kps),
             edges=comp_edges,
+            description=comp_raw.get("description", ""),
         )
         components.append(comp)
         comp_by_name[comp.name] = comp
@@ -354,6 +376,24 @@ def pose17_coco_keypoints() -> Tuple[str, ...]:
     return tuple(schema.id_to_coco_name[kp.id] for kp in schema.keypoints)
 
 
+def pose17_keypoint_descriptions() -> Dict[str, str]:
+    """Return mapping of COCO keypoint name to its canonical schema metadata description.
+
+    Example:
+        {'nose': 'Nose (Chop mui) [center]', 'right_eye': 'R Eye (Tam dong tu mat phia PHAI...) [right]', ...}
+    """
+    schema = load_pose17()
+    res: Dict[str, str] = {}
+    for kp in schema.keypoints:
+        coco_name = schema.id_to_coco_name[kp.id]
+        desc = kp.semantic_name
+        if kp.anatomical:
+            desc += f" ({kp.anatomical})"
+        desc += f" [{kp.side}]"
+        res[coco_name] = desc
+    return res
+
+
 def pose17_edges_as_coco_names() -> Tuple[Tuple[str, str], ...]:
     """Return Pose17 edges as tuples of COCO-compatible lowercase name pairs."""
     return load_pose17().edges_as_coco_names
@@ -382,6 +422,132 @@ def vf50_component_point_counts() -> Dict[str, int]:
     return {c.name: c.point_count for c in load_vf50().components}
 
 
+def pose17_paired_keypoints() -> Tuple[Tuple[str, str], ...]:
+    """Return symmetric (left, right) pairs for Pose17 laterality validation."""
+    return (
+        ("left_eye", "right_eye"),
+        ("left_ear", "right_ear"),
+        ("left_shoulder", "right_shoulder"),
+        ("left_elbow", "right_elbow"),
+        ("left_wrist", "right_wrist"),
+        ("left_hip", "right_hip"),
+        ("left_knee", "right_knee"),
+        ("left_ankle", "right_ankle"),
+    )
+
+
+def pose17_rigid_paired_keypoints() -> Tuple[Tuple[str, str], ...]:
+    """Return rigid axial/head (left, right) pairs for Pose17 laterality validation."""
+    return (
+        ("left_eye", "right_eye"),
+        ("left_ear", "right_ear"),
+        ("left_shoulder", "right_shoulder"),
+        ("left_hip", "right_hip"),
+    )
+
+
+def pose17_articulated_paired_keypoints() -> Tuple[Tuple[str, str], ...]:
+    """Return articulated appendicular limb (left, right) pairs for Pose17."""
+    return (
+        ("left_elbow", "right_elbow"),
+        ("left_wrist", "right_wrist"),
+        ("left_knee", "right_knee"),
+        ("left_ankle", "right_ankle"),
+    )
+
+
+def vf50_edges_by_component() -> Dict[str, Tuple[Tuple[int, int], ...]]:
+    """Return {component_name: edges_tuple} for all 7 VF50 components."""
+    return {c.name: c.edges for c in load_vf50().components}
+
+
+def vf50_all_edges() -> Tuple[Tuple[int, int], ...]:
+    """Return all 47 canonical VF50 edges as 0-based integer pairs."""
+    return load_vf50().all_edges
+
+
+def vf50_point_to_component() -> Dict[int, str]:
+    """Return mapping from point ID (0..49) to its component name."""
+    return dict(load_vf50().point_to_component)
+
+
+def vf50_component_configs() -> Dict[str, Dict[str, Any]]:
+    """Return component configurations matching VF50_COMPONENT_CONFIG."""
+    from typing import Any
+    return {
+        c.name: {
+            "start": c.start_id,
+            "end": c.end_id,
+            "count": c.point_count,
+            "topology": c.topology,
+            "desc": c.name,
+        }
+        for c in load_vf50().components
+    }
+
+
+def vf50_landmarks() -> Tuple[str, ...]:
+    """Return canonical VF50 landmark names formatted as '<component>_<id:02d>'."""
+    vf = load_vf50()
+    return tuple(f"{vf.point_to_component[kp.id]}_{kp.id:02d}" for kp in vf.all_keypoints)
+
+
+def vf50_eyelid_opposing_pairs() -> Tuple[Tuple[int, int], ...]:
+    """Return upper/lower opposing eyelid landmark ID pairs for vertical inversion checks.
+
+    mattrai (left eye, viewer space):
+      upper (15, 16, 17) opposing lower (21, 20, 19):
+      (15, 21), (16, 20), (17, 19)
+    matphai (right eye, viewer space):
+      upper (23, 24, 25) opposing lower (29, 28, 27):
+      (23, 29), (24, 28), (25, 27)
+    """
+    return (
+        (15, 21), (16, 20), (17, 19),
+        (23, 29), (24, 28), (25, 27),
+    )
+
+
+def vf50_mirror_map() -> Dict[str, str]:
+    """Return horizontal reflection mirror map for VF50 landmark strings."""
+    mirror: Dict[str, str] = {}
+    for i in range(5):
+        l_name = f"longmaytrai_{i:02d}"
+        r_name = f"longmayphai_{9 - i:02d}"
+        mirror[l_name] = r_name
+        mirror[r_name] = l_name
+
+    for i in range(10, 14):
+        name = f"songmui_{i:02d}"
+        mirror[name] = name
+
+    eye_l_to_r = {
+        14: 26, 15: 25, 16: 24, 17: 23,
+        18: 22, 19: 29, 20: 28, 21: 27,
+    }
+    for l_id, r_id in eye_l_to_r.items():
+        l_name = f"mattrai_{l_id:02d}"
+        r_name = f"matphai_{r_id:02d}"
+        mirror[l_name] = r_name
+        mirror[r_name] = l_name
+
+    lip_outer_mirror = {
+        30: 36, 31: 35, 32: 34, 33: 33, 34: 32, 35: 31, 36: 30,
+        37: 41, 38: 40, 39: 39, 40: 38, 41: 37,
+    }
+    for a, b in lip_outer_mirror.items():
+        mirror[f"moingoai_{a:02d}"] = f"moingoai_{b:02d}"
+
+    lip_inner_mirror = {
+        42: 46, 43: 45, 44: 44, 45: 43, 46: 42,
+        47: 49, 48: 48, 49: 47,
+    }
+    for a, b in lip_inner_mirror.items():
+        mirror[f"moitrong_{a:02d}"] = f"moitrong_{b:02d}"
+
+    return mirror
+
+
 def compute_spec_fingerprint(spec_items: object) -> str:
     """Compute SHA-256 fingerprint over any JSON-serializable spec data.
 
@@ -396,6 +562,62 @@ def compute_spec_fingerprint(spec_items: object) -> str:
         64-character hex SHA-256 digest.
     """
     return _compute_fingerprint(spec_items)
+
+
+# ─── Authoritative Schema & Spec Hashes ───────────────────────────────────────
+
+# 1. Semantic Schema Hashes (derived from YAML contracts)
+POSE_SCHEMA_HASH: str = load_pose17().spec_fingerprint
+VF50_SCHEMA_HASH: str = load_vf50().spec_fingerprint
+
+
+def get_canonical_cvat_spec(key: str) -> List[Dict[str, Any]]:
+    """Return authoritative CVAT spec dictionary list for detector key.
+
+    Derives directly from canonical load_pose17() and load_vf50() schemas.
+    """
+    from core.skeleton_contract import build_cvat_pose17_spec, build_cvat_vf50_spec
+    if key == "pose17":
+        return [build_cvat_pose17_spec(parent_label=load_pose17().parent_label)]
+    elif key == "vf50":
+        return build_cvat_vf50_spec()
+    raise ValueError(f"Unknown detector key: {key}")
+
+
+# 2. Canonical CVAT Spec Hashes (derived from canonical CVAT annotation spec dictionary list, computed lazily to break import cycles)
+_POSE_CVAT_SPEC_HASH: Optional[str] = None
+_VF50_CVAT_SPEC_HASH: Optional[str] = None
+
+
+def get_canonical_schema_hash(key: str) -> str:
+    """Return authoritative YAML schema SHA-256 fingerprint for detector key."""
+    if key == "pose17":
+        return POSE_SCHEMA_HASH
+    elif key == "vf50":
+        return VF50_SCHEMA_HASH
+    raise ValueError(f"Unknown detector key: {key}")
+
+
+def get_canonical_cvat_spec_hash(key: str) -> str:
+    """Return authoritative CVAT spec SHA-256 fingerprint for detector key."""
+    global _POSE_CVAT_SPEC_HASH, _VF50_CVAT_SPEC_HASH
+    if key == "pose17":
+        if _POSE_CVAT_SPEC_HASH is None:
+            _POSE_CVAT_SPEC_HASH = compute_spec_fingerprint(get_canonical_cvat_spec("pose17"))
+        return _POSE_CVAT_SPEC_HASH
+    elif key == "vf50":
+        if _VF50_CVAT_SPEC_HASH is None:
+            _VF50_CVAT_SPEC_HASH = compute_spec_fingerprint(get_canonical_cvat_spec("vf50"))
+        return _VF50_CVAT_SPEC_HASH
+    raise ValueError(f"Unknown detector key: {key}")
+
+
+def __getattr__(name: str) -> Any:
+    if name == "POSE_CVAT_SPEC_HASH":
+        return get_canonical_cvat_spec_hash("pose17")
+    elif name == "VF50_CVAT_SPEC_HASH":
+        return get_canonical_cvat_spec_hash("vf50")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ─── Build SHA ────────────────────────────────────────────────────────────────

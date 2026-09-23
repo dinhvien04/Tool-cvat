@@ -1,8 +1,9 @@
 """ModelHandler for 9Router Human Pose 17 Nuclio Detector.
 
 Bridges CVAT's serverless detector invocation with the local 9Router vision model.
-Enforces COCO 17-Keypoint Human Pose Topology:
-- Exactly 17 canonical keypoints
+Enforces VinFast Week-2 HumanPose-17 Topology:
+- Exactly 17 canonical keypoints with VinFast viewer-space laterality (even=right, odd=left)
+- 18 canonical edges including ear-to-shoulder connections (4->6 and 5->7)
 - Emits native CVAT skeleton shapes
 - Clamps coordinates to image bounds and maps visibility/occlusion states
 - Deterministic quality gate assessment (kinematic chain & seated driver tolerance)
@@ -57,23 +58,61 @@ logger = logging.getLogger("cvat.nuclio.ninerouter.human_pose_17")
 
 DEFAULT_POSE17_MAX_TOKENS = 2000
 DEFAULT_POSE17_MAX_IMAGE_SIZE = 1280
+DEFAULT_POSE17_MAX_REFINE_CROPS = 3
 
 
-def build_pose17_prompt(keypoints: Sequence[str]) -> str:
-    """Build strict, deterministic prompt for 9Router Pose 17 vision model."""
-    kps_str = ", ".join(f'"{k}"' for k in keypoints)
+def build_pose17_prompt(keypoints: Optional[Sequence[str]] = None) -> str:
+    """Build strict, deterministic prompt for 9Router Pose 17 vision model.
+
+    Keypoints, viewer laterality groupings, and anatomical descriptions are derived
+    directly from canonical schema metadata (config/week2_pose17.yaml via load_pose17).
+    """
+    schema = load_pose17()
+    if keypoints is None:
+        effective_keypoints = tuple(schema.id_to_coco_name[kp.id] for kp in schema.keypoints)
+    else:
+        effective_keypoints = tuple(keypoints)
+
+    kps_str = ", ".join(f'"{k}"' for k in effective_keypoints)
+
+    # Derive left and right groupings dynamically from canonical schema metadata
+    right_kps = [schema.id_to_coco_name[i] for i in sorted(schema.right_keypoint_ids) if schema.id_to_coco_name[i] in effective_keypoints]
+    left_kps = [schema.id_to_coco_name[i] for i in sorted(schema.left_keypoint_ids) if schema.id_to_coco_name[i] in effective_keypoints]
+    right_str = ", ".join(right_kps)
+    left_str = ", ".join(left_kps)
+
+    # Keypoint definitions derived from canonical metadata
+    kp_desc_lines = []
+    for kp in schema.keypoints:
+        coco_name = schema.id_to_coco_name[kp.id]
+        if coco_name in effective_keypoints:
+            extra = f" - {kp.anatomical}" if getattr(kp, "anatomical", None) else ""
+            kp_desc_lines.append(f"  * {coco_name}: {kp.semantic_name}{extra} [{kp.side}]")
+    kp_desc_block = "\n".join(kp_desc_lines)
+
     return (
-        "Detect all persons and estimate their 17 COCO keypoints in this image.\n"
+        "Detect all persons and estimate their 17 keypoints according to VinFast Week-2 HumanPose-17 topology in this image.\n"
         f"Keypoints to detect: [{kps_str}].\n"
+        "Canonical Keypoint Metadata:\n"
+        f"{kp_desc_block}\n"
         "VinFast Viewer-Perspective Convention:\n"
-        "- 'right_*' (right_eye, right_ear, right_shoulder, right_elbow, right_wrist, right_hip, right_knee, right_ankle) "
+        f"- 'right_*' ({right_str}) "
         "refer to the VIEWER'S RIGHT side of the image frame (larger X coordinate).\n"
-        "- 'left_*' (left_eye, left_ear, left_shoulder, left_elbow, left_wrist, left_hip, left_knee, left_ankle) "
+        f"- 'left_*' ({left_str}) "
         "refer to the VIEWER'S LEFT side of the image frame (smaller X coordinate).\n"
         "Kinematic Chain & Cabin Constraints:\n"
         "- Enforce strict anatomical connectivity: shoulder -> elbow -> wrist, and hip -> knee -> ankle.\n"
         "- Wrists and elbows MUST attach to their corresponding limb; NEVER predict floating wrists or elbows in the cabin background, roof lining, or car seats.\n"
         "- If a person is seated (e.g. driver or passenger) and lower limbs or hands are occluded behind steering wheel or seats, set visibility flag = 1 (occluded) or 0 (outside), do NOT hallucinate floating joints.\n"
+        "Physical Occlusion vs Optical Blur (Confidence != Occlusion!):\n"
+        "- Physical Occlusion (visibility = 1): A keypoint is physically obstructed by an opaque physical object "
+        "(e.g. steering wheel, seat back, headrest, dashboard, center console, door trim, passenger body). "
+        "Predict its estimated anatomical position and set visibility = 1 (occluded).\n"
+        "- Optical Degradation / Low Confidence (visibility = 2): If a keypoint is within direct line of sight but degraded by "
+        "motion blur, low lighting, sensor noise, or partial defocus, it is STILL VISIBLE: set visibility = 2. "
+        "Express visual uncertainty through a lower 'confidence' score (e.g. 0.35 - 0.70), NOT by setting the occluded flag. "
+        "Optical blur is NOT occlusion; Confidence != Occlusion!\n"
+        "- Outside Frame (visibility = 0): Keypoints completely outside the camera's field of view or image boundary.\n"
         "Coordinate & Visibility Convention:\n"
         "- Coordinates must be normalized integers [x, y] in range [0, 1000] relative to image width and height.\n"
         "- Visibility flag: 0 = outside image frame, 1 = present but occluded, 2 = clearly visible.\n"
@@ -99,19 +138,36 @@ def build_pose17_prompt(keypoints: Sequence[str]) -> str:
     )
 
 
-def build_pose17_crop_prompt(keypoints: Sequence[str]) -> str:
-    """Build targeted prompt for high-resolution person crop refinement (Pass 2)."""
-    kps_str = ", ".join(f'"{k}"' for k in keypoints)
+def build_pose17_crop_prompt(keypoints: Optional[Sequence[str]] = None) -> str:
+    """Build targeted prompt for high-resolution person crop refinement (Pass 2).
+
+    Keypoints and perspective conventions are derived from canonical schema metadata.
+    """
+    schema = load_pose17()
+    if keypoints is None:
+        effective_keypoints = tuple(schema.id_to_coco_name[kp.id] for kp in schema.keypoints)
+    else:
+        effective_keypoints = tuple(keypoints)
+
+    kps_str = ", ".join(f'"{k}"' for k in effective_keypoints)
+    right_kps = [schema.id_to_coco_name[i] for i in sorted(schema.right_keypoint_ids) if schema.id_to_coco_name[i] in effective_keypoints]
+    left_kps = [schema.id_to_coco_name[i] for i in sorted(schema.left_keypoint_ids) if schema.id_to_coco_name[i] in effective_keypoints]
+    right_str = ", ".join(right_kps)
+    left_str = ", ".join(left_kps)
+
     return (
         "High-resolution close-up person crop refinement.\n"
-        f"Detect exactly the 17 COCO keypoints for the single person in this cropped image: [{kps_str}].\n"
+        f"Detect exactly the 17 keypoints according to VinFast Week-2 HumanPose-17 topology for the single person in this cropped image: [{kps_str}].\n"
         "Viewer Perspective:\n"
-        "- right_* = viewer's right (larger X)\n"
-        "- left_* = viewer's left (smaller X)\n"
-        "Kinematic Chain:\n"
-        "- Strict limb connectivity: shoulder -> elbow -> wrist. No floating joints!\n"
+        f"- right_* ({right_str}) = viewer's right (larger X)\n"
+        f"- left_* ({left_str}) = viewer's left (smaller X)\n"
+        "Kinematic Chain & Anti-Floating Constraints:\n"
+        "- Strict limb connectivity: shoulder -> elbow -> wrist, and hip -> knee -> ankle. No floating joints!\n"
         "- Coordinates: normalized integers [x, y] in [0, 1000] relative to THIS CROP.\n"
-        "- Visibility: 0 = outside, 1 = occluded, 2 = visible.\n"
+        "Visibility & Occlusion Convention (Confidence != Occlusion!):\n"
+        "- 0 = outside crop/image boundary.\n"
+        "- 1 = present but physically occluded by an opaque object (steering wheel, seat, console, limb).\n"
+        "- 2 = visible in direct line of sight (even if blurry, shadowy, or low confidence; optical blur is NOT occlusion!).\n"
         "Return STRICT JSON only:\n"
         "{\n"
         '  "id": 1,\n'
@@ -180,14 +236,25 @@ class ModelHandler:
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
+        refine_model: Optional[str] = None,
         timeout: Optional[float] = None,
         max_image_size: Optional[int] = None,
         max_tokens: Optional[int] = None,
+        max_refine_crops: Optional[int] = None,
     ):
         self.base_url = base_url or os.getenv("NINEROUTER_URL", DEFAULT_NINEROUTER_URL_CONTAINER)
         self.api_key = api_key or os.getenv("NINEROUTER_KEY")
         self.requested_model = model or os.getenv("POSE17_MODEL") or os.getenv("VISION_MODEL")
-        self.refine_model = os.getenv("POSE17_REFINE_MODEL") or os.getenv("QUALITY_REFINE_MODEL")
+        self.refine_model = refine_model or os.getenv("POSE17_REFINE_MODEL") or os.getenv("QUALITY_REFINE_MODEL")
+
+        max_refine_env = os.getenv("POSE17_MAX_REFINE_CROPS")
+        try:
+            val_mrc = max_refine_crops if max_refine_crops is not None else (max_refine_env or DEFAULT_POSE17_MAX_REFINE_CROPS)
+            self.max_refine_crops = int(val_mrc)
+            if self.max_refine_crops < 0:
+                self.max_refine_crops = DEFAULT_POSE17_MAX_REFINE_CROPS
+        except (ValueError, TypeError):
+            self.max_refine_crops = DEFAULT_POSE17_MAX_REFINE_CROPS
 
         timeout_env = os.getenv("NINEROUTER_TIMEOUT")
         try:
@@ -259,6 +326,8 @@ class ModelHandler:
             f"ModelHandler(human_pose_17, base_url={self.base_url!r}, "
             f"key={mask_api_key(self.api_key)!r}, "
             f"model={self.active_model!r}, "
+            f"refine_model={self.active_refine_model!r}, "
+            f"max_refine_crops={self.max_refine_crops}, "
             f"timeout={self.timeout})"
         )
 
@@ -349,31 +418,63 @@ class ModelHandler:
             refine_crops if refine_crops is not None
             else os.getenv("POSE17_TWO_PASS_REFINE", "1").lower() in ("1", "true", "yes")
         )
+        max_refine_crops = getattr(self, "max_refine_crops", DEFAULT_POSE17_MAX_REFINE_CROPS)
 
-        shapes: List[Dict[str, Any]] = []
+        # Pre-assess candidates to enforce bounded refine caps in crowd scenes
+        candidates = []
         for person_dict in raw_people:
             conf = float(person_dict.get("confidence", 1.0))
             if conf < threshold:
                 continue
 
-            # Quality gate initial assessment
             q_report = assess_pose17_quality(person_dict, laterality_convention=LATERALITY_VIEWER)
-
-            best_person = person_dict
-            best_report = q_report
-
             needs_refine = (
                 q_report.needs_refine
                 or not q_report.is_valid
                 or q_report.score < 0.76
                 or len(q_report.suspect_bones) > 0
             )
+            bbox = derive_person_bbox(person_dict, pad_ratio=0.18) if needs_refine else None
+            candidates.append({
+                "person": person_dict,
+                "q_report": q_report,
+                "needs_refine": bool(needs_refine and bbox),
+                "bbox": bbox,
+            })
 
-            if enable_two_pass and needs_refine:
-                bbox = derive_person_bbox(person_dict, pad_ratio=0.18)
-                if bbox:
-                    best_person, best_report = self._refine_person_crop(
-                        base_pil_img, person_dict, bbox, orig_w, orig_h, q_report
+        refine_allowed_indices = set()
+        if enable_two_pass:
+            needing = [i for i, c in enumerate(candidates) if c["needs_refine"]]
+            if len(needing) > max_refine_crops:
+                logger.info(
+                    f"Pose17 crowd scene: capping person crop refinements to {max_refine_crops} "
+                    f"(out of {len(needing)} candidates needing refinement)"
+                )
+                needing.sort(key=lambda i: candidates[i]["q_report"].score)
+                refine_allowed_indices = set(needing[:max_refine_crops])
+            else:
+                refine_allowed_indices = set(needing)
+
+        shapes: List[Dict[str, Any]] = []
+        for i, c in enumerate(candidates):
+            person_dict = c["person"]
+            q_report = c["q_report"]
+            best_person = person_dict
+            best_report = q_report
+
+            if i in refine_allowed_indices and c["bbox"] is not None:
+                best_person, best_report = self._refine_person_crop(
+                    base_pil_img, person_dict, c["bbox"], orig_w, orig_h, q_report
+                )
+            elif enable_two_pass:
+                if c["needs_refine"]:
+                    logger.debug(
+                        f"Refinement skipped due to crowd scene cap for pose (score={q_report.score:.2f})"
+                    )
+                else:
+                    logger.debug(
+                        f"Conditional refinement skipped: initial pose meets quality gate "
+                        f"(score={q_report.score:.2f}, valid={q_report.is_valid}, suspect_bones={len(q_report.suspect_bones)})"
                     )
 
             # Filter degenerate collapse (<10px diagonal) or clumped corner dumps

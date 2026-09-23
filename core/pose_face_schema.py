@@ -38,91 +38,43 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-# ==============================================================================
-# 1. POSE17 CANONICAL SPECIFICATION
-# ==============================================================================
-
-POSE17_KEYPOINTS: Tuple[str, ...] = (
-    "nose",             # 1
-    "right_eye",        # 2 (R Eye - VinFast order: R is even)
-    "left_eye",         # 3 (L Eye - VinFast order: L is odd)
-    "right_ear",        # 4
-    "left_ear",         # 5
-    "right_shoulder",   # 6
-    "left_shoulder",    # 7
-    "right_elbow",      # 8
-    "left_elbow",       # 9
-    "right_wrist",      # 10
-    "left_wrist",       # 11
-    "right_hip",        # 12
-    "left_hip",         # 13
-    "right_knee",       # 14
-    "left_knee",        # 15
-    "right_ankle",      # 16
-    "left_ankle",       # 17
+from core.week2_schema import (
+    load_pose17,
+    load_vf50,
+    pose17_coco_keypoints,
+    vf50_all_edges,
+    vf50_landmarks,
+    vf50_mirror_map,
 )
 
+# ==============================================================================
+# 1. POSE17 CANONICAL SPECIFICATION (Derived from canonical load_pose17())
+# ==============================================================================
+
+_pose17 = load_pose17()
+POSE17_KEYPOINTS: Tuple[str, ...] = pose17_coco_keypoints()
 POSE17_KEYPOINT_TO_ID: Dict[str, int] = {
     name: idx + 1 for idx, name in enumerate(POSE17_KEYPOINTS)
 }
 POSE17_ID_TO_KEYPOINT: Dict[int, str] = {
     idx + 1: name for idx, name in enumerate(POSE17_KEYPOINTS)
 }
-
-# Standard 17-keypoint skeleton edges (1-indexed node IDs)
-# Matches config/week2_pose17.yaml authoritative edge set (18 edges including ear-to-shoulder)
-POSE17_EDGES: Tuple[Tuple[int, int], ...] = (
-    (1, 2),    # nose -> right_eye
-    (1, 3),    # nose -> left_eye
-    (2, 4),    # right_eye -> right_ear
-    (3, 5),    # left_eye -> left_ear
-    (4, 6),    # right_ear -> right_shoulder (ear-to-shoulder per YAML)
-    (5, 7),    # left_ear -> left_shoulder (ear-to-shoulder per YAML)
-    (6, 7),    # right_shoulder -> left_shoulder
-    (6, 8),    # right_shoulder -> right_elbow
-    (8, 10),   # right_elbow -> right_wrist
-    (7, 9),    # left_shoulder -> left_elbow
-    (9, 11),   # left_elbow -> left_wrist
-    (6, 12),   # right_shoulder -> right_hip
-    (7, 13),   # left_shoulder -> left_hip
-    (12, 13),  # right_hip -> left_hip
-    (12, 14),  # right_hip -> right_knee
-    (14, 16),  # right_knee -> right_ankle
-    (13, 15),  # left_hip -> left_knee
-    (15, 17),  # left_knee -> left_ankle
-)
-
+POSE17_EDGES: Tuple[Tuple[int, int], ...] = _pose17.edges
 POSE17_LATERALITY = "frame_based_vf"  # R on right of frame, L on left of frame
 
 
 # ==============================================================================
-# 2. VF50 CANONICAL SPECIFICATION (Official VinFast Schema)
+# 2. VF50 CANONICAL SPECIFICATION (Derived from canonical load_vf50())
 # ==============================================================================
 
+_vf50 = load_vf50()
 VIN_VF50_COMPONENTS: Dict[str, Tuple[int, int, str]] = {
-    # name: (start_id, end_id, topology)
-    "longmaytrai": (0, 4, "open"),     # 5 points
-    "longmayphai": (5, 9, "open"),     # 5 points
-    "songmui":     (10, 13, "open"),   # 4 points
-    "mattrai":     (14, 21, "closed"), # 8 points
-    "matphai":     (22, 29, "closed"), # 8 points
-    "moingoai":    (30, 41, "closed"), # 12 points
-    "moitrong":    (42, 49, "closed"), # 8 points
+    c.name: (c.start_id, c.end_id, c.topology) for c in _vf50.components
 }
-
 VF50_COMPONENT_COUNTS: Dict[str, int] = {
-    name: (end_id - start_id + 1)
-    for name, (start_id, end_id, _) in VIN_VF50_COMPONENTS.items()
+    c.name: c.point_count for c in _vf50.components
 }
-
-def _generate_vf50_landmarks() -> Tuple[str, ...]:
-    names: List[str] = []
-    for comp, (start_id, end_id, _) in VIN_VF50_COMPONENTS.items():
-        for i in range(start_id, end_id + 1):
-            names.append(f"{comp}_{i:02d}")
-    return tuple(names)
-
-VF50_LANDMARKS: Tuple[str, ...] = _generate_vf50_landmarks()
+VF50_LANDMARKS: Tuple[str, ...] = vf50_landmarks()
 assert len(VF50_LANDMARKS) == 50, f"VF50 must have exactly 50 landmarks, got {len(VF50_LANDMARKS)}"
 
 # Point IDs are continuous 0..49
@@ -132,70 +84,8 @@ VF50_LANDMARK_TO_ID: Dict[str, int] = {
 VF50_ID_TO_LANDMARK: Dict[int, str] = {
     nid: name for name, nid in VF50_LANDMARK_TO_ID.items()
 }
-
-def _generate_vf50_edges() -> Tuple[Tuple[int, int], ...]:
-    edges: List[Tuple[int, int]] = []
-    for comp, (start_id, end_id, topology) in VIN_VF50_COMPONENTS.items():
-        for i in range(start_id, end_id):
-            edges.append((i, i + 1))
-        if topology == "closed":
-            edges.append((end_id, start_id))
-    return tuple(edges)
-
-VF50_EDGES: Tuple[Tuple[int, int], ...] = _generate_vf50_edges()
-
-def _build_vf50_mirror_map() -> Dict[str, str]:
-    """Mirror map for horizontal reflection.
-    Swaps *trai <-> *phai components and reverses symmetry.
-    """
-    mirror: Dict[str, str] = {}
-    # longmaytrai (0..4) <-> longmayphai (5..9)
-    # 0 (outer left) mirrors to 9 (outer right)
-    for i in range(5):
-        l_name = f"longmaytrai_{i:02d}"
-        r_name = f"longmayphai_{9 - i:02d}"
-        mirror[l_name] = r_name
-        mirror[r_name] = l_name
-
-    # songmui (10..13): bridge is vertical center line -> self-mirrors
-    for i in range(10, 14):
-        name = f"songmui_{i:02d}"
-        mirror[name] = name
-
-    # mattrai (14..21) <-> matphai (22..29)
-    # mattrai: 14 khoe ngoai, 18 khoe trong
-    # matphai: 22 khoe trong, 26 khoe ngoai
-    # 14 (khoe ngoai trai) mirrors to 26 (khoe ngoai phai)
-    # 18 (khoe trong trai) mirrors to 22 (khoe trong phai)
-    eye_l_to_r = {
-        14: 26, 15: 25, 16: 24, 17: 23,
-        18: 22, 19: 29, 20: 28, 21: 27,
-    }
-    for l_id, r_id in eye_l_to_r.items():
-        l_name = f"mattrai_{l_id:02d}"
-        r_name = f"matphai_{r_id:02d}"
-        mirror[l_name] = r_name
-        mirror[r_name] = l_name
-
-    # moingoai (30..41): 30 khoe trai <-> 36 khoe phai
-    lip_outer_mirror = {
-        30: 36, 31: 35, 32: 34, 33: 33, 34: 32, 35: 31, 36: 30,
-        37: 41, 38: 40, 39: 39, 40: 38, 41: 37,
-    }
-    for a, b in lip_outer_mirror.items():
-        mirror[f"moingoai_{a:02d}"] = f"moingoai_{b:02d}"
-
-    # moitrong (42..49): 42 khoe trai <-> 46 khoe phai
-    lip_inner_mirror = {
-        42: 46, 43: 45, 44: 44, 45: 43, 46: 42,
-        47: 49, 48: 48, 49: 47,
-    }
-    for a, b in lip_inner_mirror.items():
-        mirror[f"moitrong_{a:02d}"] = f"moitrong_{b:02d}"
-
-    return mirror
-
-VF50_MIRROR_MAP: Dict[str, str] = _build_vf50_mirror_map()
+VF50_EDGES: Tuple[Tuple[int, int], ...] = vf50_all_edges()
+VF50_MIRROR_MAP: Dict[str, str] = vf50_mirror_map()
 VF50_LATERALITY = "matphai_mattrai"
 
 

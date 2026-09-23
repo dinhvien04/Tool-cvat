@@ -39,6 +39,8 @@ from core.skeleton_contract import (
     expand_face_bbox,
     faces_to_cvat_skeletons,
     image_to_crop_coords,
+    is_vf50_face_degenerate,
+    is_vf50_face_salvageable,
     parse_vf50_response,
 )
 
@@ -642,34 +644,35 @@ class TestVF50PromptAndSpec:
 # SECTION 10: MODEL HANDLER INTEGRATION
 # ==============================================================================
 
+@pytest.fixture
+def mock_handler(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+
+    def mock_resolve(self, requested_model=None):
+        return "mock-gemini-vision"
+
+    monkeypatch.setattr("app.client.NineRouterClient.resolve_vision_model", mock_resolve)
+    if hasattr(importlib.import_module("app.client").NineRouterClient, "resolve_vf50_model"):
+        monkeypatch.setattr("app.client.NineRouterClient.resolve_vf50_model", mock_resolve)
+
+    handler_path = Path(__file__).resolve().parent.parent / "serverless" / "ninerouter-face-vf50" / "nuclio" / "model_handler.py"
+    spec = importlib.util.spec_from_file_location("vf50_model_handler", handler_path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    if hasattr(mod, "NineRouterClient"):
+        monkeypatch.setattr(mod.NineRouterClient, "resolve_vision_model", mock_resolve)
+        if hasattr(mod.NineRouterClient, "resolve_vf50_model"):
+            monkeypatch.setattr(mod.NineRouterClient, "resolve_vf50_model", mock_resolve)
+
+    handler = mod.ModelHandler(base_url="http://mock:20128", api_key="test-key", model="mock-gemini-vision")
+    return handler
+
+
 class TestVF50ModelHandler:
     """Verify ModelHandler infer lifecycle and 7-component output formatting."""
-
-    @pytest.fixture
-    def mock_handler(self, monkeypatch):
-        import importlib.util
-        from pathlib import Path
-
-        def mock_resolve(self, requested_model=None):
-            return "mock-gemini-vision"
-
-        monkeypatch.setattr("app.client.NineRouterClient.resolve_vision_model", mock_resolve)
-        if hasattr(importlib.import_module("app.client").NineRouterClient, "resolve_vf50_model"):
-            monkeypatch.setattr("app.client.NineRouterClient.resolve_vf50_model", mock_resolve)
-
-        handler_path = Path(__file__).resolve().parent.parent / "serverless" / "ninerouter-face-vf50" / "nuclio" / "model_handler.py"
-        spec = importlib.util.spec_from_file_location("vf50_model_handler", handler_path)
-        assert spec and spec.loader
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-
-        if hasattr(mod, "NineRouterClient"):
-            monkeypatch.setattr(mod.NineRouterClient, "resolve_vision_model", mock_resolve)
-            if hasattr(mod.NineRouterClient, "resolve_vf50_model"):
-                monkeypatch.setattr(mod.NineRouterClient, "resolve_vf50_model", mock_resolve)
-
-        handler = mod.ModelHandler(base_url="http://mock:20128", api_key="test-key", model="mock-gemini-vision")
-        return handler
 
     def test_handler_emits_7_components_for_single_face(self, mock_handler, monkeypatch):
         import io
@@ -853,3 +856,389 @@ class TestVF50ModelHandler:
             assert s["type"] == "skeleton"
             assert s["group"] == 1
 
+    def test_handler_crowd_scene_crop_refinement_is_capped(self, mock_handler, monkeypatch):
+        import io
+        from PIL import Image
+        from app.client import VisionResponse
+
+        # 5 small faces in pass 1
+        pass1_faces = [
+            {
+                "id": i + 1,
+                "confidence": 0.90,
+                "box_2d": [100 + i * 10, 100, 180 + i * 10, 180],
+                "landmarks": [
+                    {"id": j, "point": [120 + (j % 5) * 10, 120 + (j // 5) * 5], "visibility": 2, "confidence": 0.85}
+                    for j in range(50)
+                ],
+            }
+            for i in range(5)
+        ]
+
+        canonical_crop_face = create_canonical_frontal_face(face_id=1)
+        pass2_crop_face = {
+            "id": 1,
+            "confidence": 0.99,
+            "landmarks": [
+                {"id": lm.id, "point": [lm.x, lm.y], "visibility": lm.visibility, "confidence": lm.confidence}
+                for lm in canonical_crop_face.landmarks.values()
+            ],
+        }
+
+        recorded_calls = []
+
+        def mock_send(model, image_bytes_or_b64, prompt, **kwargs):
+            recorded_calls.append({"model": model, "prompt": prompt})
+            if len(recorded_calls) == 1:
+                return VisionResponse(
+                    content=json.dumps({"faces": pass1_faces}),
+                    raw_response={},
+                    duration_seconds=0.1,
+                    model="mock-gemini-vision",
+                    status_code=200,
+                )
+            else:
+                return VisionResponse(
+                    content=json.dumps({"faces": [pass2_crop_face]}),
+                    raw_response={},
+                    duration_seconds=0.1,
+                    model="mock-gemini-vision",
+                    status_code=200,
+                )
+
+        monkeypatch.setattr(mock_handler.client, "send_vision_request", mock_send)
+        mock_handler.max_refine_faces = 2
+
+        img = Image.new("RGB", (640, 480), color=(128, 128, 128))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        img_bytes = buf.getvalue()
+
+        shapes = mock_handler.infer(img_bytes, threshold=0.5, refine_crops=True)
+
+        # 1 global call + exactly 2 crop refinement calls = 3 calls (capped from 5)
+        assert len(recorded_calls) == 3
+
+
+# ==============================================================================
+# SECTION 12B: MULTI-FACE GROUPING & FALLBACK TEST MATRIX
+# ==============================================================================
+
+def create_valid_test_face(face_id: int = 1, confidence: float = 0.98, offset_x: float = 0.0) -> VF50Face:
+    """Create a topologically valid frontal face that passes the quality gate."""
+    face = create_canonical_frontal_face(face_id=face_id, confidence=confidence)
+    if offset_x:
+        for lm in face.landmarks.values():
+            lm.x = min(1000.0, max(0.0, lm.x + offset_x))
+    return face
+
+
+def create_salvageable_test_face(face_id: int = 1, confidence: float = 0.90, offset_x: float = 0.0) -> VF50Face:
+    """Create a face with anomalies that fails strict quality validation but remains salvageable."""
+    face = create_valid_test_face(face_id=face_id, confidence=confidence, offset_x=offset_x)
+    # Induce anomalies: eyelid inversions, lip protrusion, nose non-monotonicity
+    face.landmarks[16].y = face.landmarks[20].y + 50.0  # left eyelid inversion
+    face.landmarks[24].y = face.landmarks[28].y + 50.0  # right eyelid inversion
+    face.landmarks[42].x = face.landmarks[30].x - 60.0  # lip protrusion
+    face.landmarks[11].y = face.landmarks[10].y - 20.0  # nose non-monotonic
+    return face
+
+
+def create_degenerate_test_face(face_id: int = 1, confidence: float = 0.80, collapse: bool = True) -> VF50Face:
+    """Create a truly degenerate face (either geometric collapse or < 15 active points)."""
+    face = create_canonical_frontal_face(face_id=face_id, confidence=confidence)
+    if collapse:
+        # All points collapsed to a single pixel (bbox diagonal < 15 normalized units)
+        for lm in face.landmarks.values():
+            lm.x = 500.0
+            lm.y = 500.0
+    else:
+        # Fewer than 15 active points
+        for i in range(40):
+            face.landmarks[i].visibility = VISIBILITY_OUTSIDE
+    return face
+
+
+class TestMultiFaceGroupingAndFallback:
+    """Comprehensive test matrix for multi-face processing, grouping, and per-face salvage.
+
+    Test Matrix Cases:
+    1.  (1 valid)
+    2.  (1 salvageable)
+    3.  (1 degenerate)
+    4.  (2 valid)
+    5.  (2 salvageable)
+    6.  (1 valid + 1 salvageable) - ensures salvageable is NOT dropped when valid face exists
+    7.  (1 valid + 1 degenerate)
+    8.  (1 salvageable + 1 degenerate)
+    9.  (3 valid + 2 salvageable)
+    10. (8 salvageable with max cap)
+    Additional Coverage:
+    - Unique group_id per face across all 7 component skeletons
+    - Interleaved multi-face ordering
+    - Strict mode fallback_on_corrupt=False
+    - Custom base_group_id
+    - ModelHandler end-to-end multi-face inference with mixed valid and salvageable faces
+    """
+
+    def test_case_1_one_valid_face(self):
+        """Case 1: (1 valid) -> emits 7 skeletons with group_id=1."""
+        f1 = create_valid_test_face(face_id=1)
+        shapes = faces_to_cvat_skeletons([f1], width=1280, height=720, base_group_id=1)
+
+        assert len(shapes) == 7
+        assert [s["label"] for s in shapes] == list(VF50_COMPONENT_NAMES)
+        assert all(s["group_id"] == 1 and s["group"] == 1 for s in shapes)
+        assert sum(len(s["elements"]) for s in shapes) == 50
+
+    def test_case_2_one_salvageable_face(self):
+        """Case 2: (1 salvageable) -> emits 7 skeletons as editable draft with group_id=1."""
+        f1 = create_salvageable_test_face(face_id=1)
+        # Verify it fails strict quality assessment but is salvageable
+        rep = assess_vf50_quality(f1, width=1280, height=720)
+        assert rep.is_valid is False
+        assert is_vf50_face_salvageable(rep) is True
+
+        shapes = faces_to_cvat_skeletons(
+            [f1], width=1280, height=720, base_group_id=1, fallback_on_corrupt=True
+        )
+        assert len(shapes) == 7
+        assert [s["label"] for s in shapes] == list(VF50_COMPONENT_NAMES)
+        assert all(s["group_id"] == 1 and s["group"] == 1 for s in shapes)
+
+    def test_case_3_one_degenerate_face(self):
+        """Case 3: (1 degenerate) -> drops the face, emitting 0 shapes."""
+        # Test both geometric collapse and insufficient active points
+        f_collapse = create_degenerate_test_face(face_id=1, collapse=True)
+        rep_collapse = assess_vf50_quality(f_collapse, width=1280, height=720)
+        assert rep_collapse.is_valid is False
+        assert is_vf50_face_degenerate(rep_collapse) is True
+
+        shapes1 = faces_to_cvat_skeletons(
+            [f_collapse], width=1280, height=720, fallback_on_corrupt=True
+        )
+        assert shapes1 == []
+
+        f_few = create_degenerate_test_face(face_id=2, collapse=False)
+        rep_few = assess_vf50_quality(f_few, width=1280, height=720)
+        assert is_vf50_face_degenerate(rep_few) is True
+
+        shapes2 = faces_to_cvat_skeletons(
+            [f_few], width=1280, height=720, fallback_on_corrupt=True
+        )
+        assert shapes2 == []
+
+    def test_case_4_two_valid_faces(self):
+        """Case 4: (2 valid) -> emits 14 skeletons with distinct group_ids (1 and 2)."""
+        f1 = create_valid_test_face(face_id=1)
+        f2 = create_valid_test_face(face_id=2, offset_x=50.0)
+
+        shapes = faces_to_cvat_skeletons([f1, f2], width=1280, height=720, base_group_id=1)
+        assert len(shapes) == 14
+
+        f1_shapes = shapes[:7]
+        f2_shapes = shapes[7:]
+
+        assert all(s["group_id"] == 1 and s["group"] == 1 for s in f1_shapes)
+        assert all(s["group_id"] == 2 and s["group"] == 2 for s in f2_shapes)
+
+        # Coordinate isolation: ensure no landmark leakage between faces
+        assert f1_shapes[0]["elements"][0]["points"] != f2_shapes[0]["elements"][0]["points"]
+
+    def test_case_5_two_salvageable_faces(self):
+        """Case 5: (2 salvageable) -> emits 14 skeletons with distinct group_ids (1 and 2)."""
+        f1 = create_salvageable_test_face(face_id=1, confidence=0.92)
+        f2 = create_salvageable_test_face(face_id=2, confidence=0.88, offset_x=40.0)
+
+        shapes = faces_to_cvat_skeletons(
+            [f1, f2], width=1280, height=720, base_group_id=1, fallback_on_corrupt=True
+        )
+        assert len(shapes) == 14
+
+        f1_shapes = shapes[:7]
+        f2_shapes = shapes[7:]
+
+        assert all(s["group_id"] == 1 for s in f1_shapes)
+        assert all(s["group_id"] == 2 for s in f2_shapes)
+
+    def test_case_6_one_valid_one_salvageable_face(self):
+        """Case 6: (1 valid + 1 salvageable) -> emits 14 skeletons with distinct groups.
+
+        Crucial test: In the legacy implementation, Face B was dropped because Face A
+        was valid (fallback only triggered when not skeletons). The redesigned algorithm
+        must salvage Face B independently!
+        """
+        f_valid = create_valid_test_face(face_id=1)
+        f_salvage = create_salvageable_test_face(face_id=2, offset_x=60.0)
+
+        shapes = faces_to_cvat_skeletons(
+            [f_valid, f_salvage], width=1280, height=720, base_group_id=1, fallback_on_corrupt=True
+        )
+        assert len(shapes) == 14, (
+            f"Expected 14 skeletons (2 faces * 7 components), but got {len(shapes)}. "
+            "Salvageable face must NOT be dropped when a valid face is present!"
+        )
+
+        valid_shapes = shapes[:7]
+        salvaged_shapes = shapes[7:]
+
+        assert all(s["group_id"] == 1 for s in valid_shapes)
+        assert all(s["group_id"] == 2 for s in salvaged_shapes)
+
+    def test_case_7_one_valid_one_degenerate_face(self):
+        """Case 7: (1 valid + 1 degenerate) -> emits 7 skeletons for valid face, drops degenerate."""
+        f_valid = create_valid_test_face(face_id=1)
+        f_degen = create_degenerate_test_face(face_id=2, collapse=True)
+
+        shapes = faces_to_cvat_skeletons(
+            [f_valid, f_degen], width=1280, height=720, base_group_id=1, fallback_on_corrupt=True
+        )
+        assert len(shapes) == 7
+        assert all(s["group_id"] == 1 for s in shapes)
+
+    def test_case_8_one_salvageable_one_degenerate_face(self):
+        """Case 8: (1 salvageable + 1 degenerate) -> emits 7 skeletons for salvageable, drops degenerate."""
+        f_salvage = create_salvageable_test_face(face_id=1)
+        f_degen = create_degenerate_test_face(face_id=2, collapse=True)
+
+        shapes = faces_to_cvat_skeletons(
+            [f_salvage, f_degen], width=1280, height=720, base_group_id=1, fallback_on_corrupt=True
+        )
+        assert len(shapes) == 7
+        assert all(s["group_id"] == 1 for s in shapes)
+
+    def test_case_9_three_valid_two_salvageable_faces(self):
+        """Case 9: (3 valid + 2 salvageable) -> emits 35 skeletons across 5 distinct group_ids."""
+        v1 = create_valid_test_face(face_id=1, offset_x=10.0)
+        v2 = create_valid_test_face(face_id=2, offset_x=20.0)
+        v3 = create_valid_test_face(face_id=3, offset_x=30.0)
+        s1 = create_salvageable_test_face(face_id=4, offset_x=40.0)
+        s2 = create_salvageable_test_face(face_id=5, offset_x=50.0)
+
+        shapes = faces_to_cvat_skeletons(
+            [v1, v2, v3, s1, s2], width=1280, height=720, base_group_id=1, fallback_on_corrupt=True
+        )
+        assert len(shapes) == 35  # 5 faces * 7 skeletons
+
+        # Verify each of the 5 faces received a distinct group_id in sequence 1..5
+        for face_idx in range(5):
+            face_skels = shapes[face_idx * 7 : (face_idx + 1) * 7]
+            expected_group = 1 + face_idx
+            assert all(s["group_id"] == expected_group for s in face_skels)
+            assert [s["label"] for s in face_skels] == list(VF50_COMPONENT_NAMES)
+
+    def test_case_10_eight_salvageable_faces_with_max_cap(self):
+        """Case 10: (8 salvageable with max cap) -> strictly salvages top 5 (35 skeletons)."""
+        faces = []
+        for i in range(8):
+            face = create_salvageable_test_face(face_id=i + 1, confidence=0.95 - i * 0.02)
+            faces.append(face)
+
+        shapes = faces_to_cvat_skeletons(
+            faces,
+            width=1280,
+            height=720,
+            base_group_id=1,
+            fallback_on_corrupt=True,
+            max_salvage=5,
+        )
+        assert len(shapes) == 35  # Exactly 5 faces * 7 skeletons
+        group_ids = [s["group_id"] for s in shapes]
+        unique_groups = set(group_ids)
+        assert len(unique_groups) == 5
+        assert unique_groups == {1, 2, 3, 4, 5}
+
+    def test_interleaved_multi_face_ordering_and_grouping(self):
+        """Verify that ordering and sequential group assignment work correctly with mixed face statuses."""
+        v1 = create_valid_test_face(face_id=10)
+        d1 = create_degenerate_test_face(face_id=20, collapse=True)
+        s1 = create_salvageable_test_face(face_id=30)
+        v2 = create_valid_test_face(face_id=40, offset_x=50.0)
+        d2 = create_degenerate_test_face(face_id=50, collapse=False)
+        s2 = create_salvageable_test_face(face_id=60, offset_x=80.0)
+
+        # Input: [V1, D1, S1, V2, D2, S2] -> expected emitted: [V1, S1, V2, S2]
+        shapes = faces_to_cvat_skeletons(
+            [v1, d1, s1, v2, d2, s2],
+            width=1280,
+            height=720,
+            base_group_id=10,
+            fallback_on_corrupt=True,
+        )
+        assert len(shapes) == 28  # 4 faces * 7 skeletons
+
+        # Groups must be assigned contiguously to emitted faces: 10, 11, 12, 13
+        assert all(s["group_id"] == 10 for s in shapes[0:7])
+        assert all(s["group_id"] == 11 for s in shapes[7:14])
+        assert all(s["group_id"] == 12 for s in shapes[14:21])
+        assert all(s["group_id"] == 13 for s in shapes[21:28])
+
+    def test_strict_mode_without_fallback_drops_salvageable(self):
+        """When fallback_on_corrupt=False, salvageable faces are dropped like corrupt faces."""
+        v1 = create_valid_test_face(face_id=1)
+        s1 = create_salvageable_test_face(face_id=2)
+
+        shapes = faces_to_cvat_skeletons(
+            [v1, s1], width=1280, height=720, base_group_id=1, fallback_on_corrupt=False
+        )
+        assert len(shapes) == 7
+        assert all(s["group_id"] == 1 for s in shapes)
+
+    def test_custom_base_group_id(self):
+        """Ensure custom base_group_id is respected across all emitted components."""
+        v1 = create_valid_test_face(face_id=1)
+        s1 = create_salvageable_test_face(face_id=2)
+
+        shapes = faces_to_cvat_skeletons(
+            [v1, s1], width=1280, height=720, base_group_id=100, fallback_on_corrupt=True
+        )
+        assert len(shapes) == 14
+        assert all(s["group_id"] == 100 for s in shapes[:7])
+        assert all(s["group_id"] == 101 for s in shapes[7:])
+
+    def test_model_handler_multi_face_integration_valid_and_salvageable(self, mock_handler, monkeypatch):
+        """Verify ModelHandler.infer() with mixed valid and salvageable faces preserves both with distinct groups."""
+        import io
+        from PIL import Image
+        from app.client import VisionResponse
+
+        f_valid = create_valid_test_face(face_id=1)
+        f_salvage = create_salvageable_test_face(face_id=2, offset_x=100.0)
+
+        mock_face1 = {
+            "id": 1,
+            "confidence": 0.98,
+            "landmarks": [
+                {"id": lm.id, "point": [lm.x, lm.y], "visibility": lm.visibility, "confidence": lm.confidence}
+                for lm in f_valid.landmarks.values()
+            ],
+        }
+        mock_face2 = {
+            "id": 2,
+            "confidence": 0.92,
+            "landmarks": [
+                {"id": lm.id, "point": [lm.x, lm.y], "visibility": lm.visibility, "confidence": lm.confidence}
+                for lm in f_salvage.landmarks.values()
+            ],
+        }
+
+        mock_resp = VisionResponse(
+            content=json.dumps({"faces": [mock_face1, mock_face2]}),
+            raw_response={},
+            duration_seconds=0.2,
+            model="mock-gemini-vision",
+            status_code=200,
+        )
+        monkeypatch.setattr(mock_handler.client, "send_vision_request", lambda **kwargs: mock_resp)
+
+        img = Image.new("RGB", (640, 480), color=(100, 100, 100))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+
+        # Infer with refine_crops=False to directly test multi-face grouping and per-face salvage
+        shapes = mock_handler.infer(buf.getvalue(), threshold=0.5, refine_crops=False, base_group_id=3)
+
+        # Both valid and salvageable faces must be emitted: 2 * 7 = 14 skeletons
+        assert len(shapes) == 14
+        assert all(s["group_id"] == 3 and s["group"] == 3 for s in shapes[:7])
+        assert all(s["group_id"] == 4 and s["group"] == 4 for s in shapes[7:])

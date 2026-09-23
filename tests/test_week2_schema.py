@@ -18,11 +18,18 @@ import pytest
 
 from core.week2_schema import (
     LATERALITY_VIEWER,
+    POSE_CVAT_SPEC_HASH,
+    POSE_SCHEMA_HASH,
+    VF50_CVAT_SPEC_HASH,
+    VF50_SCHEMA_HASH,
     VISIBILITY_OCCLUDED,
     VISIBILITY_OUTSIDE,
     VISIBILITY_VISIBLE,
     compute_spec_fingerprint,
     get_build_sha,
+    get_canonical_cvat_spec,
+    get_canonical_cvat_spec_hash,
+    get_canonical_schema_hash,
     load_pose17,
     load_vf50,
     map_cvat_to_visibility,
@@ -187,3 +194,116 @@ class TestSpecFingerprintingAndBuildSha:
 
         with mock.patch.dict(os.environ, {}, clear=True):
             assert get_build_sha() is None
+
+    def test_schema_hash_vs_cvat_spec_hash_separation(self):
+        """Verify semantic schema hash is strictly separated from CVAT spec hash."""
+        assert len(POSE_SCHEMA_HASH) == 64
+        assert len(VF50_SCHEMA_HASH) == 64
+        assert len(POSE_CVAT_SPEC_HASH) == 64
+        assert len(VF50_CVAT_SPEC_HASH) == 64
+
+        # Semantic schema fingerprints the abstract anatomy definition
+        # CVAT spec fingerprints the concrete CVAT label dictionary list with SVG
+        assert POSE_SCHEMA_HASH != POSE_CVAT_SPEC_HASH
+        assert VF50_SCHEMA_HASH != VF50_CVAT_SPEC_HASH
+        assert POSE_SCHEMA_HASH != VF50_SCHEMA_HASH
+        assert POSE_CVAT_SPEC_HASH != VF50_CVAT_SPEC_HASH
+
+    def test_canonical_spec_getters_and_hashes(self):
+        """Verify getters return valid specs and matching fingerprints."""
+        pose_spec = get_canonical_cvat_spec("pose17")
+        assert isinstance(pose_spec, list)
+        assert len(pose_spec) == 1
+        assert pose_spec[0]["name"] == "person"
+        assert len(pose_spec[0]["sublabels"]) == 17
+        assert get_canonical_cvat_spec_hash("pose17") == POSE_CVAT_SPEC_HASH
+        assert get_canonical_schema_hash("pose17") == POSE_SCHEMA_HASH
+
+        vf50_spec = get_canonical_cvat_spec("vf50")
+        assert isinstance(vf50_spec, list)
+        assert len(vf50_spec) == 7
+        assert get_canonical_cvat_spec_hash("vf50") == VF50_CVAT_SPEC_HASH
+        assert get_canonical_schema_hash("vf50") == VF50_SCHEMA_HASH
+
+    def test_canonical_getters_invalid_key_raises(self):
+        with pytest.raises(ValueError, match="Unknown detector key"):
+            get_canonical_cvat_spec("unknown")
+
+        with pytest.raises(ValueError, match="Unknown detector key"):
+            get_canonical_schema_hash("unknown")
+
+        with pytest.raises(ValueError, match="Unknown detector key"):
+            get_canonical_cvat_spec_hash("unknown")
+
+
+class TestSingleSourceOfTruthContractConsistency:
+    """Strict repository-level verification that downstream modules derive directly from SSOT schemas."""
+
+    def test_skeleton_contract_matches_yaml_ssot(self):
+        import core.skeleton_contract as sc
+        from core.week2_schema import (
+            vf50_all_edges,
+            vf50_component_configs,
+            vf50_edges_by_component,
+            vf50_point_to_component,
+        )
+
+        pose = load_pose17()
+        vf = load_vf50()
+
+        # Pose17 SSOT consistency
+        assert sc.POSE17_KEYPOINTS == pose17_coco_keypoints()
+        assert sc.KEYPOINT_COUNT == 17
+        assert sc.POSE17_SKELETON_EDGES == pose17_edges_as_coco_names()
+        assert sc.DEFAULT_PARENT_LABEL == pose.parent_label
+        assert len(sc.POSE17_SKELETON_EDGES) == 18
+
+        # VF50 SSOT consistency
+        assert sc.VF50_COMPONENT_NAMES == vf.component_names
+        assert sc.VF50_POINTS_COUNT == 50
+        assert sc.VF50_COMPONENT_CONFIG == vf50_component_configs()
+        assert sc.VF50_ALL_EDGES == vf50_all_edges()
+        assert sc.VF50_POINT_TO_COMPONENT == dict(vf.point_to_component)
+        assert sc.VF50_EDGES_BY_COMPONENT == vf50_edges_by_component()
+
+    def test_pose_face_schema_matches_yaml_ssot(self):
+        import core.pose_face_schema as pfs
+        from core.week2_schema import (
+            vf50_all_edges,
+            vf50_landmarks,
+            vf50_mirror_map,
+        )
+
+        pose = load_pose17()
+        vf = load_vf50()
+
+        assert pfs.POSE17_KEYPOINTS == pose17_coco_keypoints()
+        assert pfs.POSE17_EDGES == pose.edges
+        assert len(pfs.POSE17_EDGES) == 18
+        assert pfs.VF50_LANDMARKS == vf50_landmarks()
+        assert len(pfs.VF50_LANDMARKS) == 50
+        assert pfs.VF50_EDGES == vf50_all_edges()
+        assert pfs.VF50_MIRROR_MAP == vf50_mirror_map()
+
+    def test_quality_gate_matches_yaml_ssot(self):
+        import core.quality_gate as qg
+        from core.week2_schema import (
+            pose17_articulated_paired_keypoints,
+            pose17_paired_keypoints,
+            pose17_rigid_paired_keypoints,
+            vf50_component_point_counts,
+            vf50_eyelid_opposing_pairs,
+        )
+
+        vf = load_vf50()
+
+        assert qg.POSE17_KEYPOINTS == pose17_coco_keypoints()
+        assert qg.POSE17_SKELETON_EDGES == pose17_edges_as_coco_names()
+        assert len(qg.POSE17_SKELETON_EDGES) == 18
+        assert qg.POSE17_PAIRED_KEYPOINTS == pose17_paired_keypoints()
+        assert qg.POSE17_RIGID_PAIRED_KEYPOINTS == pose17_rigid_paired_keypoints()
+        assert qg.POSE17_ARTICULATED_PAIRED_KEYPOINTS == pose17_articulated_paired_keypoints()
+        assert qg.VF50_COMPONENT_NAMES == vf.component_names
+        assert qg.VF50_COMPONENT_COUNTS == vf50_component_point_counts()
+        assert qg.VF50_EXPECTED_TOTAL_POINTS == 50
+        assert qg.VF50_EYELID_OPPOSING_PAIRS == vf50_eyelid_opposing_pairs()

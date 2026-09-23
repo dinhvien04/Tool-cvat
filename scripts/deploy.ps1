@@ -66,7 +66,10 @@ param (
     [string]$RectangleTrackerTimeout = "12.0",
 
     [Parameter(Mandatory = $false)]
-    [string]$CvatWebhookSecret = $env:CVAT_WEBHOOK_SECRET
+    [string]$CvatWebhookSecret = $env:CVAT_WEBHOOK_SECRET,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$Strict
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,9 +91,14 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
 
 $resolvedBuildSha = $ToolCvatBuildSha
-if (-not $resolvedBuildSha -or $resolvedBuildSha.Trim() -eq "") {
+if (-not $resolvedBuildSha -or $resolvedBuildSha.Trim() -eq "" -or $resolvedBuildSha -eq "unknown") {
     try {
-        $resolvedBuildSha = (git rev-parse HEAD 2>$null).Trim()
+        $gitOut = (git rev-parse HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $gitOut -and $gitOut.Trim() -ne "") {
+            $resolvedBuildSha = $gitOut.Trim()
+        } else {
+            $resolvedBuildSha = "unknown"
+        }
     } catch {
         $resolvedBuildSha = "unknown"
     }
@@ -404,11 +412,12 @@ foreach ($fn in $functionsToDeploy) {
             $env:NINEROUTER_KEY = $NineRouterKey
             $env:WSLENV = if ($env:WSLENV) { "$($env:WSLENV):NINEROUTER_KEY" } else { "NINEROUTER_KEY" }
         }
+        if ($CvatWebhookSecret) {
+            $env:CVAT_WEBHOOK_SECRET = $CvatWebhookSecret
+            $env:WSLENV = if ($env:WSLENV) { "$($env:WSLENV):CVAT_WEBHOOK_SECRET" } else { "CVAT_WEBHOOK_SECRET" }
+        }
 
         $extraEnvBash = ""
-        if ($CvatWebhookSecret) {
-            $extraEnvBash += "--env `"CVAT_WEBHOOK_SECRET=$CvatWebhookSecret`" "
-        }
         if ($detectorEnvVar) {
             $extraEnvBash += "--env `"$detectorEnvVar`" "
         }
@@ -418,7 +427,7 @@ foreach ($fn in $functionsToDeploy) {
         if ($extraVf50Refine) {
             $extraEnvBash += "--env `"VF50_REFINE_MODEL=$extraVf50Refine`" "
         }
-        if ($resolvedBuildSha) {
+        if ($resolvedBuildSha -and $resolvedBuildSha -ne "unknown") {
             $extraEnvBash += "--env `"TOOL_CVAT_BUILD_SHA=$resolvedBuildSha`" "
         }
 
@@ -427,6 +436,9 @@ set -e
 extraArgs=()
 if [ -n "`$NINEROUTER_KEY" ]; then
     extraArgs+=(--env "NINEROUTER_KEY=`$NINEROUTER_KEY")
+fi
+if [ -n "`$CVAT_WEBHOOK_SECRET" ]; then
+    extraArgs+=(--env "CVAT_WEBHOOK_SECRET=`$CVAT_WEBHOOK_SECRET")
 fi
 nuctl deploy $fnName \
     --project-name cvat \
@@ -458,6 +470,7 @@ nuctl deploy $fnName \
         } finally {
             Remove-Item -Path $tmpDeployScript -Force -ErrorAction SilentlyContinue
             $env:NINEROUTER_KEY = $null
+            $env:CVAT_WEBHOOK_SECRET = $null
             $env:WSLENV = $env:WSLENV_BACKUP
             $env:WSLENV_BACKUP = $null
         }
@@ -479,7 +492,7 @@ nuctl deploy $fnName \
         if ($detectorEnvVar) { $deployArgs += @("--env", $detectorEnvVar) }
         if ($extraPoseRefine) { $deployArgs += @("--env", "POSE17_REFINE_MODEL=$extraPoseRefine") }
         if ($extraVf50Refine) { $deployArgs += @("--env", "VF50_REFINE_MODEL=$extraVf50Refine") }
-        if ($resolvedBuildSha) { $deployArgs += @("--env", "TOOL_CVAT_BUILD_SHA=$resolvedBuildSha") }
+        if ($resolvedBuildSha -and $resolvedBuildSha -ne "unknown") { $deployArgs += @("--env", "TOOL_CVAT_BUILD_SHA=$resolvedBuildSha") }
         if ($NineRouterKey) { $deployArgs += @("--env", "NINEROUTER_KEY=$NineRouterKey") }
         if ($CvatWebhookSecret) { $deployArgs += @("--env", "CVAT_WEBHOOK_SECRET=$CvatWebhookSecret") }
         & nuctl @deployArgs
@@ -494,7 +507,15 @@ nuctl deploy $fnName \
 
 if ($Target -in @("week2", "human-pose-17", "face-vf50", "active-all", "all")) {
     Write-Host "`n[Post-deploy] Verifying Week-2 runtime status and spec fingerprints..." -ForegroundColor Yellow
-    python (Join-Path $ScriptDir "week2_runtime_status.py")
+    $statusArgs = @((Join-Path $ScriptDir "week2_runtime_status.py"))
+    if ($Strict) {
+        $statusArgs += "--strict"
+    }
+    python @statusArgs
+    if ($Strict -and $LASTEXITCODE -ne 0) {
+        Write-Error "Post-deployment strict verification failed. Spec drift or build SHA mismatch detected!"
+        exit 1
+    }
 }
 
 Write-Host "`n======================================================================" -ForegroundColor Green

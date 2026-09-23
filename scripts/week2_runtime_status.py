@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,12 +39,17 @@ if str(REPO_ROOT) not in sys.path:
 from core.skeleton_contract import (
     VF50_COMPONENT_NAMES,
     VF50_COMPONENT_CONFIG,
-    build_cvat_pose17_spec,
-    build_cvat_vf50_spec,
 )
 from core.pose_face_schema import POSE17_KEYPOINTS
 from core.week2_schema import (
+    POSE_CVAT_SPEC_HASH,
+    POSE_SCHEMA_HASH,
+    VF50_CVAT_SPEC_HASH,
+    VF50_SCHEMA_HASH,
     compute_spec_fingerprint,
+    get_canonical_cvat_spec,
+    get_canonical_cvat_spec_hash,
+    get_canonical_schema_hash,
     load_pose17,
     load_vf50,
 )
@@ -60,6 +68,43 @@ WEEK2_CONTAINERS = {
         "expected_labels": 7,
     },
 }
+
+# Strict security allowlist: ONLY non-sensitive environment variables may be recorded/displayed.
+SAFE_ENV_ALLOWLIST = frozenset({
+    "TOOL_CVAT_BUILD_SHA",
+    "VISION_MODEL",
+    "POSE17_MODEL",
+    "POSE17_REFINE_MODEL",
+    "VF50_MODEL",
+    "VF50_REFINE_MODEL",
+    "DETECTION_MODE",
+    "NINEROUTER_TIMEOUT",
+    "FEEDBACK_DATA_DIR",
+    "FEEDBACK_DB_PATH",
+})
+
+SENSITIVE_KEY_PATTERN = re.compile(r"(KEY|SECRET|TOKEN|PASS|AUTH|CRED|PWD)", re.IGNORECASE)
+
+
+def sanitize_url(url_str: str) -> str:
+    """Strip basic auth credentials from URLs for safe logging."""
+    try:
+        parsed = urllib.parse.urlparse(url_str)
+        if parsed.password or parsed.username:
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc += f":{parsed.port}"
+            return urllib.parse.urlunparse((
+                parsed.scheme,
+                netloc,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            ))
+    except Exception:
+        pass
+    return url_str
 
 
 def get_git_head_sha() -> Optional[str]:
@@ -112,28 +157,16 @@ def get_repo_spec(yaml_path: Path) -> Tuple[Optional[str], Optional[List[Dict[st
         return None, None
 
 
-def get_canonical_cvat_spec(key: str) -> List[Dict[str, Any]]:
-    """Return authoritative CVAT spec dictionary list for the given detector key."""
-    if key == "pose17":
-        return [build_cvat_pose17_spec(parent_label="person")]
-    elif key == "vf50":
-        return build_cvat_vf50_spec()
-    raise ValueError(f"Unknown key: {key}")
-
-
-def get_canonical_yaml_fingerprint(key: str) -> str:
-    """Return authoritative YAML schema SHA-256 fingerprint."""
-    if key == "pose17":
-        return load_pose17().spec_fingerprint
-    elif key == "vf50":
-        return load_vf50().spec_fingerprint
-    raise ValueError(f"Unknown key: {key}")
-
-
-def get_nuclio_registered_spec(fn_name: str) -> Optional[List[Dict[str, Any]]]:
-    """Query Nuclio dashboard API for registered function specification."""
-    for host in ("127.0.0.1", "localhost"):
-        url = f"http://{host}:8070/api/functions/{fn_name}"
+def get_nuclio_dashboard_spec(fn_name: str, nuclio_url: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    """Query Nuclio dashboard API (:8070) for registered function specification."""
+    urls = [nuclio_url] if nuclio_url else [
+        os.getenv("NUCLIO_DASHBOARD_URL", "http://127.0.0.1:8070"),
+        "http://localhost:8070",
+    ]
+    for base in urls:
+        if not base:
+            continue
+        url = f"{base.rstrip('/')}/api/functions/{fn_name}"
         try:
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=3) as resp:
@@ -147,6 +180,45 @@ def get_nuclio_registered_spec(fn_name: str) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+def get_cvat_lambda_spec(fn_name: str, cvat_url: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    """Query CVAT Lambda registry API (:18080 or :8080) for registered function specification."""
+    urls = [cvat_url] if cvat_url else [
+        os.getenv("CVAT_URL", "http://127.0.0.1:18080"),
+        "http://localhost:18080",
+        "http://127.0.0.1:8080",
+        "http://localhost:8080",
+    ]
+    token = os.getenv("CVAT_TOKEN", "")
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Token {token}"
+
+    for base in urls:
+        if not base:
+            continue
+        try:
+            url = f"{base.rstrip('/')}/api/lambda/functions"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                functions = data if isinstance(data, list) else data.get("results", [])
+                for fn in functions:
+                    cand_id = str(fn.get("id", ""))
+                    cand_name = str(fn.get("name", ""))
+                    ann_name = fn.get("annotations", {}).get("name", "")
+                    if fn_name in cand_id or fn_name == cand_name or fn_name == ann_name:
+                        raw_spec = fn.get("spec") or fn.get("annotations", {}).get("spec")
+                        if raw_spec:
+                            return json.loads(raw_spec) if isinstance(raw_spec, str) else raw_spec
+        except Exception:
+            continue
+    return None
+
+
+# Backward-compatible alias
+get_nuclio_registered_spec = get_nuclio_dashboard_spec
+
+
 def analyze_function_runtime(key: str, cfg: Dict[str, Any], *, strict: bool = False) -> Dict[str, Any]:
     """Analyze runtime status and spec of a single Week-2 detector."""
     container_name = cfg["container_name"]
@@ -157,12 +229,16 @@ def analyze_function_runtime(key: str, cfg: Dict[str, Any], *, strict: bool = Fa
     git_head = get_git_head_sha()
 
     canonical_cvat_spec = get_canonical_cvat_spec(key)
-    canonical_spec_fp = compute_spec_fingerprint(canonical_cvat_spec)
-    canonical_yaml_fp = get_canonical_yaml_fingerprint(key)
+    canonical_spec_fp = get_canonical_cvat_spec_hash(key)
+    canonical_schema_fp = get_canonical_schema_hash(key)
     repo_spec_fp = compute_spec_fingerprint(repo_spec) if repo_spec else None
 
-    nuclio_spec = get_nuclio_registered_spec(fn_name)
-    cvat_registry_fp = compute_spec_fingerprint(nuclio_spec) if nuclio_spec else None
+    # Query both registries distinctly
+    nuclio_spec = get_nuclio_dashboard_spec(fn_name)
+    nuclio_dashboard_fp = compute_spec_fingerprint(nuclio_spec) if nuclio_spec else None
+
+    cvat_spec = get_cvat_lambda_spec(fn_name)
+    cvat_lambda_fp = compute_spec_fingerprint(cvat_spec) if cvat_spec else None
 
     report: Dict[str, Any] = {
         "key": key,
@@ -181,11 +257,15 @@ def analyze_function_runtime(key: str, cfg: Dict[str, Any], *, strict: bool = Fa
         "spec_drift": False,
         "drift_details": [],
         "fingerprints": {
-            "canonical_yaml": canonical_yaml_fp,
+            "semantic_schema": canonical_schema_fp,
             "canonical_spec": canonical_spec_fp,
             "repo_spec": repo_spec_fp,
             "deployed_spec": None,
-            "cvat_registry": cvat_registry_fp,
+            "nuclio_dashboard": nuclio_dashboard_fp,
+            "cvat_lambda": cvat_lambda_fp,
+            # Backward-compatible aliases
+            "canonical_yaml": canonical_schema_fp,
+            "cvat_registry": nuclio_dashboard_fp,
         },
         "ready": False,
     }
@@ -215,25 +295,18 @@ def analyze_function_runtime(key: str, cfg: Dict[str, Any], *, strict: bool = Fa
             for b in host_bindings:
                 report["ports"].append(f"{b.get('HostPort')}->{container_port}")
 
-    # Environment variables
+    # Environment variables (strict allowlist + regex secret protection)
     env_list = info.get("Config", {}).get("Env", [])
     env_dict: Dict[str, str] = {}
     for entry in env_list:
         if "=" in entry:
             k, v = entry.split("=", 1)
             env_dict[k] = v
+
     report["env"] = {
         k: env_dict[k]
-        for k in (
-            "TOOL_CVAT_BUILD_SHA",
-            "VISION_MODEL",
-            "POSE17_MODEL",
-            "POSE17_REFINE_MODEL",
-            "VF50_MODEL",
-            "VF50_REFINE_MODEL",
-            "DETECTION_MODE",
-        )
-        if k in env_dict
+        for k in SAFE_ENV_ALLOWLIST
+        if k in env_dict and not SENSITIVE_KEY_PATTERN.search(k)
     }
 
     container_build_sha = env_dict.get("TOOL_CVAT_BUILD_SHA")
@@ -328,11 +401,19 @@ def analyze_function_runtime(key: str, cfg: Dict[str, Any], *, strict: bool = Fa
             f"authoritative canonical contract ({canonical_spec_fp[:12]})"
         )
 
-    # Full SHA-256 fingerprint comparison: deployed vs CVAT registry
-    if cvat_registry_fp and cvat_registry_fp != deployed_spec_fp:
+    # Full SHA-256 fingerprint comparison: deployed vs Nuclio dashboard registry (:8070)
+    if nuclio_dashboard_fp and nuclio_dashboard_fp != deployed_spec_fp:
         report["spec_drift"] = True
         report["drift_details"].append(
-            f"CVAT REGISTRY DRIFT: Nuclio dashboard registry ({cvat_registry_fp[:12]}) differs "
+            f"NUCLIO DASHBOARD REGISTRY DRIFT: Nuclio dashboard registry ({nuclio_dashboard_fp[:12]}) differs "
+            f"from container annotations ({deployed_spec_fp[:12]})"
+        )
+
+    # Full SHA-256 fingerprint comparison: deployed vs CVAT Lambda registry (:18080)
+    if cvat_lambda_fp and cvat_lambda_fp != deployed_spec_fp:
+        report["spec_drift"] = True
+        report["drift_details"].append(
+            f"CVAT LAMBDA REGISTRY DRIFT: CVAT Lambda registry ({cvat_lambda_fp[:12]}) differs "
             f"from container annotations ({deployed_spec_fp[:12]})"
         )
 
@@ -374,28 +455,29 @@ def main() -> int:
     for key, r in results.items():
         fps = r["fingerprints"]
         print(f"\n[{r['function_name']}]")
-        print(f"  Container     : {r['container_name']}")
-        print(f"  Status        : {r['status']} (health: {r['health']})")
-        print(f"  Ports         : {', '.join(r['ports']) if r['ports'] else 'None'}")
-        print(f"  Build SHA     : {r['build_sha'] or 'UNSET'} (git HEAD: {r['git_head_sha'] or 'UNKNOWN'}, match: {r['build_sha_match']})")
-        print(f"  Spec Type     : {r['deployed_spec_type']} ({r['deployed_label_count']} labels)")
-        print(f"  Canonical Spec: {fps['canonical_spec'][:16]}... (YAML: {fps['canonical_yaml'][:16]}...)")
-        print(f"  Repo Spec     : {fps['repo_spec'][:16] if fps['repo_spec'] else 'N/A'}...")
-        print(f"  Deployed Spec : {fps['deployed_spec'][:16] if fps['deployed_spec'] else 'N/A'}...")
-        print(f"  CVAT Registry : {fps['cvat_registry'][:16] if fps['cvat_registry'] else 'N/A'}...")
+        print(f"  Container       : {r['container_name']}")
+        print(f"  Status          : {r['status']} (health: {r['health']})")
+        print(f"  Ports           : {', '.join(r['ports']) if r['ports'] else 'None'}")
+        print(f"  Build SHA       : {r['build_sha'] or 'UNSET'} (git HEAD: {r['git_head_sha'] or 'UNKNOWN'}, match: {r['build_sha_match']})")
+        print(f"  Spec Type       : {r['deployed_spec_type']} ({r['deployed_label_count']} labels)")
+        print(f"  Canonical Spec  : {fps['canonical_spec'][:16]}... (Schema: {fps['semantic_schema'][:16]}...)")
+        print(f"  Repo Spec       : {fps['repo_spec'][:16] if fps['repo_spec'] else 'N/A'}...")
+        print(f"  Deployed Spec   : {fps['deployed_spec'][:16] if fps['deployed_spec'] else 'N/A'}...")
+        print(f"  Nuclio Dashboard: {fps['nuclio_dashboard'][:16] if fps['nuclio_dashboard'] else 'N/A'}... (:8070)")
+        print(f"  CVAT Lambda Reg : {fps['cvat_lambda'][:16] if fps['cvat_lambda'] else 'N/A'}... (:18080)")
         if r["env"]:
             env_strs = [f"{k}={v}" for k, v in r["env"].items() if k != "TOOL_CVAT_BUILD_SHA"]
             if env_strs:
-                print(f"  Active Env    : {', '.join(env_strs)}")
+                print(f"  Active Env      : {', '.join(env_strs)}")
 
         if r["spec_drift"]:
-            print("  DRIFT         : YES - SPEC DRIFT DETECTED!")
+            print("  DRIFT           : YES - SPEC DRIFT DETECTED!")
             for d in r["drift_details"]:
                 print(f"    - {d}")
         else:
-            print("  DRIFT         : NO (100% SHA-256 spec alignment)")
+            print("  DRIFT           : NO (100% SHA-256 spec alignment)")
 
-        print(f"  Ready         : {'YES' if r['ready'] else 'NO - REDEPLOY NEEDED'}")
+        print(f"  Ready           : {'YES' if r['ready'] else 'NO - REDEPLOY NEEDED'}")
 
     print("\n" + "=" * 80)
     if all_ready:

@@ -36,166 +36,48 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set
 
 logger = logging.getLogger(__name__)
 
-# Canonical COCO 17-keypoint names in strict indexed order (0..16)
-POSE17_KEYPOINTS: Tuple[str, ...] = (
-    "nose",             # 0
-    "left_eye",         # 1
-    "right_eye",        # 2
-    "left_ear",         # 3
-    "right_ear",        # 4
-    "left_shoulder",    # 5
-    "right_shoulder",   # 6
-    "left_elbow",       # 7
-    "right_elbow",      # 8
-    "left_wrist",       # 9
-    "right_wrist",      # 10
-    "left_hip",         # 11
-    "right_hip",        # 12
-    "left_knee",        # 13
-    "right_knee",       # 14
-    "left_ankle",       # 15
-    "right_ankle",      # 16
+from core.week2_schema import (
+    load_pose17,
+    load_vf50,
+    pose17_coco_keypoints,
+    pose17_edges_as_coco_names,
+    pose17_keypoint_descriptions,
+    vf50_component_configs,
+    vf50_edges_by_component,
+    vf50_all_edges,
+    vf50_point_to_component,
+    map_visibility_to_cvat,
+    map_cvat_to_visibility,
+    VISIBILITY_OUTSIDE,
+    VISIBILITY_OCCLUDED,
+    VISIBILITY_VISIBLE,
 )
 
+_pose17 = load_pose17()
+
+# VinFast Week-2 HumanPose-17 canonical keypoint sequence derived from authoritative YAML
+POSE17_KEYPOINTS: Tuple[str, ...] = pose17_coco_keypoints()
 POSE17_KEYPOINTS_SET: FrozenSet[str] = frozenset(POSE17_KEYPOINTS)
 KEYPOINT_COUNT: int = len(POSE17_KEYPOINTS)  # exactly 17
-
 KEYPOINT_INDEX_MAP: Dict[str, int] = {name: idx for idx, name in enumerate(POSE17_KEYPOINTS)}
 
-# Canonical 18 bone pairs connecting keypoints in human anatomical topology
-# Matches config/week2_pose17.yaml authoritative edge set (including ear-to-shoulder)
-POSE17_SKELETON_EDGES: Tuple[Tuple[str, str], ...] = (
-    # Head / Facial features
-    ("nose", "left_eye"),
-    ("nose", "right_eye"),
-    ("left_eye", "left_ear"),
-    ("right_eye", "right_ear"),
-    # Ear-to-shoulder (per VinFast Pose17 YAML spec, edges 4→6 and 5→7)
-    ("right_ear", "right_shoulder"),
-    ("left_ear", "left_shoulder"),
-    # Torso
-    ("left_shoulder", "right_shoulder"),
-    ("left_shoulder", "left_hip"),
-    ("right_shoulder", "right_hip"),
-    ("left_hip", "right_hip"),
-    # Left Arm
-    ("left_shoulder", "left_elbow"),
-    ("left_elbow", "left_wrist"),
-    # Right Arm
-    ("right_shoulder", "right_elbow"),
-    ("right_elbow", "right_wrist"),
-    # Left Leg
-    ("left_hip", "left_knee"),
-    ("left_knee", "left_ankle"),
-    # Right Leg
-    ("right_hip", "right_knee"),
-    ("right_knee", "right_ankle"),
-)
+# Canonical 18 bone pairs connecting keypoints in VinFast Week-2 HumanPose-17 topology
+# Matches config/week2_pose17.yaml authoritative edge set (including ear-to-shoulder 4->6, 5->7)
+POSE17_SKELETON_EDGES: Tuple[Tuple[str, str], ...] = pose17_edges_as_coco_names()
 
-# Standard visibility flags
-VISIBILITY_OUTSIDE: int = 0    # Not visible / outside image boundary / absent
-VISIBILITY_OCCLUDED: int = 1   # Present in frame but occluded
-VISIBILITY_VISIBLE: int = 2    # Labeled and visible
-
-DEFAULT_PARENT_LABEL: str = "person"
+DEFAULT_PARENT_LABEL: str = _pose17.parent_label
 
 # ==============================================================================
 # VINFAST HUMANPOSE-17 CANONICAL SPECIFICATION (output_pose17_guideline.txt)
 # ==============================================================================
-# Sublabels 1..17 strictly mapped to anatomical joints:
-# Even indices (2, 4, 6, 8, 10, 12, 14, 16) = RIGHT in frame (viewer perspective)
-# Odd indices (3, 5, 7, 9, 11, 13, 15, 17) = LEFT in frame (viewer perspective)
-VINFAST_POSE17_KEYPOINTS: Tuple[str, ...] = tuple(str(i) for i in range(1, 18))
+# Sublabels 1..17 strictly mapped to anatomical joints in viewer space:
+# Even indices (2, 4, 6, 8, 10, 12, 14, 16) = RIGHT in frame (viewer perspective, larger X)
+# Odd indices (3, 5, 7, 9, 11, 13, 15, 17) = LEFT in frame (viewer perspective, smaller X)
+VINFAST_POSE17_KEYPOINTS: Tuple[str, ...] = tuple(kp.numeric_name for kp in _pose17.keypoints)
+VINFAST_POSE17_INDEX_TO_NAME: Dict[int, str] = {kp.id: kp.semantic_name for kp in _pose17.keypoints}
 
-VINFAST_POSE17_INDEX_TO_NAME: Dict[int, str] = {
-    1: "Nose",
-    2: "R Eye",
-    3: "L Eye",
-    4: "R Ear",
-    5: "L Ear",
-    6: "R Shoulder",
-    7: "L Shoulder",
-    8: "R Elbow",
-    9: "L Elbow",
-    10: "R Wrist",
-    11: "L Wrist",
-    12: "R Hip",
-    13: "L Hip",
-    14: "R Knee",
-    15: "L Knee",
-    16: "R Ankle",
-    17: "L Ankle",
-}
-
-# Bidirectional mapping between standard COCO names and VinFast 1-based string IDs
-COCO_NAME_TO_VINFAST_ID: Dict[str, str] = {
-    "nose": "1",
-    "right_eye": "2",
-    "left_eye": "3",
-    "right_ear": "4",
-    "left_ear": "5",
-    "right_shoulder": "6",
-    "left_shoulder": "7",
-    "right_elbow": "8",
-    "left_elbow": "9",
-    "right_wrist": "10",
-    "left_wrist": "11",
-    "right_hip": "12",
-    "left_hip": "13",
-    "right_knee": "14",
-    "left_knee": "15",
-    "right_ankle": "16",
-    "left_ankle": "17",
-}
-
-VINFAST_ID_TO_COCO_NAME: Dict[str, str] = {v: k for k, v in COCO_NAME_TO_VINFAST_ID.items()}
-
-
-def map_visibility_to_cvat(visibility: Union[int, float, str, bool]) -> Tuple[bool, bool]:
-    """Map remote model visibility flag (0/1/2) to CVAT (outside, occluded) booleans.
-
-    Week 2 Specification (Section 8):
-    - 0 -> outside=True, occluded=False (keypoint outside frame or not annotated)
-    - 1 -> outside=False, occluded=True (keypoint present but occluded)
-    - 2 -> outside=False, occluded=False (keypoint clearly visible)
-
-    Args:
-        visibility: Numeric (0, 1, 2), string ("outside", "occluded", "visible"), or boolean.
-
-    Returns:
-        Tuple of (outside: bool, occluded: bool).
-    """
-    if isinstance(visibility, bool):
-        return (False, False) if visibility else (True, False)
-
-    if isinstance(visibility, (int, float)):
-        v_int = int(round(visibility))
-        if v_int <= 0:
-            return True, False
-        if v_int == 1:
-            return False, True
-        return False, False
-
-    if isinstance(visibility, str):
-        v_clean = visibility.strip().lower()
-        if v_clean in ("0", "outside", "absent", "hidden", "none", "false"):
-            return True, False
-        if v_clean in ("1", "occluded", "covered", "obscured"):
-            return False, True
-        if v_clean in ("2", "visible", "true", "clear"):
-            return False, False
-
-    # Default fallback: assume visible if unparseable
-    return False, False
-
-
-def map_cvat_to_visibility(outside: bool, occluded: bool) -> int:
-    """Map CVAT (outside, occluded) booleans back to standard visibility flag (0/1/2)."""
-    if outside:
-        return VISIBILITY_OUTSIDE
-    if occluded:
-        return VISIBILITY_OCCLUDED
-    return VISIBILITY_VISIBLE
+COCO_NAME_TO_VINFAST_ID: Dict[str, str] = {name: str(kp_id) for name, kp_id in _pose17.coco_name_to_id.items()}
+VINFAST_ID_TO_COCO_NAME: Dict[str, str] = {str(kp_id): name for kp_id, name in _pose17.id_to_coco_name.items()}
 
 
 def denormalize_keypoint(
@@ -873,7 +755,7 @@ def build_pose17_prompt(parent_label: str = DEFAULT_PARENT_LABEL) -> str:
     """Generate strict, deterministic prompt for 9Router vision inference for Pose 17."""
     kp_list_str = ", ".join(f'"{kp}"' for kp in POSE17_KEYPOINTS)
     return (
-        f"Perform multi-person 2D Human Pose Estimation (COCO 17-keypoint topology) on this image.\n"
+        f"Perform multi-person 2D Human Pose Estimation (VinFast Week-2 HumanPose-17 topology) on this image.\n"
         f"Parent label is '{parent_label}'.\n"
         f"Detect all persons and estimate their 17 standard keypoints:\n"
         f"[{kp_list_str}].\n"
@@ -892,6 +774,7 @@ def build_pose17_prompt(parent_label: str = DEFAULT_PARENT_LABEL) -> str:
         f'      "confidence": 0.95,\n'
         f'      "keypoints": [\n'
         f'        {{"name": "nose", "point": [x, y], "visibility": 2, "confidence": 0.98}},\n'
+        f'        {{"name": "right_eye", "point": [x, y], "visibility": 2, "confidence": 0.95}},\n'
         f'        {{"name": "left_eye", "point": [x, y], "visibility": 2, "confidence": 0.95}},\n'
         f'        ...\n'
         f'      ]\n'
@@ -906,51 +789,34 @@ def generate_cvat_pose17_svg(sublabel_names: Optional[Sequence[str]] = None) -> 
     """Generate the canonical SVG topology string required by CVAT function.yaml spec.
 
     Matches CVAT lambda_manager/views.py expectations (lines and circles with data-node-id).
+    Derives keypoint labels directly from canonical load_pose17() schema.
     """
-    labels = list(sublabel_names) if sublabel_names and len(sublabel_names) == KEYPOINT_COUNT else list(POSE17_KEYPOINTS)
+    from core.week2_schema import load_pose17
+    schema = load_pose17()
+    labels = list(sublabel_names) if sublabel_names and len(sublabel_names) == KEYPOINT_COUNT else [schema.id_to_coco_name[kp.id] for kp in schema.keypoints]
 
     nodes_info = [
-        (1, 48.87604904174805, 9.485294342041016),    # nose
-        (2, 51.2289924621582, 7.636554718017578),     # left_eye
-        (3, 47.195377349853516, 7.636554718017578),    # right_eye
-        (4, 54.25419998168945, 7.804621696472168),     # left_ear
-        (5, 44.170169830322266, 7.804621696472168),    # right_ear
-        (6, 60.80882263183594, 19.90546226501465),     # left_shoulder
-        (7, 37.78361511230469, 20.409664154052734),    # right_shoulder
-        (8, 63.83403396606445, 34.023109436035156),    # left_elbow
-        (9, 35.93487548828125, 34.35924530029297),     # right_elbow
-        (10, 66.85924530029297, 47.132354736328125),   # left_wrist
-        (11, 33.918067932128906, 47.46848678588867),   # right_wrist
-        (12, 57.11134338378906, 49.65336227416992),    # left_hip
-        (13, 44.00210189819336, 50.157562255859375),   # right_hip
-        (14, 58.119747161865234, 71.16596984863281),   # left_knee
-        (15, 44.338233947753906, 70.6617660522461),    # right_knee
-        (16, 57.78361511230469, 87.97268676757812),    # left_ankle
-        (17, 46.186973571777344, 92.51050567626953),   # right_ankle
+        (1, 48.87604904174805, 9.485294342041016),    # 1: nose
+        (2, 51.2289924621582, 7.636554718017578),     # 2: right_eye (viewer right / cx > 50)
+        (3, 47.195377349853516, 7.636554718017578),    # 3: left_eye (viewer left / cx < 50)
+        (4, 54.25419998168945, 7.804621696472168),     # 4: right_ear (viewer right / cx > 50)
+        (5, 44.170169830322266, 7.804621696472168),    # 5: left_ear (viewer left / cx < 50)
+        (6, 60.80882263183594, 19.90546226501465),     # 6: right_shoulder (viewer right / cx > 50)
+        (7, 37.78361511230469, 20.409664154052734),    # 7: left_shoulder (viewer left / cx < 50)
+        (8, 63.83403396606445, 34.023109436035156),    # 8: right_elbow (viewer right / cx > 50)
+        (9, 35.93487548828125, 34.35924530029297),     # 9: left_elbow (viewer left / cx < 50)
+        (10, 66.85924530029297, 47.132354736328125),   # 10: right_wrist (viewer right / cx > 50)
+        (11, 33.918067932128906, 47.46848678588867),   # 11: left_wrist (viewer left / cx < 50)
+        (12, 57.11134338378906, 49.65336227416992),    # 12: right_hip (viewer right / cx > 50)
+        (13, 44.00210189819336, 50.157562255859375),   # 13: left_hip (viewer left / cx < 50)
+        (14, 58.119747161865234, 71.16596984863281),   # 14: right_knee (viewer right / cx > 50)
+        (15, 44.338233947753906, 70.6617660522461),    # 15: left_knee (viewer left / cx < 50)
+        (16, 57.78361511230469, 87.97268676757812),    # 16: right_ankle (viewer right / cx > 50)
+        (17, 46.186973571777344, 92.51050567626953),   # 17: left_ankle (viewer left / cx < 50)
     ]
 
-    # Edges matching config/week2_pose17.yaml authoritative 18-edge topology
-    # Using VinFast 1-indexed IDs matching the sublabel numbering
-    edges_pairs = [
-        (1, 2),    # nose -> right_eye (R=even in VinFast order, but SVG uses generic node IDs)
-        (1, 3),    # nose -> left_eye
-        (2, 4),    # right_eye -> right_ear (node 2 = left_eye in COCO order, but labels handle mapping)
-        (3, 5),    # left_eye -> left_ear
-        (4, 6),    # right_ear -> right_shoulder (ear-to-shoulder)
-        (5, 7),    # left_ear -> left_shoulder (ear-to-shoulder)
-        (6, 7),    # left_shoulder -> right_shoulder
-        (6, 8),    # left_shoulder -> left_elbow
-        (8, 10),   # left_elbow -> left_wrist
-        (7, 9),    # right_shoulder -> right_elbow
-        (9, 11),   # right_elbow -> right_wrist
-        (6, 12),   # left_shoulder -> left_hip
-        (7, 13),   # right_shoulder -> right_hip
-        (12, 13),  # left_hip -> right_hip
-        (12, 14),  # left_hip -> left_knee
-        (14, 16),  # left_knee -> left_ankle
-        (13, 15),  # right_hip -> right_knee
-        (15, 17),  # right_knee -> right_ankle
-    ]
+    # Edges matching config/week2_pose17.yaml authoritative 18-edge topology derived from schema
+    edges_pairs = [list(e) for e in schema.edges]
     node_coords = {nid: (cx, cy) for nid, cx, cy in nodes_info}
 
     lines = [
@@ -974,20 +840,36 @@ def build_cvat_pose17_spec(
 ) -> Dict[str, Any]:
     """Build CVAT function.yaml annotations spec item for Pose 17 skeleton.
 
+    Derives directly from canonical load_pose17() schema.
+
     Args:
-        parent_label: Name of parent skeleton label.
+        parent_label: Name of parent skeleton label (defaults to schema parent_label 'person').
         label_id: Unique integer ID for the parent skeleton spec entry.
-        sublabel_names: Optional custom sublabel names (defaults to canonical VinFast sequence).
+        sublabel_names: Optional custom sublabel names (defaults to canonical VinFast sequence from schema).
         include_svg: If True, populates mandatory 'svg' attribute for CVAT Lambda Manager.
     """
-    # Default sublabel names: VinFast COCO-style order (R before L), derived from VINFAST_ID_TO_COCO_NAME
-    # This matches config/week2_pose17.yaml sublabel ordering: 1=nose, 2=right_eye, 3=left_eye, ...
-    vinfast_default_names = tuple(VINFAST_ID_TO_COCO_NAME[str(i)] for i in range(1, 18))
-    names = list(sublabel_names) if sublabel_names and len(sublabel_names) == KEYPOINT_COUNT else list(vinfast_default_names)
+    from core.week2_schema import load_pose17
+    schema = load_pose17()
+    effective_parent = parent_label if parent_label != DEFAULT_PARENT_LABEL else schema.parent_label
+    if sublabel_names and len(sublabel_names) == len(schema.keypoints):
+        names = list(sublabel_names)
+    else:
+        names = [schema.id_to_coco_name[kp.id] for kp in schema.keypoints]
+
     sublabels = [
-        {"id": idx + 1, "name": name, "type": "points", "attributes": []}
-        for idx, name in enumerate(names)
+        {"id": kp.id, "name": name, "type": "points", "attributes": []}
+        for kp, name in zip(schema.keypoints, names)
     ]
+    spec_dict: Dict[str, Any] = {
+        "id": label_id,
+        "name": effective_parent,
+        "type": "skeleton",
+        "attributes": [],
+        "sublabels": sublabels,
+    }
+    if include_svg:
+        spec_dict["svg"] = generate_cvat_pose17_svg(sublabel_names=names)
+    return spec_dict
     spec_dict: Dict[str, Any] = {
         "id": label_id,
         "name": parent_label,
@@ -1004,108 +886,26 @@ def build_cvat_pose17_spec(
 # VF-50 FACE LANDMARK CANONICAL SPECIFICATION & SKELETON CONTRACT
 # ==============================================================================
 
-# Exact 7 component skeletons in canonical topological order
-VF50_COMPONENT_NAMES: Tuple[str, ...] = (
-    "longmaytrai",  # 0..4 (5 points, open contour)
-    "longmayphai",  # 5..9 (5 points, open contour)
-    "songmui",      # 10..13 (4 points, open contour)
-    "mattrai",      # 14..21 (8 points, closed contour)
-    "matphai",      # 22..29 (8 points, closed contour)
-    "moingoai",     # 30..41 (12 points, closed contour)
-    "moitrong",     # 42..49 (8 points, closed contour)
-)
+_vf50 = load_vf50()
 
-VF50_POINTS_COUNT: int = 50
+# Exact 7 component skeletons in canonical topological order from config/week2_vf50.yaml
+VF50_COMPONENT_NAMES: Tuple[str, ...] = _vf50.component_names
+VF50_POINTS_COUNT: int = _vf50.total_points
 
 # Global point IDs as string numbers "0".."49" conforming to CVAT sublabels
-VF50_POINT_NAMES: Tuple[str, ...] = tuple(str(i) for i in range(VF50_POINTS_COUNT))
+VF50_POINT_NAMES: Tuple[str, ...] = tuple(kp.numeric_name for kp in _vf50.all_keypoints)
 
-# Component boundaries and properties
-VF50_COMPONENT_CONFIG: Dict[str, Dict[str, Any]] = {
-    "longmaytrai": {
-        "start": 0,
-        "end": 4,
-        "count": 5,
-        "closed": False,
-        "desc": "Left eyebrow (viewer perspective)",
-    },
-    "longmayphai": {
-        "start": 5,
-        "end": 9,
-        "count": 5,
-        "closed": False,
-        "desc": "Right eyebrow (viewer perspective)",
-    },
-    "songmui": {
-        "start": 10,
-        "end": 13,
-        "count": 4,
-        "closed": False,
-        "desc": "Nose bridge",
-    },
-    "mattrai": {
-        "start": 14,
-        "end": 21,
-        "count": 8,
-        "closed": True,
-        "desc": "Left eye contour (viewer perspective)",
-    },
-    "matphai": {
-        "start": 22,
-        "end": 29,
-        "count": 8,
-        "closed": True,
-        "desc": "Right eye contour (viewer perspective)",
-    },
-    "moingoai": {
-        "start": 30,
-        "end": 41,
-        "count": 12,
-        "closed": True,
-        "desc": "Outer lip contour",
-    },
-    "moitrong": {
-        "start": 42,
-        "end": 49,
-        "count": 8,
-        "closed": True,
-        "desc": "Inner lip contour",
-    },
-}
+# Component boundaries and properties derived from load_vf50()
+VF50_COMPONENT_CONFIG: Dict[str, Dict[str, Any]] = vf50_component_configs()
 
 # Reverse mapping: point ID (0..49) -> component name
-VF50_POINT_TO_COMPONENT: Dict[int, str] = {}
-for comp_name, cfg in VF50_COMPONENT_CONFIG.items():
-    for pt_id in range(cfg["start"], cfg["end"] + 1):
-        VF50_POINT_TO_COMPONENT[pt_id] = comp_name
+VF50_POINT_TO_COMPONENT: Dict[int, str] = vf50_point_to_component()
 
 # Canonical edges for each component (conforming to SVG skeleton graph)
-VF50_EDGES_BY_COMPONENT: Dict[str, Tuple[Tuple[int, int], ...]] = {
-    "longmaytrai": ((0, 1), (1, 2), (2, 3), (3, 4)),
-    "longmayphai": ((5, 6), (6, 7), (7, 8), (8, 9)),
-    "songmui": ((10, 11), (11, 12), (12, 13)),
-    "mattrai": (
-        (14, 15), (15, 16), (16, 17), (17, 18),
-        (18, 19), (19, 20), (20, 21), (21, 14),
-    ),
-    "matphai": (
-        (22, 23), (23, 24), (24, 25), (25, 26),
-        (26, 27), (27, 28), (28, 29), (29, 22),
-    ),
-    "moingoai": (
-        (30, 31), (31, 32), (32, 33), (33, 34), (34, 35), (35, 36),
-        (36, 37), (37, 38), (38, 39), (39, 40), (40, 41), (41, 30),
-    ),
-    "moitrong": (
-        (42, 43), (43, 44), (44, 45), (45, 46),
-        (46, 47), (47, 48), (48, 49), (49, 42),
-    ),
-}
+VF50_EDGES_BY_COMPONENT: Dict[str, Tuple[Tuple[int, int], ...]] = vf50_edges_by_component()
 
 # All 47 edges across all 7 skeletons
-VF50_ALL_EDGES: Tuple[Tuple[int, int], ...] = tuple(
-    edge for comp_edges in VF50_EDGES_BY_COMPONENT.values() for edge in comp_edges
-)
+VF50_ALL_EDGES: Tuple[Tuple[int, int], ...] = vf50_all_edges()
 assert len(VF50_ALL_EDGES) == 47, f"VF-50 must have exactly 47 edges, got {len(VF50_ALL_EDGES)}"
 
 # The 12 canonical anchor points defined in VinFast Guideline Section 5.5
@@ -1727,6 +1527,30 @@ def assess_vf50_quality(
 # SECTION 12: MULTI-FACE SUPPORT & RESPONSE PARSER
 # ==============================================================================
 
+def is_vf50_face_degenerate(report: VF50QualityReport) -> bool:
+    """Check if a rejected face is truly degenerate (unusable collapse or insufficient points).
+
+    A face is truly degenerate if:
+    1. Bounding box diagonal < 15 normalized units (degenerate_collapse), OR
+    2. Active landmarks count < 15 (insufficient active landmarks to reconstruct a face).
+    """
+    if report.active_count < 15:
+        return True
+    if any("degenerate_collapse" in reas for reas in report.reasons):
+        return True
+    return False
+
+
+def is_vf50_face_salvageable(report: VF50QualityReport) -> bool:
+    """Check if an invalid face is salvageable as an editable draft.
+
+    A face is salvageable if it failed strict quality validation (e.g. minor
+    eyelid inversion, eyebrow monotonicity, lip protrusion, or nose non-monotonicity),
+    but has sufficient active landmarks (>= 15) and is not geometrically collapsed.
+    """
+    return not is_vf50_face_degenerate(report)
+
+
 def faces_to_cvat_skeletons(
     faces: Sequence[VF50Face],
     width: int,
@@ -1736,16 +1560,22 @@ def faces_to_cvat_skeletons(
     filter_corrupt: bool = True,
     as_components: bool = True,  # Deprecated: always True. Kept for backward compat.
     fallback_on_corrupt: bool = True,
+    max_salvage: int = 5,
 ) -> List[Dict[str, Any]]:
     """Convert multiple detected faces to native CVAT skeleton shape dictionaries.
 
     Multi-Face Isolation Guarantees (Section 12):
     - 0 faces -> returns []
     - 1 face -> returns exactly 7 component skeletons sharing group_id.
-    - N faces -> returns N * 7 component skeletons. Skeletons for Face k share group_id = base_group_id + k.
+    - N faces -> returns N * 7 component skeletons. Skeletons for Face k share group_id.
     - Skeletons belonging to distinct faces never share group_id.
     - Completely separate landmark instances preventing any cross-contamination.
-    - Quality gate fallback: Never silently returns 0 shapes when a non-degenerate face was detected.
+    - Per-face quality gate & salvage decisions:
+      * Valid face -> emitted (7 skeletons).
+      * Truly degenerate face (collapse / < 15 points) -> dropped.
+      * Salvageable invalid face -> if fallback_on_corrupt, emitted as editable draft (up to max_salvage).
+      * Salvaging decisions are evaluated per face, so a valid face in the frame does not cause
+        a salvageable face in the same frame to be dropped.
 
     Args:
         faces: Sequence of VF50Face instances.
@@ -1754,8 +1584,9 @@ def faces_to_cvat_skeletons(
         base_group_id: Starting group_id for instance grouping.
         filter_corrupt: If True, filters out anatomically collapsed or corrupted faces.
         as_components: Deprecated, always True. Kept for backward compatibility.
-        fallback_on_corrupt: If True, when strict quality gate rejects all detected faces,
-                             salvages up to 5 highest-scoring candidates to prevent silent drop in CVAT.
+        fallback_on_corrupt: If True, salvages candidate faces failing strict quality gate
+                             (up to max_salvage) as editable drafts to prevent silent drop in CVAT.
+        max_salvage: Maximum number of salvageable faces to emit as editable drafts (default: 5).
 
     Returns:
         List of CVAT skeleton shape dictionaries.
@@ -1763,53 +1594,83 @@ def faces_to_cvat_skeletons(
     if not faces:
         return []
 
+    # Step 1: Evaluate each face individually
+    evaluated_faces: List[Tuple[VF50Face, Optional[VF50QualityReport], str]] = []
+    salvageable_indices: List[int] = []
+
+    for idx, face in enumerate(faces):
+        if not filter_corrupt:
+            evaluated_faces.append((face, None, "VALID"))
+            continue
+
+        report = assess_vf50_quality(face, width=width, height=height)
+        if report.is_valid:
+            evaluated_faces.append((face, report, "VALID"))
+        elif is_vf50_face_degenerate(report):
+            logger.warning(
+                f"Dropped truly degenerate face (face id={face.face_id}): reasons={report.reasons}"
+            )
+            evaluated_faces.append((face, report, "DEGENERATE"))
+        else:
+            # Face failed strict quality check but is not degenerate
+            if fallback_on_corrupt:
+                evaluated_faces.append((face, report, "SALVAGEABLE"))
+                salvageable_indices.append(idx)
+            else:
+                logger.warning(
+                    f"Dropped corrupt face under strict mode (face id={face.face_id}): reasons={report.reasons}"
+                )
+                evaluated_faces.append((face, report, "CORRUPT_DROPPED"))
+
+    # Step 2: If salvageable faces exceed max_salvage cap, select highest-scoring candidates
+    allowed_salvage_set: Set[int] = set()
+    if salvageable_indices:
+        if len(salvageable_indices) > max_salvage:
+            sorted_indices = sorted(
+                salvageable_indices,
+                key=lambda i: (
+                    evaluated_faces[i][1].score if evaluated_faces[i][1] else 0.0,
+                    evaluated_faces[i][0].confidence,
+                ),
+                reverse=True,
+            )
+            allowed_salvage_set = set(sorted_indices[:max_salvage])
+            for i in sorted_indices[max_salvage:]:
+                f_drop, r_drop, _ = evaluated_faces[i]
+                logger.info(
+                    f"Dropped salvageable face (id={f_drop.face_id}, "
+                    f"score={r_drop.score if r_drop else 0.0:.2f}) exceeding max_salvage cap ({max_salvage})."
+                )
+        else:
+            allowed_salvage_set = set(salvageable_indices)
+
+    # Step 3: Emit component skeletons with unique, sequential group_id per face
     skeletons: List[Dict[str, Any]] = []
     curr_group_id = int(base_group_id)
-    rejected_faces: List[Tuple[VF50Face, VF50QualityReport]] = []
 
-    for face in faces:
-        if filter_corrupt:
-            report = assess_vf50_quality(face, width=width, height=height)
-            if not report.is_valid:
-                logger.warning(
-                    f"Dropped corrupted face (face id={face.face_id}): reasons={report.reasons}"
-                )
-                rejected_faces.append((face, report))
-                continue
-
-        # Always emit 7-component skeletons (legacy single-skeleton path removed)
-        face_skels = face.to_cvat_component_skeletons(
-            width=width,
-            height=height,
-            group_id=curr_group_id,
-        )
-        skeletons.extend(face_skels)
-
-        curr_group_id += 1
-
-    # Safe Fallback: If strict quality gate dropped all detected faces, prevent silent 0-shape drop
-    if not skeletons and rejected_faces and fallback_on_corrupt:
-        salvageable = [
-            (f, r) for f, r in rejected_faces
-            if r.active_count >= 15 and not any("degenerate_collapse" in reas for reas in r.reasons)
-        ]
-        if salvageable:
-            salvageable.sort(key=lambda item: item[1].score, reverse=True)
-            max_fallback = min(len(salvageable), 5)
-            for salvaged_face, salvaged_report in salvageable[:max_fallback]:
-                logger.info(
-                    f"Quality gate fallback: salvaging face (id={salvaged_face.face_id}, "
-                    f"score={salvaged_report.score:.2f}, "
-                    f"active={salvaged_report.active_count}/50) to prevent silent drop."
-                )
-                # Always emit 7-component skeletons (legacy single-skeleton path removed)
-                face_skels = salvaged_face.to_cvat_component_skeletons(
-                    width=width,
-                    height=height,
-                    group_id=curr_group_id,
-                )
-                skeletons.extend(face_skels)
-                curr_group_id += 1
+    for idx, (face, report, status) in enumerate(evaluated_faces):
+        if status == "VALID":
+            face_skels = face.to_cvat_component_skeletons(
+                width=width,
+                height=height,
+                group_id=curr_group_id,
+            )
+            skeletons.extend(face_skels)
+            curr_group_id += 1
+        elif status == "SALVAGEABLE" and idx in allowed_salvage_set:
+            score_str = f"{report.score:.2f}" if report else "N/A"
+            act_str = f"{report.active_count}" if report else "N/A"
+            logger.info(
+                f"Quality gate fallback: salvaging face (id={face.face_id}, "
+                f"score={score_str}, active={act_str}/50) as editable draft."
+            )
+            face_skels = face.to_cvat_component_skeletons(
+                width=width,
+                height=height,
+                group_id=curr_group_id,
+            )
+            skeletons.extend(face_skels)
+            curr_group_id += 1
 
     return skeletons
 
@@ -1877,6 +1738,14 @@ def parse_vf50_response(
         if isinstance(box_2d, (list, tuple)) and len(box_2d) == 4:
             try:
                 box_2d = [int(v) for v in box_2d]
+                if crop_box is not None and len(crop_box) == 4:
+                    c_ymin, c_xmin, c_ymax, c_xmax = float(crop_box[0]), float(crop_box[1]), float(crop_box[2]), float(crop_box[3])
+                    box_2d = [
+                        int(round(c_ymin + (box_2d[0] / 1000.0) * (c_ymax - c_ymin))),
+                        int(round(c_xmin + (box_2d[1] / 1000.0) * (c_xmax - c_xmin))),
+                        int(round(c_ymin + (box_2d[2] / 1000.0) * (c_ymax - c_ymin))),
+                        int(round(c_xmin + (box_2d[3] / 1000.0) * (c_xmax - c_xmin))),
+                    ]
             except (ValueError, TypeError):
                 box_2d = None
         else:
@@ -2037,29 +1906,68 @@ def _parse_sequence_vf50_landmark(
 # SECTION 10 & PROMPT GENERATION
 # ==============================================================================
 
+VF50_OCCLUSION_INSTRUCTIONS: str = (
+    "Physical Occlusion vs Optical Blur & Shadows (Confidence != Occlusion!):\n"
+    "- Physical Occlusion (visibility = 1):\n"
+    "  * A facial landmark is physically obstructed by an opaque physical object:\n"
+    "    - Hair / bangs covering eyebrow (longmaytrai / longmayphai) -> visibility = 1 (occluded).\n"
+    "    - Hand, fingers, or arm covering mouth or chin (moingoai / moitrong) -> visibility = 1 (occluded).\n"
+    "    - Medical mask, cloth mask, or scarf covering mouth / nose -> visibility = 1 (occluded).\n"
+    "    - Eyeglasses frame, dark sunglasses lens, or temple arm covering eye contour or eyebrow -> visibility = 1 (occluded).\n"
+    "    - Microphone, cup, or telephone held against face -> visibility = 1 (occluded).\n"
+    "  * For physically occluded landmarks, estimate the anatomically true location and set visibility = 1.\n"
+    "- Optical Degradation / Blur, Shadows & Low Lighting (visibility = 2):\n"
+    "  * If a facial feature is within direct optical line of sight but degraded by motion blur, camera defocus, "
+    "shadows (e.g. from vehicle cabin, cap visor, nose shadow), sensor noise, or low illumination, it is STILL VISIBLE: set visibility = 2.\n"
+    "  * Express visual uncertainty through a lower 'confidence' score (e.g. 0.35 - 0.70), NOT by setting visibility = 1. "
+    "Optical blur, shadow, and low light are NOT physical occlusion; Confidence != Occlusion!\n"
+    "- Outside Frame (visibility = 0):\n"
+    "  * Landmark is outside the image boundary or cropped out -> set visibility = 0."
+)
+
+
+def generate_vf50_canonical_descriptions() -> str:
+    """Generate authoritative 7-component landmark descriptions derived directly from week2_vf50 schema.
+
+    Single Source of Truth guarantee: Both global prompt and crop refinement prompt
+    share the exact same canonical landmark descriptions generated from schema data.
+    """
+    from core.week2_schema import load_vf50
+    schema = load_vf50()
+    lines = []
+    for idx, comp in enumerate(schema.components, start=1):
+        desc = comp.description if getattr(comp, "description", None) else ""
+        lines.append(f"  {idx}. {comp.name} (points {comp.start_id}..{comp.end_id}): {desc}")
+    return "\n".join(lines)
+
+
 def build_vf50_prompt() -> str:
     """Generate strict, deterministic prompt for 9Router vision inference for VF-50 Face Landmarks."""
+    desc_block = generate_vf50_canonical_descriptions()
     return (
         "Perform facial landmark estimation conforming to the VinFast VF-50 schema on this image.\n"
         "Guidelines:\n"
         "- Exactly 50 landmarks, partitioned into 7 components:\n"
-        "  1. longmaytrai (points 0..4): left eyebrow (viewer perspective)\n"
-        "  2. longmayphai (points 5..9): right eyebrow (viewer perspective)\n"
-        "  3. songmui (points 10..13): nasal bridge\n"
-        "  4. mattrai (points 14..21): left eye closed contour\n"
-        "  5. matphai (points 22..29): right eye closed contour\n"
-        "  6. moingoai (points 30..41): outer lip closed contour\n"
-        "  7. moitrong (points 42..49): inner lip closed contour\n"
+        f"{desc_block}\n"
+        "\n"
+        "Critical Anatomical Constraints:\n"
         "- Viewer perspective: features on the left side of the image are 'trai' (x_left < x_right).\n"
+        "- Eyebrow ordering: longmaytrai proceeds lateral-to-medial (0->4); longmayphai proceeds medial-to-lateral (5->9).\n"
+        "- Eyelid vertical order: upper eyelid points MUST have y <= lower eyelid points (upper eyelid is above lower eyelid).\n"
+        "- Eye corners: mattrai starts at outer corner (14) with inner corner at (18); matphai starts at inner corner (22) with outer corner at (26).\n"
+        "- Nasal bridge point 13 is the base of the nose bridge above nostrils, NOT the nasal tip.\n"
+        "- Mouth topology: inner lip (moitrong) MUST be completely enclosed within outer lip (moingoai). If mouth is closed, inner lip seam coincides with mouth line.\n"
         "- Coordinate convention:\n"
         "  * Normalize all coordinates to integers in [0, 1000] relative to image width and height.\n"
         "  * Visibility flag: 0=outside image frame, 1=occluded, 2=visible.\n"
+        f"{VF50_OCCLUSION_INSTRUCTIONS}\n"
         "- Output MUST be strict, valid JSON with no extraneous text:\n"
         "{\n"
         '  "faces": [\n'
         "    {\n"
         '      "id": 1,\n'
         '      "confidence": 0.98,\n'
+        '      "box_2d": [ymin, xmin, ymax, xmax],\n'
         '      "landmarks": [\n'
         '        {"id": 0, "point": [x, y], "visibility": 2, "confidence": 0.99},\n'
         '        {"id": 1, "point": [x, y], "visibility": 2, "confidence": 0.99},\n'
@@ -2078,28 +1986,26 @@ def build_vf50_crop_prompt() -> str:
 
     Optimized for high-resolution single-face crops with strict anatomical topological guidance:
     - Exactly 50 landmarks conforming to VinFast VF-50 schema across 7 components.
-    - Explicit ordering constraints (medial-to-lateral eyebrows, non-inverted eyelids, contained inner lips).
+    - Explicit ordering constraints (lateral-to-medial left eyebrow 0->4, medial-to-lateral right eyebrow 5->9,
+      outer-to-inner left eye 14->18, inner-to-outer right eye 22->26, non-inverted eyelids, contained inner lips).
     - Normalized to [0, 1000] relative to the cropped patch.
     """
+    desc_block = generate_vf50_canonical_descriptions()
     return (
         "Perform fine-grained facial landmark estimation on this cropped human face adhering to the VinFast VF-50 schema.\n"
         "This image is a close-up crop containing a single face. Localize all 50 landmarks with high precision across all 7 components:\n"
-        "  1. longmaytrai (points 0..4): left eyebrow from medial/inner (0) to lateral/outer (4) (viewer perspective)\n"
-        "  2. longmayphai (points 5..9): right eyebrow from medial/inner (5) to lateral/outer (9) (viewer perspective)\n"
-        "  3. songmui (points 10..13): nasal bridge descending vertically from nasion (10) to nasal tip (13)\n"
-        "  4. mattrai (points 14..21): left eye contour closed loop starting at inner corner (14), upper eyelid (15..17), outer corner (18), lower eyelid (19..21)\n"
-        "  5. matphai (points 22..29): right eye contour closed loop starting at inner corner (22), upper eyelid (23..25), outer corner (26), lower eyelid (27..29)\n"
-        "  6. moingoai (points 30..41): outer lip contour closed loop starting at left corner (30), upper lip contour (31..35), right corner (36), lower lip contour (37..41)\n"
-        "  7. moitrong (points 42..49): inner lip contour closed loop starting at left corner (42), upper boundary (43..45), right corner (46), lower boundary (47..49)\n"
+        f"{desc_block}\n"
         "\n"
         "Critical Anatomical Constraints:\n"
         "- Viewer perspective: features on the image left side are 'trai' (x_left < x_right).\n"
+        "- Eyebrow ordering: longmaytrai proceeds lateral-to-medial (0->4); longmayphai proceeds medial-to-lateral (5->9).\n"
         "- Eyelid vertical order: upper eyelid points MUST have y <= lower eyelid points (upper eyelid is above lower eyelid).\n"
-        "- Eyebrow ordering: points must progress monotonically from center outwards.\n"
+        "- Eye corners: mattrai starts at outer corner (14) with inner corner at (18); matphai starts at inner corner (22) with outer corner at (26).\n"
+        "- Nasal bridge point 13 is the base of the nose bridge above nostrils, NOT the nasal tip.\n"
         "- Mouth topology: inner lip (moitrong) MUST be completely enclosed within outer lip (moingoai). If mouth is closed, inner lip seam coincides with mouth line.\n"
         "- Coordinates MUST be normalized to integers in [0, 1000] relative to this cropped image patch [width=1000, height=1000].\n"
         "- Visibility flag: 0=outside frame, 1=occluded, 2=visible.\n"
-        "\n"
+        f"{VF50_OCCLUSION_INSTRUCTIONS}\n"
         "Output MUST be strict, valid JSON with no extra commentary:\n"
         "{\n"
         '  "faces": [\n'
@@ -2120,36 +2026,37 @@ def build_vf50_crop_prompt() -> str:
 def build_cvat_vf50_spec() -> List[Dict[str, Any]]:
     """Build CVAT function.yaml annotations spec items for the 7 VF-50 component skeletons.
 
+    Derives directly from canonical load_vf50() schema.
     Conforms to VinFast Guideline Section 5.3 & Appendix 10 (Raw JSON schema):
     - Exactly 7 skeleton labels: longmaytrai, longmayphai, songmui, mattrai, matphai, moingoai, moitrong.
     - Each label has type "skeleton", attributes [].
     - Each sublabel has name matching point ID ("0".."49"), type "points", attributes [].
     - SVG templates with circles (nodes) and lines (edges).
     """
+    from core.week2_schema import load_vf50
+    schema = load_vf50()
     specs: List[Dict[str, Any]] = []
 
-    for idx, comp_name in enumerate(VF50_COMPONENT_NAMES, start=1):
-        cfg = VF50_COMPONENT_CONFIG[comp_name]
-        edges = VF50_EDGES_BY_COMPONENT[comp_name]
-        node_offset = cfg["start"]
+    for idx, comp in enumerate(schema.components, start=1):
+        node_offset = comp.start_id
 
         sublabels = [
-            {"id": pt_id - node_offset + 1, "name": str(pt_id), "type": "points", "attributes": []}
-            for pt_id in range(cfg["start"], cfg["end"] + 1)
+            {"id": kp.id - node_offset + 1, "name": kp.numeric_name, "type": "points", "attributes": []}
+            for kp in comp.keypoints
         ]
 
         # Generate SVG template with anatomically-positioned coordinates
         svg_circles = []
-        for pt_id in range(cfg["start"], cfg["end"] + 1):
-            n_id = pt_id - node_offset + 1
-            cx, cy = VF50_SVG_COORDS[pt_id]
+        for kp in comp.keypoints:
+            n_id = kp.id - node_offset + 1
+            cx, cy = VF50_SVG_COORDS[kp.id]
             svg_circles.append(
                 f'<circle cx="{cx}" cy="{cy}" r="3" data-type="element node" '
-                f'data-element-id="{n_id}" data-node-id="{n_id}" data-label-name="{pt_id}"/>'
+                f'data-element-id="{n_id}" data-node-id="{n_id}" data-label-name="{kp.id}"/>'
             )
 
         svg_lines = []
-        for p1, p2 in edges:
+        for p1, p2 in comp.edges:
             n1 = p1 - node_offset + 1
             n2 = p2 - node_offset + 1
             x1, y1 = VF50_SVG_COORDS[p1]
@@ -2163,7 +2070,7 @@ def build_cvat_vf50_spec() -> List[Dict[str, Any]]:
 
         spec_item = {
             "id": idx,
-            "name": comp_name,
+            "name": comp.name,
             "type": "skeleton",
             "attributes": [],
             "sublabels": sublabels,

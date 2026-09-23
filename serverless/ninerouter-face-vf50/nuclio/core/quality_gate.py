@@ -15,156 +15,85 @@ import math
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 
+try:
+    from core.week2_schema import (
+        load_pose17,
+        load_vf50,
+        pose17_coco_keypoints,
+        pose17_edges_as_coco_names,
+        pose17_paired_keypoints,
+        pose17_rigid_paired_keypoints,
+        pose17_articulated_paired_keypoints,
+        vf50_component_point_counts,
+        vf50_eyelid_opposing_pairs,
+    )
+    _HAS_WEEK2_SCHEMA = True
+except ImportError:
+    _HAS_WEEK2_SCHEMA = False
+
+
 # ==============================================================================
-# 1. CONSTANTS & CANONICAL SCHEMAS
+# 1. CONSTANTS & CANONICAL SCHEMAS (Derived from canonical YAML loaders)
 # ==============================================================================
 
 LATERALITY_SUBJECT: str = "subject"  # Anatomical left/right of the person being viewed
 LATERALITY_VIEWER: str = "viewer"    # Image/screen left/right (viewer's left/right)
 
-# Canonical 17 COCO keypoints in indexed anatomical order
-POSE17_KEYPOINTS: Tuple[str, ...] = (
-    "nose",             # 0
-    "left_eye",         # 1
-    "right_eye",        # 2
-    "left_ear",         # 3
-    "right_ear",        # 4
-    "left_shoulder",    # 5
-    "right_shoulder",   # 6
-    "left_elbow",       # 7
-    "right_elbow",      # 8
-    "left_wrist",       # 9
-    "right_wrist",      # 10
-    "left_hip",         # 11
-    "right_hip",        # 12
-    "left_knee",        # 13
-    "right_knee",       # 14
-    "left_ankle",       # 15
-    "right_ankle",      # 16
-)
-POSE17_KEYPOINTS_SET: FrozenSet[str] = frozenset(POSE17_KEYPOINTS)
+if _HAS_WEEK2_SCHEMA:
+    _pose17 = load_pose17()
 
-# Symmetric left/right pairs for Pose 17 laterality validation
-POSE17_PAIRED_KEYPOINTS: Tuple[Tuple[str, str], ...] = (
-    ("left_eye", "right_eye"),
-    ("left_ear", "right_ear"),
-    ("left_shoulder", "right_shoulder"),
-    ("left_elbow", "right_elbow"),
-    ("left_wrist", "right_wrist"),
-    ("left_hip", "right_hip"),
-    ("left_knee", "right_knee"),
-    ("left_ankle", "right_ankle"),
-)
+    # Canonical 17 keypoints in indexed VinFast order derived from load_pose17()
+    POSE17_KEYPOINTS: Tuple[str, ...] = pose17_coco_keypoints()
+    POSE17_KEYPOINTS_SET: FrozenSet[str] = frozenset(POSE17_KEYPOINTS)
 
-# Rigid axial/head anchors that determine overall body laterality
-# Inversion of rigid anchors for a frontal subject indicates genuine laterality error.
-POSE17_RIGID_PAIRED_KEYPOINTS: Tuple[Tuple[str, str], ...] = (
-    ("left_eye", "right_eye"),
-    ("left_ear", "right_ear"),
-    ("left_shoulder", "right_shoulder"),
-    ("left_hip", "right_hip"),
-)
+    # Symmetric left/right pairs for Pose 17 laterality validation
+    POSE17_PAIRED_KEYPOINTS: Tuple[Tuple[str, str], ...] = pose17_paired_keypoints()
 
-# Articulated appendicular limb pairs that articulate in 3D and cross naturally (arms/legs crossing)
-# Crossing of distal limbs is an anatomical soft warning, NOT a fatal invalidation.
-POSE17_ARTICULATED_PAIRED_KEYPOINTS: Tuple[Tuple[str, str], ...] = (
-    ("left_elbow", "right_elbow"),
-    ("left_wrist", "right_wrist"),
-    ("left_knee", "right_knee"),
-    ("left_ankle", "right_ankle"),
-)
+    # Rigid axial/head anchors that determine overall body laterality
+    # Inversion of rigid anchors for a frontal subject indicates genuine laterality error.
+    POSE17_RIGID_PAIRED_KEYPOINTS: Tuple[Tuple[str, str], ...] = pose17_rigid_paired_keypoints()
 
-# VinFast Guideline (output_pose17_guideline.txt) 1..17 index to canonical name mapping
-VINFAST_POSE17_INDEX_TO_NAME: Dict[int, str] = {
-    1: "nose",
-    2: "right_eye",
-    3: "left_eye",
-    4: "right_ear",
-    5: "left_ear",
-    6: "right_shoulder",
-    7: "left_shoulder",
-    8: "right_elbow",
-    9: "left_elbow",
-    10: "right_wrist",
-    11: "left_wrist",
-    12: "right_hip",
-    13: "left_hip",
-    14: "right_knee",
-    15: "left_knee",
-    16: "right_ankle",
-    17: "left_ankle",
-}
+    # Articulated appendicular limb pairs that articulate in 3D and cross naturally (arms/legs crossing)
+    # Crossing of distal limbs is an anatomical soft warning, NOT a fatal invalidation.
+    POSE17_ARTICULATED_PAIRED_KEYPOINTS: Tuple[Tuple[str, str], ...] = pose17_articulated_paired_keypoints()
 
-# Canonical bone connectivity graph for Pose 17
-# Matches config/week2_pose17.yaml authoritative edge set (18 edges including ear-to-shoulder)
-POSE17_SKELETON_EDGES: Tuple[Tuple[str, str], ...] = (
-    ("nose", "left_eye"),
-    ("nose", "right_eye"),
-    ("left_eye", "left_ear"),
-    ("right_eye", "right_ear"),
-    # Ear-to-shoulder (per VinFast Pose17 YAML spec, edges 4→6 and 5→7)
-    ("right_ear", "right_shoulder"),
-    ("left_ear", "left_shoulder"),
-    ("left_shoulder", "right_shoulder"),
-    ("left_shoulder", "left_hip"),
-    ("right_shoulder", "right_hip"),
-    ("left_hip", "right_hip"),
-    ("left_shoulder", "left_elbow"),
-    ("left_elbow", "left_wrist"),
-    ("right_shoulder", "right_elbow"),
-    ("right_elbow", "right_wrist"),
-    ("left_hip", "left_knee"),
-    ("left_knee", "left_ankle"),
-    ("right_hip", "right_knee"),
-    ("right_knee", "right_ankle"),
-)
+    # VinFast Guideline (output_pose17_guideline.txt) 1..17 index to canonical name mapping
+    VINFAST_POSE17_INDEX_TO_NAME: Dict[int, str] = dict(_pose17.id_to_coco_name)
 
-# VF-50 Canonical Component Names & Point Counts
-# Authoritative VinFast Week-2 specification (output_vf50_guideline.txt)
-VF50_COMPONENT_NAMES: Tuple[str, ...] = (
-    "longmaytrai",  # 0..4 (5 pts, open)
-    "longmayphai",  # 5..9 (5 pts, open)
-    "songmui",      # 10..13 (4 pts, open)
-    "mattrai",      # 14..21 (8 pts, closed loop)
-    "matphai",      # 22..29 (8 pts, closed loop)
-    "moingoai",     # 30..41 (12 pts, closed loop)
-    "moitrong",     # 42..49 (8 pts, closed loop)
-)
+    # Canonical bone connectivity graph for Pose 17
+    # Matches config/week2_pose17.yaml authoritative edge set (18 edges including ear-to-shoulder)
+    POSE17_SKELETON_EDGES: Tuple[Tuple[str, str], ...] = pose17_edges_as_coco_names()
 
-VF50_COMPONENT_COUNTS: Dict[str, int] = {
-    "longmaytrai": 5,
-    "longmayphai": 5,
-    "songmui": 4,
-    "mattrai": 8,
-    "matphai": 8,
-    "moingoai": 12,
-    "moitrong": 8,
-}
-VF50_EXPECTED_TOTAL_POINTS: int = 50
+    _vf50 = load_vf50()
 
-# Index ranges for components in continuous 0..49 indexing
-VF50_COMPONENT_RANGES: Dict[str, Tuple[int, int]] = {
-    "longmaytrai": (0, 5),
-    "longmayphai": (5, 10),
-    "songmui": (10, 14),
-    "mattrai": (14, 22),
-    "matphai": (22, 30),
-    "moingoai": (30, 42),
-    "moitrong": (42, 50),
-}
+    # VF-50 Canonical Component Names & Point Counts derived from load_vf50()
+    # Authoritative VinFast Week-2 specification
+    VF50_COMPONENT_NAMES: Tuple[str, ...] = _vf50.component_names
+    VF50_COMPONENT_COUNTS: Dict[str, int] = vf50_component_point_counts()
+    VF50_EXPECTED_TOTAL_POINTS: int = _vf50.total_points
 
-# Opposing eyelid pairs (upper eyelid index, lower eyelid index) for VF-50
-# Rule: y(upper) <= y(lower) (remember y increases downwards)
-VF50_EYELID_OPPOSING_PAIRS: Tuple[Tuple[int, int], ...] = (
-    # mattrai: upper 15, 16, 17 vs lower 21, 20, 19
-    (15, 21),
-    (16, 20),
-    (17, 19),
-    # matphai: upper 23, 24, 25 vs lower 29, 28, 27
-    (23, 29),
-    (24, 28),
-    (25, 27),
-)
+    # Index ranges for components in continuous 0..49 indexing: [start, end + 1)
+    VF50_COMPONENT_RANGES: Dict[str, Tuple[int, int]] = {
+        c.name: (c.start_id, c.end_id + 1) for c in _vf50.components
+    }
+
+    # Opposing eyelid pairs (upper eyelid index, lower eyelid index) for VF-50
+    # Rule: y(upper) <= y(lower) (remember y increases downwards)
+    VF50_EYELID_OPPOSING_PAIRS: Tuple[Tuple[int, int], ...] = vf50_eyelid_opposing_pairs()
+else:
+    # Graceful fallbacks for isolated 3-detector serverless targets where Week 2 schemas are omitted
+    POSE17_KEYPOINTS = ()
+    POSE17_KEYPOINTS_SET = frozenset()
+    POSE17_PAIRED_KEYPOINTS = ()
+    POSE17_RIGID_PAIRED_KEYPOINTS = ()
+    POSE17_ARTICULATED_PAIRED_KEYPOINTS = ()
+    VINFAST_POSE17_INDEX_TO_NAME = {}
+    POSE17_SKELETON_EDGES = ()
+    VF50_COMPONENT_NAMES = ()
+    VF50_COMPONENT_COUNTS = {}
+    VF50_EXPECTED_TOTAL_POINTS = 50
+    VF50_COMPONENT_RANGES = {}
+    VF50_EYELID_OPPOSING_PAIRS = ()
 
 
 # ==============================================================================
@@ -1126,6 +1055,13 @@ def assess_pose17_quality(
 
     torso_scale: Optional[float] = max(torso_scales) if torso_scales else None
 
+    arm_edges = {
+        ("left_shoulder", "left_elbow"),
+        ("left_elbow", "left_wrist"),
+        ("right_shoulder", "right_elbow"),
+        ("right_elbow", "right_wrist"),
+    }
+
     for u_name, v_name in POSE17_SKELETON_EDGES:
         u_pt = pts.get(u_name)
         v_pt = pts.get(v_name)
@@ -1133,23 +1069,83 @@ def assess_pose17_quality(
             continue
         bone_len = math.hypot(v_pt[0] - u_pt[0], v_pt[1] - u_pt[1])
         bone_tag = f"{u_name}-{v_name}"
+        is_arm_bone = (u_name, v_name) in arm_edges or (v_name, u_name) in arm_edges
 
         # Segment length exceeding 55% of image size (implausible spatial jump)
         if bone_len > 550.0:
             score -= 0.25
-            suspect_bones.append(bone_tag)
+            if bone_tag not in suspect_bones:
+                suspect_bones.append(bone_tag)
             if bone_len > 720.0:
                 hard_errors.append(f"excessive_bone_length: {bone_tag} len={bone_len:.1f}")
             else:
                 soft_warnings.append(f"excessive_bone_length: {bone_tag} len={bone_len:.1f}")
             reasons.append(f"excessive_bone_length: {bone_tag} len={bone_len:.1f}")
-
-        # Segment length exceeding 4.5x adaptive torso scale (relaxed for perspective & seated poses)
-        if torso_scale is not None and torso_scale > 15.0 and bone_len > 4.5 * torso_scale:
+        elif is_arm_bone and bone_len > 450.0:
+            # Forearm or upper arm spanning > 45% of image indicates floating/detached limb in cabin
             score -= 0.20
-            suspect_bones.append(bone_tag)
-            soft_warnings.append(f"disproportionate_bone: {bone_tag} ratio={bone_len / torso_scale:.2f}")
-            reasons.append(f"disproportionate_bone: {bone_tag} ratio={bone_len / torso_scale:.2f}")
+            if bone_tag not in suspect_bones:
+                suspect_bones.append(bone_tag)
+            soft_warnings.append(f"excessive_arm_length: {bone_tag} len={bone_len:.1f}")
+            reasons.append(f"excessive_arm_length: {bone_tag} len={bone_len:.1f}")
+
+        # Segment length exceeding adaptive torso scale
+        if torso_scale is not None and torso_scale > 15.0:
+            if is_arm_bone and bone_len > 2.2 * torso_scale:
+                score -= 0.20
+                if bone_tag not in suspect_bones:
+                    suspect_bones.append(bone_tag)
+                soft_warnings.append(f"disproportionate_arm_bone: {bone_tag} ratio={bone_len / torso_scale:.2f}")
+                reasons.append(f"disproportionate_arm_bone: {bone_tag} ratio={bone_len / torso_scale:.2f}")
+            elif bone_len > 4.5 * torso_scale:
+                score -= 0.20
+                if bone_tag not in suspect_bones:
+                    suspect_bones.append(bone_tag)
+                soft_warnings.append(f"disproportionate_bone: {bone_tag} ratio={bone_len / torso_scale:.2f}")
+                reasons.append(f"disproportionate_bone: {bone_tag} ratio={bone_len / torso_scale:.2f}")
+
+    # 9. Arm proportion consistency check (upper arm vs forearm) for detached/floating joints
+    le = pts.get("left_elbow")
+    lw = pts.get("left_wrist")
+    if ls and le and lw and ls[2] > 0 and le[2] > 0 and lw[2] > 0:
+        l_upper = math.hypot(le[0] - ls[0], le[1] - ls[1])
+        l_fore = math.hypot(lw[0] - le[0], lw[1] - le[1])
+        if l_upper > 15.0 and l_fore > 15.0:
+            if l_fore > 2.4 * l_upper:
+                tag = "left_elbow-left_wrist"
+                if tag not in suspect_bones:
+                    suspect_bones.append(tag)
+                score -= 0.15
+                soft_warnings.append(f"disproportionate_forearm: left forearm ({l_fore:.1f}) > 2.4x upper arm ({l_upper:.1f})")
+                reasons.append(f"disproportionate_forearm: left forearm > 2.4x upper arm (floating wrist)")
+            elif l_upper > 2.8 * l_fore:
+                tag = "left_shoulder-left_elbow"
+                if tag not in suspect_bones:
+                    suspect_bones.append(tag)
+                score -= 0.15
+                soft_warnings.append(f"disproportionate_upper_arm: left upper arm ({l_upper:.1f}) > 2.8x forearm ({l_fore:.1f})")
+                reasons.append(f"disproportionate_upper_arm: left upper arm > 2.8x forearm (floating elbow)")
+
+    re = pts.get("right_elbow")
+    rw = pts.get("right_wrist")
+    if rs and re and rw and rs[2] > 0 and re[2] > 0 and rw[2] > 0:
+        r_upper = math.hypot(re[0] - rs[0], re[1] - rs[1])
+        r_fore = math.hypot(rw[0] - re[0], rw[1] - re[1])
+        if r_upper > 15.0 and r_fore > 15.0:
+            if r_fore > 2.4 * r_upper:
+                tag = "right_elbow-right_wrist"
+                if tag not in suspect_bones:
+                    suspect_bones.append(tag)
+                score -= 0.15
+                soft_warnings.append(f"disproportionate_forearm: right forearm ({r_fore:.1f}) > 2.4x upper arm ({r_upper:.1f})")
+                reasons.append(f"disproportionate_forearm: right forearm > 2.4x upper arm (floating wrist)")
+            elif r_upper > 2.8 * r_fore:
+                tag = "right_shoulder-right_elbow"
+                if tag not in suspect_bones:
+                    suspect_bones.append(tag)
+                score -= 0.15
+                soft_warnings.append(f"disproportionate_upper_arm: right upper arm ({r_upper:.1f}) > 2.8x forearm ({r_fore:.1f})")
+                reasons.append(f"disproportionate_upper_arm: right upper arm > 2.8x forearm (floating elbow)")
 
     score = max(0.0, min(1.0, score))
     is_valid = len(hard_errors) == 0 and score >= 0.35 and not axis_swapped

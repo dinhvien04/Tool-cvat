@@ -39,28 +39,28 @@ class TestKeypointTopology:
         assert len(POSE17_KEYPOINTS_SET) == 17
         assert len(set(POSE17_KEYPOINTS)) == 17
 
-    def test_canonical_coco_ordering(self):
-        expected_coco_order = [
-            "nose",
-            "left_eye",
-            "right_eye",
-            "left_ear",
-            "right_ear",
-            "left_shoulder",
-            "right_shoulder",
-            "left_elbow",
-            "right_elbow",
-            "left_wrist",
-            "right_wrist",
-            "left_hip",
-            "right_hip",
-            "left_knee",
-            "right_knee",
-            "left_ankle",
-            "right_ankle",
+    def test_authoritative_vinfast_pose17_ordering(self):
+        expected_vinfast_order = [
+            "nose",            # 1
+            "right_eye",       # 2 (R Eye - even)
+            "left_eye",        # 3 (L Eye - odd)
+            "right_ear",       # 4
+            "left_ear",        # 5
+            "right_shoulder",  # 6
+            "left_shoulder",   # 7
+            "right_elbow",     # 8
+            "left_elbow",      # 9
+            "right_wrist",     # 10
+            "left_wrist",      # 11
+            "right_hip",       # 12
+            "left_hip",        # 13
+            "right_knee",      # 14
+            "left_knee",       # 15
+            "right_ankle",     # 16
+            "left_ankle",      # 17
         ]
-        assert list(POSE17_KEYPOINTS) == expected_coco_order
-        for idx, name in enumerate(expected_coco_order):
+        assert list(POSE17_KEYPOINTS) == expected_vinfast_order
+        for idx, name in enumerate(expected_vinfast_order):
             assert KEYPOINT_INDEX_MAP[name] == idx
 
     def test_skeleton_edges_connectivity(self):
@@ -256,14 +256,16 @@ class TestRemoteModelContractAndParser:
         assert p.get_keypoint("right_ankle").is_outside is True
 
     def test_parse_ordered_tuples_list(self):
-        # 17 keypoint tuples [x, y, visibility]
+        # 17 keypoint tuples [x, y, visibility] in VinFast order
+        # Index 15 = right_ankle (100 + 15*10 = 250), Index 16 = left_ankle (100 + 16*10 = 260)
         points_list = [[100 + i * 10, 200 + i * 20, 2] for i in range(17)]
         payload = [{"id": 1, "keypoints": points_list}]
         people = parse_pose17_response(payload)
         assert len(people) == 1
         p = people[0]
         assert p.get_keypoint("nose").x == 100.0
-        assert p.get_keypoint("right_ankle").x == 260.0
+        assert p.get_keypoint("right_ankle").x == 250.0
+        assert p.get_keypoint("left_ankle").x == 260.0
 
     def test_empty_and_corrupt_response_handling(self):
         assert parse_pose17_response("") == []
