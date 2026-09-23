@@ -624,6 +624,11 @@ class TestFeedbackRoundTripIntegration:
         f_db = FeedbackDatabase(db_path=db_file, examples_dir=ex_dir)
 
         client = NineRouterClient(base_url="http://127.0.0.1:20128")
+        monkeypatch.setattr(
+            client,
+            "get_vision_models",
+            lambda: [{"id": "ag/gemini-3.8-flash-high", "capabilities": {"vision": True}}],
+        )
 
         # ---------------------------------------------------------------------
         # Step 1: Initial AI Inference on Frame 0

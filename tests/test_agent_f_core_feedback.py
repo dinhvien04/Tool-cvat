@@ -447,6 +447,11 @@ class TestEndToEndServicePolicyModes:
 
     def test_annotate_image_rectangle_mask_mode(self, monkeypatch):
         client = NineRouterClient(base_url="http://127.0.0.1:20128")
+        monkeypatch.setattr(
+            client,
+            "get_vision_models",
+            lambda: [{"id": "ag/gemini-3.8-flash-high", "capabilities": {"vision": True}}],
+        )
 
         mock_resp = VisionResponse(
             content=json.dumps({
@@ -484,6 +489,11 @@ class TestEndToEndServicePolicyModes:
 
     def test_annotate_image_polygon_mask_mode(self, monkeypatch):
         client = NineRouterClient(base_url="http://127.0.0.1:20128")
+        monkeypatch.setattr(
+            client,
+            "get_vision_models",
+            lambda: [{"id": "ag/gemini-3.8-flash-high", "capabilities": {"vision": True}}],
+        )
 
         mock_resp = VisionResponse(
             content=json.dumps({
@@ -522,6 +532,11 @@ class TestEndToEndServicePolicyModes:
 
     def test_annotate_image_polyline_mode(self, monkeypatch):
         client = NineRouterClient(base_url="http://127.0.0.1:20128")
+        monkeypatch.setattr(
+            client,
+            "get_vision_models",
+            lambda: [{"id": "ag/gemini-3.8-flash-high", "capabilities": {"vision": True}}],
+        )
 
         mock_resp = VisionResponse(
             content=json.dumps({
