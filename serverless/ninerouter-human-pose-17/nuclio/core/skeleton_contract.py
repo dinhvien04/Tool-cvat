@@ -48,6 +48,7 @@ from core.week2_schema import (
     vf50_point_to_component,
     map_visibility_to_cvat,
     map_cvat_to_visibility,
+    normalize_visibility,
     VISIBILITY_OUTSIDE,
     VISIBILITY_OCCLUDED,
     VISIBILITY_VISIBLE,
@@ -656,6 +657,8 @@ def _parse_single_keypoint(name: str, data: Any) -> Optional[PoseKeypoint]:
             outside = bool(data.get("outside", False))
             occluded = bool(data.get("occluded", False))
             vis_val = map_cvat_to_visibility(outside, occluded)
+        else:
+            vis_val = normalize_visibility(vis_val, strict=False, default=VISIBILITY_VISIBLE)
 
         conf = float(data.get("confidence", 1.0))
         return PoseKeypoint(
@@ -679,7 +682,8 @@ def _parse_sequence_keypoint(name: str, seq: Sequence[Any]) -> Optional[PoseKeyp
     try:
         x = float(seq[0])
         y = float(seq[1])
-        vis = int(seq[2]) if len(seq) >= 3 else VISIBILITY_VISIBLE
+        raw_vis = seq[2] if len(seq) >= 3 else VISIBILITY_VISIBLE
+        vis = normalize_visibility(raw_vis, strict=False, default=VISIBILITY_VISIBLE)
         conf = float(seq[3]) if len(seq) >= 4 else 1.0
         return PoseKeypoint(
             name=name,
@@ -765,8 +769,9 @@ POSE17_OCCLUSION_INSTRUCTIONS: str = (
     "motion blur, camera defocus, dark cabin lighting, deep shadows, or sensor noise, it is STILL VISIBLE: set visibility = 2. "
     "Express visual uncertainty through a lower 'confidence' score (e.g. 0.35 - 0.70), NOT by setting visibility = 1. "
     "Optical blur is NOT occlusion; Confidence != Occlusion!\n"
-    "- Outside Frame (visibility = 0): Keypoints completely outside the camera's field of view, cropped out, or beyond image boundary.\n"
+    "- Outside Frame / Unlabelable (visibility = 0): Keypoints completely outside the camera's field of view, cropped out, or beyond image boundary.\n"
     "  * ANKLE or FOOT cut off below image border -> visibility = 0\n"
+    "  * Rule: Physical occlusion within frame & inferable -> visibility = 1. visibility = 0 is ONLY for points outside image frame / unlabelable.\n"
 )
 
 
@@ -819,7 +824,7 @@ def build_pose17_prompt(
         "Kinematic Chain & Cabin Constraints:\n"
         "- Enforce strict anatomical connectivity: shoulder -> elbow -> wrist, and hip -> knee -> ankle.\n"
         "- Wrists and elbows MUST attach to their corresponding limb; NEVER predict floating wrists or elbows in the cabin background, roof lining, or car seats.\n"
-        "- If a person is seated (e.g. driver or passenger) and lower limbs or hands are occluded behind steering wheel or seats, set visibility flag = 1 (occluded) or 0 (outside), do NOT hallucinate floating joints.\n"
+        "- If a person is seated (e.g. driver or passenger) and lower limbs or hands are physically occluded behind steering wheel, seat back, or dashboard within the frame, set visibility flag = 1 (occluded) at their estimated true anatomical location. Do NOT hallucinate floating joints. Set visibility flag = 0 (outside) ONLY if the keypoint is completely outside the image frame or beyond the field of view.\n"
         f"{POSE17_OCCLUSION_INSTRUCTIONS}"
         "Coordinate & Visibility Convention:\n"
         "- Normalize all keypoint (x, y) coordinates to integers in [0, 1000] range relative to image width and height.\n"
@@ -889,6 +894,198 @@ def build_pose17_crop_prompt(keypoints: Optional[Sequence[str]] = None) -> str:
         "  }\n"
         "}\n"
     )
+
+
+def reproject_crop_point(
+    x_crop: float,
+    y_crop: float,
+    crop_bbox: Sequence[Union[int, float]],
+    *,
+    orig_w: Optional[int] = None,
+    orig_h: Optional[int] = None,
+    crop_window_px: Optional[Tuple[int, int, int, int]] = None,
+) -> Tuple[float, float]:
+    """Reproject normalized point [0..1000] from crop coordinates to full image [0..1000] space.
+
+    Args:
+        x_crop: Horizontal coordinate in crop [0..1000].
+        y_crop: Vertical coordinate in crop [0..1000].
+        crop_bbox: Full-image normalized crop box [ymin, xmin, ymax, xmax] in [0..1000].
+        orig_w: Optional image width in pixels.
+        orig_h: Optional image height in pixels.
+        crop_window_px: Optional pixel crop window [px1, py1, px2, py2].
+
+    Returns:
+        Tuple of (norm_x, norm_y) clamped to [0.0, 1000.0] and rounded to 1 decimal place.
+    """
+    c_ymin, c_xmin, c_ymax, c_xmax = [float(v) for v in crop_bbox]
+    if (
+        crop_window_px is not None
+        and orig_w is not None
+        and orig_h is not None
+        and orig_w > 0
+        and orig_h > 0
+    ):
+        px1, py1, px2, py2 = crop_window_px
+        crop_w = max(1, px2 - px1)
+        crop_h = max(1, py2 - py1)
+        x_px = px1 + (float(x_crop) / 1000.0) * crop_w
+        y_px = py1 + (float(y_crop) / 1000.0) * crop_h
+        norm_x = max(0.0, min(1000.0, (x_px / float(orig_w)) * 1000.0))
+        norm_y = max(0.0, min(1000.0, (y_px / float(orig_h)) * 1000.0))
+    else:
+        crop_w_norm = max(0.0, c_xmax - c_xmin)
+        crop_h_norm = max(0.0, c_ymax - c_ymin)
+        norm_x = max(0.0, min(1000.0, c_xmin + (float(x_crop) / 1000.0) * crop_w_norm))
+        norm_y = max(0.0, min(1000.0, c_ymin + (float(y_crop) / 1000.0) * crop_h_norm))
+
+    return round(norm_x, 1), round(norm_y, 1)
+
+
+def merge_refined_keypoint(
+    name: str,
+    pass1_pt: Optional[Sequence[Any]],
+    pass2_pt: Optional[Sequence[Any]],
+    crop_bbox: Optional[Sequence[Union[int, float]]] = None,
+    *,
+    crop_box_norm: Optional[Sequence[Union[int, float]]] = None,
+    orig_w: Optional[int] = None,
+    orig_h: Optional[int] = None,
+    crop_window_px: Optional[Tuple[int, int, int, int]] = None,
+    pass2_is_reprojected: bool = False,
+    strict_vis: bool = False,
+) -> Optional[List[Any]]:
+    """Merge a single keypoint between Pass 1 global detection and Pass 2 crop refinement.
+
+    Implements the canonical 4-case visibility merge policy:
+      - CASE A: Pass 2 point is outside crop window (vis == 0), and Pass 1 coordinate
+        lies OUTSIDE the crop bounds (crop did not cover the full limb).
+        -> Retain Pass 1 detection if geometrically plausible.
+      - CASE B: Pass 2 says point is physically occluded but inferable (vis == 1).
+        -> Use Pass 2 vis=1 and refined coordinate.
+      - CASE C: Pass 2 says point cannot be labeled / outside full image (vis == 0),
+        and Pass 1 coordinate lies INSIDE the crop bounds (Pass 2 actually inspected this region).
+        -> Do NOT restore Pass 1! Respect Pass 2's determination (vis = 0).
+      - CASE D: Pass 2 response omitted the keypoint entirely (None, missing, invalid).
+        -> Fallback to Pass 1.
+      - Happy path: Pass 2 says point is clearly visible (vis == 2).
+        -> Use Pass 2 vis=2 and refined coordinate.
+
+    Args:
+        name: Canonical keypoint name (e.g. 'right_wrist').
+        pass1_pt: Pass 1 keypoint [x, y, (vis), (conf)] in full image normalized [0..1000] space.
+        pass2_pt: Pass 2 keypoint [x, y, (vis), (conf)]. In crop-relative [0..1000] space
+            (if pass2_is_reprojected=False) or full image [0..1000] space (if pass2_is_reprojected=True).
+        crop_bbox: Crop bounding box [ymin, xmin, ymax, xmax] in full-image normalized [0..1000] space.
+        crop_box_norm: Alias for crop_bbox.
+        orig_w: Optional full image width in pixels.
+        orig_h: Optional full image height in pixels.
+        crop_window_px: Optional crop window in full image pixels [px1, py1, px2, py2].
+        pass2_is_reprojected: If True, pass2_pt is already in full image [0..1000] space.
+        strict_vis: If True, enforce strict visibility normalization.
+
+    Returns:
+        Merged keypoint [norm_x, norm_y, vis] in full image [0..1000] space, or None.
+    """
+    effective_box = crop_bbox if crop_bbox is not None else crop_box_norm
+    if effective_box is None or len(effective_box) < 4:
+        raise ValueError("crop_bbox or crop_box_norm [ymin, xmin, ymax, xmax] must be provided")
+
+    c_ymin, c_xmin, c_ymax, c_xmax = [float(v) for v in effective_box[:4]]
+
+    # Parse Pass 1
+    has_p1 = False
+    p1_x, p1_y = 0.0, 0.0
+    p1_vis = VISIBILITY_OUTSIDE
+    if pass1_pt is not None and isinstance(pass1_pt, (list, tuple)) and len(pass1_pt) >= 2:
+        try:
+            p1_x = float(pass1_pt[0])
+            p1_y = float(pass1_pt[1])
+            raw_vis1 = pass1_pt[2] if len(pass1_pt) > 2 else VISIBILITY_VISIBLE
+            p1_vis = normalize_visibility(raw_vis1, strict=strict_vis, default=VISIBILITY_VISIBLE)
+            has_p1 = True
+        except (ValueError, TypeError):
+            if strict_vis:
+                raise
+            has_p1 = False
+
+    # Parse Pass 2
+    has_p2 = False
+    p2_x, p2_y = 0.0, 0.0
+    p2_vis = VISIBILITY_OUTSIDE
+    if pass2_pt is not None and isinstance(pass2_pt, (list, tuple)) and len(pass2_pt) >= 2:
+        try:
+            p2_x = float(pass2_pt[0])
+            p2_y = float(pass2_pt[1])
+            raw_vis2 = pass2_pt[2] if len(pass2_pt) > 2 else VISIBILITY_VISIBLE
+            if isinstance(raw_vis2, (int, float)) and raw_vis2 < 0:
+                p2_vis = VISIBILITY_OUTSIDE
+            elif isinstance(raw_vis2, str) and raw_vis2.strip() in ("-1", "-1.0"):
+                p2_vis = VISIBILITY_OUTSIDE
+            else:
+                p2_vis = normalize_visibility(raw_vis2, strict=strict_vis, default=VISIBILITY_VISIBLE)
+            has_p2 = True
+        except (ValueError, TypeError):
+            if strict_vis:
+                raise
+            has_p2 = False
+
+    # CASE D: Pass 2 response omitted the keypoint entirely
+    if not has_p2:
+        if has_p1:
+            return [round(p1_x, 1), round(p1_y, 1), p1_vis]
+        return None
+
+    # Reproject Pass 2 coordinates to full image if needed
+    if pass2_is_reprojected:
+        norm_x = max(0.0, min(1000.0, p2_x))
+        norm_y = max(0.0, min(1000.0, p2_y))
+    else:
+        norm_x, norm_y = reproject_crop_point(
+            p2_x,
+            p2_y,
+            effective_box,
+            orig_w=orig_w,
+            orig_h=orig_h,
+            crop_window_px=crop_window_px,
+        )
+
+    # Happy Path: Pass 2 says clearly visible (vis == 2)
+    if p2_vis == VISIBILITY_VISIBLE:
+        return [round(norm_x, 1), round(norm_y, 1), VISIBILITY_VISIBLE]
+
+    # CASE B: Pass 2 says physically occluded but inferable (vis == 1)
+    if p2_vis == VISIBILITY_OCCLUDED:
+        return [round(norm_x, 1), round(norm_y, 1), VISIBILITY_OCCLUDED]
+
+    # Pass 2 says point is outside / cannot be labeled (vis == 0)
+    # Check if Pass 1 had an active detection
+    if not has_p1 or p1_vis == VISIBILITY_OUTSIDE:
+        return [round(norm_x, 1), round(norm_y, 1), VISIBILITY_OUTSIDE]
+
+    # Pass 1 was visible or occluded (p1_vis > 0)
+    p1_inside_crop = (
+        (c_xmin - 5.0) <= p1_x <= (c_xmax + 5.0)
+        and (c_ymin - 5.0) <= p1_y <= (c_ymax + 5.0)
+    )
+    p1_plausible = (
+        0.0 <= p1_x <= 1000.0
+        and 0.0 <= p1_y <= 1000.0
+        and not math.isnan(p1_x)
+        and not math.isnan(p1_y)
+    )
+
+    if not p1_inside_crop and p1_plausible:
+        # CASE A: Pass 2 point is outside person crop because crop did not cover the full limb
+        # (Pass 1 coordinate lies OUTSIDE the crop bounds).
+        # -> Retain Pass 1 if geometrically plausible.
+        return [round(p1_x, 1), round(p1_y, 1), p1_vis]
+    else:
+        # CASE C: Pass 2 says point cannot be labeled / outside full image (vis == 0)
+        # and Pass 1 coordinate lies INSIDE the crop bounds (Pass 2 actually inspected this region).
+        # -> Do NOT restore Pass 1!
+        return [round(norm_x, 1), round(norm_y, 1), VISIBILITY_OUTSIDE]
+        return [round(norm_x, 1), round(norm_y, 1), VISIBILITY_OUTSIDE]
 
 
 def generate_cvat_pose17_svg(sublabel_names: Optional[Sequence[str]] = None) -> str:
@@ -1182,9 +1379,7 @@ class VF50Landmark:
         self.confidence = float(max(0.0, min(1.0, self.confidence)))
         if not self.component:
             self.component = VF50_POINT_TO_COMPONENT.get(self.id, "")
-        if self.visibility not in (VISIBILITY_OUTSIDE, VISIBILITY_OCCLUDED, VISIBILITY_VISIBLE):
-            out, occ = map_visibility_to_cvat(self.visibility)
-            self.visibility = map_cvat_to_visibility(out, occ)
+        self.visibility = normalize_visibility(self.visibility, strict=False, default=VISIBILITY_VISIBLE)
 
     @property
     def is_visible(self) -> bool:
@@ -1938,6 +2133,8 @@ def _parse_single_vf50_landmark(
             outside = bool(data.get("outside", False))
             occluded = bool(data.get("occluded", False))
             vis_val = map_cvat_to_visibility(outside, occluded)
+        else:
+            vis_val = normalize_visibility(vis_val, strict=False, default=VISIBILITY_VISIBLE)
 
         conf = float(data.get("confidence", 1.0))
 
@@ -1977,7 +2174,8 @@ def _parse_sequence_vf50_landmark(
     try:
         x = float(seq[0])
         y = float(seq[1])
-        vis = int(seq[2]) if len(seq) >= 3 else VISIBILITY_VISIBLE
+        raw_vis = seq[2] if len(seq) >= 3 else VISIBILITY_VISIBLE
+        vis = normalize_visibility(raw_vis, strict=False, default=VISIBILITY_VISIBLE)
         conf = float(seq[3]) if len(seq) >= 4 else 1.0
 
         if crop_box is not None and len(crop_box) == 4:
@@ -2009,7 +2207,8 @@ VF50_OCCLUSION_INSTRUCTIONS: str = (
     "    - Hair / bangs covering eyebrow (longmaytrai / longmayphai) -> visibility = 1 (occluded).\n"
     "    - Hand, fingers, or arm covering mouth or chin (moingoai / moitrong) -> visibility = 1 (occluded).\n"
     "    - Medical mask, cloth mask, or scarf covering mouth / nose -> visibility = 1 (occluded).\n"
-    "    - Eyeglasses frame, dark sunglasses lens, or temple arm covering eye contour or eyebrow -> visibility = 1 (occluded).\n"
+    "    - Opaque eyeglasses frame physically covering landmark, dark opaque sunglasses lens preventing landmark observation, or temple arm covering eyebrow/eye contour -> visibility = 1 (occluded).\n"
+    "    - Clear / transparent corrective eyeglass lenses: Eye contour and landmark points viewed directly through clear transparent glass are VISIBLE (visibility = 2), NOT occluded. Express any slight glare or refraction via lower confidence, NOT visibility = 1.\n"
     "    - Microphone, cup, or telephone held against face -> visibility = 1 (occluded).\n"
     "  * For physically occluded landmarks, estimate the anatomically true location and set visibility = 1.\n"
     "- Optical Degradation / Blur, Shadows & Low Lighting (visibility = 2):\n"
@@ -2017,8 +2216,9 @@ VF50_OCCLUSION_INSTRUCTIONS: str = (
     "shadows (e.g. from vehicle cabin, cap visor, nose shadow), sensor noise, or low illumination, it is STILL VISIBLE: set visibility = 2.\n"
     "  * Express visual uncertainty through a lower 'confidence' score (e.g. 0.35 - 0.70), NOT by setting visibility = 1. "
     "Optical blur, shadow, and low light are NOT physical occlusion; Confidence != Occlusion!\n"
-    "- Outside Frame (visibility = 0):\n"
-    "  * Landmark is outside the image boundary or cropped out -> set visibility = 0."
+    "- Outside Frame / Unlabelable (visibility = 0):\n"
+    "  * Landmark is outside the image boundary or cropped out -> set visibility = 0.\n"
+    "  * Rule: Physical occlusion within frame & inferable -> visibility = 1. visibility = 0 is ONLY for points outside image frame / unlabelable."
 )
 
 
@@ -2053,6 +2253,7 @@ def build_vf50_prompt() -> str:
         "- Eye corners: mattrai starts at outer corner (14) with inner corner at (18); matphai starts at inner corner (22) with outer corner at (26).\n"
         "- Nasal bridge point 13 is the base of the nose bridge above nostrils, NOT the nasal tip.\n"
         "- Mouth topology: inner lip (moitrong) MUST be completely enclosed within outer lip (moingoai). If mouth is closed, inner lip seam coincides with mouth line.\n"
+        "- Inner lip ordering: moitrong starts at inner left corner (42) -> upper inner lip (43..45, center 44) -> inner right corner (46) -> lower inner lip (47..49, center 48) -> closes back to 42.\n"
         "- Coordinate convention:\n"
         "  * Normalize all coordinates to integers in [0, 1000] relative to image width and height.\n"
         "  * Visibility flag: 0=outside image frame, 1=occluded, 2=visible.\n"
@@ -2099,6 +2300,7 @@ def build_vf50_crop_prompt() -> str:
         "- Eye corners: mattrai starts at outer corner (14) with inner corner at (18); matphai starts at inner corner (22) with outer corner at (26).\n"
         "- Nasal bridge point 13 is the base of the nose bridge above nostrils, NOT the nasal tip.\n"
         "- Mouth topology: inner lip (moitrong) MUST be completely enclosed within outer lip (moingoai). If mouth is closed, inner lip seam coincides with mouth line.\n"
+        "- Inner lip ordering: moitrong starts at inner left corner (42) -> upper inner lip (43..45, center 44) -> inner right corner (46) -> lower inner lip (47..49, center 48) -> closes back to 42.\n"
         "- Coordinates MUST be normalized to integers in [0, 1000] relative to this cropped image patch [width=1000, height=1000].\n"
         "- Visibility flag: 0=outside frame, 1=occluded, 2=visible.\n"
         f"{VF50_OCCLUSION_INSTRUCTIONS}\n"

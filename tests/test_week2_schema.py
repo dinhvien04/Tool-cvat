@@ -25,6 +25,7 @@ from core.week2_schema import (
     VISIBILITY_OCCLUDED,
     VISIBILITY_OUTSIDE,
     VISIBILITY_VISIBLE,
+    SchemaValidationError,
     compute_spec_fingerprint,
     get_build_sha,
     get_canonical_cvat_spec,
@@ -184,6 +185,11 @@ class TestVisibilityContract:
         assert normalize_visibility(1, strict=True) == VISIBILITY_OCCLUDED
         assert normalize_visibility(2, strict=True) == VISIBILITY_VISIBLE
 
+        # Valid exact integer float inputs
+        assert normalize_visibility(0.0, strict=True) == VISIBILITY_OUTSIDE
+        assert normalize_visibility(1.0, strict=True) == VISIBILITY_OCCLUDED
+        assert normalize_visibility(2.0, strict=True) == VISIBILITY_VISIBLE
+
         # Valid string representations
         assert normalize_visibility("0", strict=True) == VISIBILITY_OUTSIDE
         assert normalize_visibility("1", strict=True) == VISIBILITY_OCCLUDED
@@ -201,7 +207,10 @@ class TestVisibilityContract:
         import pytest
         invalid_inputs = [
             -1, -100, 3, 100,
-            "banana", "partial", "uncertain", "unknown",
+            -1.0, 3.0, 100.0,
+            0.1, 0.4, 0.49, 0.5, 0.6, 0.999, 1.01, 1.4, 1.49, 1.5, 1.6, 1.9, 1.99, 2.001,
+            -0.1, -0.5, 2.5,
+            "banana", "partial", "uncertain", "unknown", "0.0", "1.0", "2.0", "maybe",
             None, True, False,
             float("inf"), float("-inf"), float("nan"),
             [1], {"vis": 2},
@@ -215,6 +224,30 @@ class TestVisibilityContract:
         assert normalize_visibility(-1, strict=False) == VISIBILITY_VISIBLE
         assert normalize_visibility(3, strict=False) == VISIBILITY_VISIBLE
         assert normalize_visibility(100, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(-1.0, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(3.0, strict=False) == VISIBILITY_VISIBLE
+
+        # Non-integer floats default safely to VISIBILITY_VISIBLE (or custom default)
+        assert normalize_visibility(0.1, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(0.4, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(0.49, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(0.5, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(0.6, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(0.999, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(1.01, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(1.4, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(1.49, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(1.5, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(1.6, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(1.9, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(1.99, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(2.001, strict=False) == VISIBILITY_VISIBLE
+        assert normalize_visibility(0.4, strict=False, default=VISIBILITY_OUTSIDE) == VISIBILITY_OUTSIDE
+
+        # Exact integer floats in non-strict mode
+        assert normalize_visibility(0.0, strict=False) == VISIBILITY_OUTSIDE
+        assert normalize_visibility(1.0, strict=False) == VISIBILITY_OCCLUDED
+        assert normalize_visibility(2.0, strict=False) == VISIBILITY_VISIBLE
 
         # Unknown strings default to VISIBILITY_VISIBLE
         assert normalize_visibility("banana", strict=False) == VISIBILITY_VISIBLE
@@ -377,3 +410,62 @@ class TestSingleSourceOfTruthContractConsistency:
         assert qg.VF50_COMPONENT_COUNTS == vf50_component_point_counts()
         assert qg.VF50_EXPECTED_TOTAL_POINTS == 50
         assert qg.VF50_EYELID_OPPOSING_PAIRS == vf50_eyelid_opposing_pairs()
+
+
+class TestSchemaValidationError:
+    """Verify SchemaValidationError exception behavior and validation hardening."""
+
+    def test_schema_validation_error_inheritance(self):
+        assert issubclass(SchemaValidationError, ValueError)
+        err = SchemaValidationError("invalid schema field")
+        assert isinstance(err, ValueError)
+        assert str(err) == "invalid schema field"
+
+    def test_load_pose17_missing_file_raises_schema_validation_error(self, tmp_path):
+        from unittest.mock import patch
+        with patch("core.week2_schema._POSE17_YAML", tmp_path / "non_existent.yaml"):
+            load_pose17.cache_clear()
+            try:
+                with pytest.raises(SchemaValidationError, match="not found"):
+                    load_pose17()
+            finally:
+                load_pose17.cache_clear()
+
+    def test_load_pose17_invalid_keypoint_count_raises(self, tmp_path):
+        import yaml
+        from unittest.mock import patch
+        bad_yaml = tmp_path / "bad_pose.yaml"
+        bad_yaml.write_text(yaml.dump({
+            "schema_version": "1.0",
+            "name": "pose17",
+            "laterality_convention": "viewer",
+            "parent_labels": [{"name": "person"}],
+            "expected_point_count": 17,
+            "sublabels": [{"id": 1, "name": "1", "semantic": "nose", "coco_name": "nose", "side": "center"}],
+            "edges": [],
+        }))
+        with patch("core.week2_schema._POSE17_YAML", bad_yaml):
+            load_pose17.cache_clear()
+            try:
+                with pytest.raises(SchemaValidationError, match="Expected exactly 17 sublabels"):
+                    load_pose17()
+            finally:
+                load_pose17.cache_clear()
+
+    def test_load_vf50_invalid_component_count_raises(self, tmp_path):
+        import yaml
+        from unittest.mock import patch
+        bad_yaml = tmp_path / "bad_vf50.yaml"
+        bad_yaml.write_text(yaml.dump({
+            "schema_version": "1.0",
+            "name": "vf50",
+            "expected_point_count": 50,
+            "components": [{"id": 1, "name": "longmaytrai", "start": 0, "end": 4, "points": 5, "closed": False}],
+        }))
+        with patch("core.week2_schema._VF50_YAML", bad_yaml):
+            load_vf50.cache_clear()
+            try:
+                with pytest.raises(SchemaValidationError, match="Expected exactly 7 components"):
+                    load_vf50()
+            finally:
+                load_vf50.cache_clear()

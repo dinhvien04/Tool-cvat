@@ -24,9 +24,11 @@ from core.skeleton_contract import (
     denormalize_keypoint,
     map_cvat_to_visibility,
     map_visibility_to_cvat,
+    merge_refined_keypoint,
     normalize_keypoint,
     parse_pose17_response,
     poses_to_cvat_skeletons,
+    reproject_crop_point,
 )
 
 
@@ -513,4 +515,97 @@ class TestCornerDumpSanitization:
         assert person.keypoints["right_ankle"].is_outside is True
         assert person.keypoints["left_ankle"].is_outside is True
         assert person.keypoints["right_ankle"].confidence == 0.0
+
+
+class TestMergeRefinedKeypoint:
+    """Verify Pass 2 person crop refinement merge policy and visibility normalization."""
+
+    def test_case_a_retains_pass1_out_of_crop_limb(self):
+        # Pass 1 right_ankle at [600, 950, 2] is outside crop [100, 200, 800, 700]
+        crop_bbox = [100.0, 200.0, 800.0, 700.0]
+        pass1_pt = [600.0, 950.0, 2]
+        pass2_pt = [0.0, 0.0, 0]  # Pass 2 says outside / cannot label because limb cut off
+
+        merged = merge_refined_keypoint("right_ankle", pass1_pt, pass2_pt, crop_bbox)
+        assert merged is not None
+        assert merged == [600.0, 950.0, 2]
+
+    def test_case_b_accepts_pass2_occluded_point(self):
+        # Pass 2 refines an occluded joint (e.g. wrist behind steering wheel)
+        crop_bbox = [100.0, 200.0, 600.0, 700.0]
+        pass1_pt = [300.0, 450.0, 2]
+        pass2_pt = [200.0, 500.0, 1]  # crop-relative: x=200, y=500, vis=1 (occluded)
+
+        merged = merge_refined_keypoint("left_wrist", pass1_pt, pass2_pt, crop_bbox)
+        assert merged is not None
+        # x_full = 200 + 0.2 * 500 = 300.0, y_full = 100 + 0.5 * 500 = 350.0
+        assert merged[0] == pytest.approx(300.0, abs=0.5)
+        assert merged[1] == pytest.approx(350.0, abs=0.5)
+        assert merged[2] == VISIBILITY_OCCLUDED
+
+    def test_case_c_discards_pass1_hallucination_inside_crop(self):
+        # Pass 1 hallucinated right_wrist at [650, 300, 2] INSIDE crop bounds [100, 200, 600, 700]
+        crop_bbox = [100.0, 200.0, 600.0, 700.0]
+        pass1_pt = [650.0, 300.0, 2]
+        pass2_pt = [0.0, 0.0, 0]  # Pass 2 inspected crop and determined wrist is absent/outside
+
+        merged = merge_refined_keypoint("right_wrist", pass1_pt, pass2_pt, crop_bbox)
+        assert merged is not None
+        # Must NOT restore Pass 1 visible detection!
+        assert merged[2] == VISIBILITY_OUTSIDE
+
+    def test_case_d_falls_back_when_pass2_omitted(self):
+        # Pass 2 response omitted keypoint entirely
+        crop_bbox = [100.0, 200.0, 600.0, 700.0]
+        pass1_pt = [450.0, 180.0, 2]
+        pass2_pt = None
+
+        merged = merge_refined_keypoint("nose", pass1_pt, pass2_pt, crop_bbox)
+        assert merged is not None
+        assert merged == [450.0, 180.0, 2]
+
+    def test_happy_path_pass2_visible(self):
+        # Pass 2 detected clear visible keypoint
+        crop_bbox = [100.0, 200.0, 600.0, 700.0]
+        pass1_pt = [450.0, 180.0, 2]
+        pass2_pt = [500.0, 200.0, 2]
+
+        merged = merge_refined_keypoint("nose", pass1_pt, pass2_pt, crop_bbox)
+        assert merged is not None
+        # x_full = 200 + 0.5 * 500 = 450.0, y_full = 100 + 0.2 * 500 = 200.0
+        assert merged[0] == pytest.approx(450.0, abs=0.5)
+        assert merged[1] == pytest.approx(200.0, abs=0.5)
+        assert merged[2] == VISIBILITY_VISIBLE
+
+    def test_visibility_normalization_variants(self):
+        crop_bbox = [100.0, 200.0, 600.0, 700.0]
+        pass1_pt = [450.0, 180.0, 2]
+
+        # String aliases
+        m_vis = merge_refined_keypoint("nose", pass1_pt, [500, 200, "visible"], crop_bbox)
+        assert m_vis is not None and m_vis[2] == 2
+
+        m_occ = merge_refined_keypoint("nose", pass1_pt, [500, 200, "occluded"], crop_bbox)
+        assert m_occ is not None and m_occ[2] == 1
+
+        m_out = merge_refined_keypoint("nose", [10, 10, 2], [500, 200, "outside"], crop_bbox)
+        assert m_out is not None and m_out[2] == 2  # Case A: [10, 10] outside crop, retains pass1
+
+        m_part = merge_refined_keypoint("nose", pass1_pt, [500, 200, "partial"], crop_bbox)
+        assert m_part is not None and m_part[2] == 1
+
+        # Numeric and boolean variations
+        m_flt = merge_refined_keypoint("nose", pass1_pt, [500, 200, 1.0], crop_bbox)
+        assert m_flt is not None and m_flt[2] == 1
+
+        m_bool = merge_refined_keypoint("nose", pass1_pt, [500, 200, True], crop_bbox)
+        assert m_bool is not None and m_bool[2] == 2
+
+        m_neg = merge_refined_keypoint("nose", [450, 300, 2], [500, 200, -1], crop_bbox)
+        assert m_neg is not None and m_neg[2] == 0  # inside crop, -1 is outside, Case C: vis=0
+
+    def test_both_none_returns_none(self):
+        crop_bbox = [100.0, 200.0, 600.0, 700.0]
+        assert merge_refined_keypoint("nose", None, None, crop_bbox) is None
+
 

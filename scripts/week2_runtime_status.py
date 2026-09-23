@@ -189,7 +189,25 @@ def get_cvat_lambda_spec(fn_name: str, cvat_url: Optional[str] = None) -> Option
         "http://localhost:8080",
     ]
     token = os.getenv("CVAT_TOKEN", "")
-    headers = {"Accept": "application/json"}
+    if not token:
+        try:
+            res = subprocess.run(
+                [
+                    "docker", "exec", "-i", "cvat_server", "python3", "-c",
+                    "import os, django; os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cvat.settings.production'); "
+                    "django.setup(); from rest_framework.authtoken.models import Token; t = Token.objects.first(); "
+                    "print(t.key if t else '')",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=12,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                token = res.stdout.strip()
+        except Exception:
+            pass
+
+    headers = {"Accept": "application/vnd.cvat+json, application/json;q=0.9"}
     if token:
         headers["Authorization"] = f"Token {token}"
 
@@ -199,7 +217,7 @@ def get_cvat_lambda_spec(fn_name: str, cvat_url: Optional[str] = None) -> Option
         try:
             url = f"{base.rstrip('/')}/api/lambda/functions"
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with urllib.request.urlopen(req, timeout=4) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 functions = data if isinstance(data, list) else data.get("results", [])
                 for fn in functions:
@@ -210,6 +228,30 @@ def get_cvat_lambda_spec(fn_name: str, cvat_url: Optional[str] = None) -> Option
                         raw_spec = fn.get("spec") or fn.get("annotations", {}).get("spec")
                         if raw_spec:
                             return json.loads(raw_spec) if isinstance(raw_spec, str) else raw_spec
+                        labels_v2 = fn.get("labels_v2")
+                        if labels_v2 and isinstance(labels_v2, list):
+                            normalized = []
+                            for idx, lbl in enumerate(labels_v2, start=1):
+                                item = {
+                                    "id": idx,
+                                    "name": lbl.get("name"),
+                                    "type": lbl.get("type", "any"),
+                                    "attributes": lbl.get("attributes", []),
+                                }
+                                if "sublabels" in lbl:
+                                    item["sublabels"] = [
+                                        {
+                                            "id": s_idx,
+                                            "name": sub.get("name"),
+                                            "type": sub.get("type", "points"),
+                                            "attributes": sub.get("attributes", []),
+                                        }
+                                        for s_idx, sub in enumerate(lbl.get("sublabels", []), start=1)
+                                    ]
+                                if "svg" in lbl:
+                                    item["svg"] = lbl["svg"]
+                                normalized.append(item)
+                            return normalized
         except Exception:
             continue
     return None

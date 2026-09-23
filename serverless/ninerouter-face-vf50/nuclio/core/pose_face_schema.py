@@ -41,6 +41,8 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 from core.week2_schema import (
     load_pose17,
     load_vf50,
+    map_cvat_to_visibility,
+    map_visibility_to_cvat,
     pose17_coco_keypoints,
     vf50_all_edges,
     vf50_landmarks,
@@ -318,13 +320,7 @@ def parse_and_sanitize_pose17_instance(
             if isinstance(pt_data, (list, tuple)) and len(pt_data) >= 2:
                 x, y = float(pt_data[0]), float(pt_data[1])
                 vis = pt_data[2] if len(pt_data) > 2 else 2
-
-                # Official VinFast CVAT mapping:
-                # vis=0 -> outside=True, occluded=False
-                # vis=1 -> outside=False, occluded=True
-                # vis=2 -> outside=False, occluded=False
-                occluded = (vis == 1) if vis in (0, 1, 2) else False
-                outside = (vis == 0) if vis in (0, 1, 2) else False
+                outside, occluded = map_visibility_to_cvat(vis)
 
                 px, py = denormalize_point(x, y, img_width, img_height, coord_range=coord_range, clamp=True)
                 elements.append(KeypointElement(
@@ -339,17 +335,32 @@ def parse_and_sanitize_pose17_instance(
             if not isinstance(item, dict):
                 continue
             name = item.get("name") or item.get("label")
-            if not name or name not in POSE17_KEYPOINT_TO_ID:
+            if name is None:
                 continue
+            if isinstance(name, int) and name in POSE17_ID_TO_KEYPOINT:
+                name = POSE17_ID_TO_KEYPOINT[name]
+            elif isinstance(name, str):
+                if name in POSE17_KEYPOINT_TO_ID:
+                    pass
+                elif name.isdigit() and int(name) in POSE17_ID_TO_KEYPOINT:
+                    name = POSE17_ID_TO_KEYPOINT[int(name)]
+                else:
+                    continue
+            else:
+                continue
+
             if name in seen_labels:
                 continue
             seen_labels.add(name)
 
             pts = item.get("point") or item.get("points") or [0, 0]
             x, y = float(pts[0]), float(pts[1])
-            vis = item.get("visibility", 2)
-            occluded = bool(item.get("occluded", vis == 1))
-            outside = bool(item.get("outside", vis == 0))
+            if "outside" in item or "occluded" in item:
+                vis = map_cvat_to_visibility(item.get("outside", False), item.get("occluded", False), strict=False)
+                outside, occluded = map_visibility_to_cvat(vis)
+            else:
+                vis = item.get("visibility", 2)
+                outside, occluded = map_visibility_to_cvat(vis)
 
             px, py = denormalize_point(x, y, img_width, img_height, coord_range=coord_range, clamp=True)
             elements.append(KeypointElement(
@@ -385,8 +396,10 @@ def parse_and_sanitize_vf50_instance(
     seen_labels: Set[str] = set()
 
     if isinstance(raw_landmarks, dict):
-        for name in VF50_LANDMARKS:
+        for idx, name in enumerate(VF50_LANDMARKS):
             pt_data = raw_landmarks.get(name)
+            if pt_data is None:
+                pt_data = raw_landmarks.get(str(idx)) if str(idx) in raw_landmarks else raw_landmarks.get(idx)
             if pt_data is None:
                 elements.append(KeypointElement(
                     label=name,
@@ -403,8 +416,7 @@ def parse_and_sanitize_vf50_instance(
             if isinstance(pt_data, (list, tuple)) and len(pt_data) >= 2:
                 x, y = float(pt_data[0]), float(pt_data[1])
                 vis = pt_data[2] if len(pt_data) > 2 else 2
-                occluded = (vis == 1) if vis in (0, 1, 2) else False
-                outside = (vis == 0) if vis in (0, 1, 2) else False
+                outside, occluded = map_visibility_to_cvat(vis)
 
                 px, py = denormalize_point(x, y, img_width, img_height, coord_range=coord_range, clamp=True)
                 elements.append(KeypointElement(
@@ -419,17 +431,32 @@ def parse_and_sanitize_vf50_instance(
             if not isinstance(item, dict):
                 continue
             name = item.get("name") or item.get("label")
-            if not name or name not in VF50_LANDMARK_TO_ID:
+            if name is None:
                 continue
+            if isinstance(name, int) and name in VF50_ID_TO_LANDMARK:
+                name = VF50_ID_TO_LANDMARK[name]
+            elif isinstance(name, str):
+                if name in VF50_LANDMARK_TO_ID:
+                    pass
+                elif name.isdigit() and int(name) in VF50_ID_TO_LANDMARK:
+                    name = VF50_ID_TO_LANDMARK[int(name)]
+                else:
+                    continue
+            else:
+                continue
+
             if name in seen_labels:
                 continue
             seen_labels.add(name)
 
             pts = item.get("point") or item.get("points") or [0, 0]
             x, y = float(pts[0]), float(pts[1])
-            vis = item.get("visibility", 2)
-            occluded = bool(item.get("occluded", vis == 1))
-            outside = bool(item.get("outside", vis == 0))
+            if "outside" in item or "occluded" in item:
+                vis = map_cvat_to_visibility(item.get("outside", False), item.get("occluded", False), strict=False)
+                outside, occluded = map_visibility_to_cvat(vis)
+            else:
+                vis = item.get("visibility", 2)
+                outside, occluded = map_visibility_to_cvat(vis)
 
             px, py = denormalize_point(x, y, img_width, img_height, coord_range=coord_range, clamp=True)
             elements.append(KeypointElement(

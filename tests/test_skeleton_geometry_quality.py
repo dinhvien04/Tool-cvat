@@ -29,6 +29,8 @@ from core.quality_gate import (
     derive_skeleton_center,
     verify_mirrored_laterality_invariance,
     verify_laterality_convention,
+    verify_vf50_geometry,
+    VF50GeometryResult,
     Pose17QualityReport,
     VF50QualityReport,
     LateralityVerificationResult,
@@ -755,6 +757,107 @@ def test_hard_errors_vs_soft_warnings_separation():
     assert cross_report.needs_refine is True
     assert len(cross_report.hard_errors) == 0
     assert len(cross_report.soft_warnings) > 0
+
+
+def test_verify_vf50_geometry_standalone():
+    """verify_vf50_geometry performs deterministic geometric validation and returns VF50GeometryResult."""
+    face = make_canonical_vf50()
+    res = verify_vf50_geometry(face, laterality_convention=LATERALITY_VIEWER)
+    assert isinstance(res, VF50GeometryResult)
+    assert res.is_valid is True
+    assert res.iod > 0.0
+    assert abs(res.roll_angle_deg) < 1.0
+    assert res.area_outer_lip > res.area_inner_lip > 0.0
+    assert len(res.hard_errors) == 0
+
+    # Test invalid face: eyelid figure-8 self-intersection (hard error)
+    bad_face = dict(face)
+    bad_face[15] = (435.0, 465.0, 2, 0.95)
+    bad_face[20] = (425.0, 452.0, 2, 0.95)
+
+    res_bad = verify_vf50_geometry(bad_face)
+    assert res_bad.is_valid is False
+    assert any("self_intersecting_eye_contour" in e for e in res_bad.hard_errors)
+    assert "mattrai" in res_bad.suspect_components
+
+    # Test invalid face: inner lip larger than outer lip (hard error)
+    lip_face = dict(face)
+    lip_face[42] = (300.0, 565.0, 2, 0.95)
+    lip_face[43] = (450.0, 500.0, 2, 0.95)
+    lip_face[44] = (500.0, 500.0, 2, 0.95)
+    lip_face[45] = (550.0, 500.0, 2, 0.95)
+    lip_face[46] = (700.0, 565.0, 2, 0.95)
+    lip_face[47] = (550.0, 650.0, 2, 0.95)
+    lip_face[48] = (500.0, 650.0, 2, 0.95)
+    lip_face[49] = (450.0, 650.0, 2, 0.95)
+
+    res_lip = verify_vf50_geometry(lip_face)
+    assert res_lip.is_valid is False
+    assert any("inner_lip_larger_than_outer" in e for e in res_lip.hard_errors)
+    assert "moitrong" in res_lip.suspect_components
+
+
+def test_occluded_joints_in_kinematic_chain_evaluated_for_continuity():
+    """Occluded joints (visibility=1) in kinematic chains are evaluated for continuity without missing penalties."""
+    pose = make_canonical_pose17()
+    # Left elbow is occluded by steering wheel (visibility=1) but at anatomically valid position
+    pose["left_elbow"] = (pose["left_elbow"][0], pose["left_elbow"][1], 1, 0.85)
+    report = assess_pose17_quality(pose)
+    assert report.is_valid is True
+    assert not any("left_elbow" in b for b in report.suspect_bones)
+
+    # Occluded elbow placed at impossible floating position (detached limb)
+    detached_pose = dict(pose)
+    detached_pose["left_elbow"] = (100.0, 100.0, 1, 0.85)  # floating far away
+    det_report = assess_pose17_quality(detached_pose)
+    assert any("left_shoulder-left_elbow" in b or "left_elbow-left_wrist" in b for b in det_report.suspect_bones)
+    assert any("excessive_arm_length" in r or "disproportionate" in r for r in det_report.reasons)
+
+
+def test_outside_joints_visibility_zero_excluded_from_kinematic_anchors():
+    """Points with visibility=0 (outside crop) are strictly excluded from active kinematic anchors and axis checks."""
+    pose = make_canonical_pose17()
+    # Upper-body cabin crop: hips, knees, ankles are outside the image frame (visibility=0, coords (0, 0))
+    for joint in ["left_hip", "right_hip", "left_knee", "right_knee", "left_ankle", "right_ankle"]:
+        pose[joint] = (0.0, 0.0, 0, 0.0)
+
+    # Must NOT falsely flag coordinate axis swap due to (0, 0) hips
+    swapped, reason = detect_coordinate_axis_swap(pose, schema_type="pose17")
+    assert swapped is False
+
+    # Must NOT falsely flag inverted vertical orientation (shoulders below (0,0) hips)
+    report = assess_pose17_quality(pose)
+    assert report.is_valid is True
+    assert not any("inverted_vertical_orientation" in r for r in report.reasons)
+
+
+def test_seated_driver_raised_arms_on_steering_wheel():
+    """Seated driver with hands/wrists raised above shoulders on steering wheel passes quality gate."""
+    pose = make_canonical_pose17()
+    # Driver with hands raised on top of steering wheel: wrists at y=280, shoulders at y=360
+    pose["left_shoulder"] = (430.0, 360.0, 2, 0.95)
+    pose["right_shoulder"] = (570.0, 360.0, 2, 0.95)
+    pose["left_elbow"] = (400.0, 310.0, 2, 0.90)
+    pose["right_elbow"] = (600.0, 310.0, 2, 0.90)
+    pose["left_wrist"] = (460.0, 280.0, 2, 0.92)  # above shoulders
+    pose["right_wrist"] = (540.0, 280.0, 2, 0.92)  # above shoulders
+
+    report = assess_pose17_quality(pose)
+    assert report.is_valid is True
+    assert report.score >= 0.80
+
+
+def test_laterality_fallback_when_shoulders_are_outside():
+    """When shoulders are outside (visibility=0), laterality check falls back to hips, eyes, or ears."""
+    pose = make_canonical_pose17()
+    # Set shoulders outside
+    pose["left_shoulder"] = (0.0, 0.0, 0, 0.0)
+    pose["right_shoulder"] = (0.0, 0.0, 0, 0.0)
+
+    # Hips are present and active in viewer convention (left_hip x=455 < right_hip x=545)
+    res = verify_laterality_convention(pose, schema_type="pose17", expected_convention=LATERALITY_VIEWER)
+    assert res.is_valid is True
+    assert res.detected_convention == LATERALITY_VIEWER
 
 
 

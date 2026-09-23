@@ -33,10 +33,16 @@ from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Un
 _CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 _POSE17_YAML = _CONFIG_DIR / "week2_pose17.yaml"
 _VF50_YAML = _CONFIG_DIR / "week2_vf50.yaml"
+_POSE17_PATH = _POSE17_YAML
+_VF50_PATH = _VF50_YAML
 
 # ─── Laterality Constants ──────────────────────────────────────────────────────
 LATERALITY_VIEWER = "viewer"
 LATERALITY_SUBJECT = "subject"
+
+
+class SchemaValidationError(ValueError):
+    """Raised when a canonical Week-2 schema fails structural or semantic validation."""
 
 
 # ─── Immutable Schema Dataclasses ──────────────────────────────────────────────
@@ -132,21 +138,22 @@ def normalize_visibility(
       2 = clearly visible in direct line of sight (CVAT: outside=False, occluded=False)
 
     Accepted explicit inputs (strict=True):
-      - 0, "0", "outside" -> 0 (VISIBILITY_OUTSIDE)
-      - 1, "1", "occluded" -> 1 (VISIBILITY_OCCLUDED)
-      - 2, "2", "visible"  -> 2 (VISIBILITY_VISIBLE)
+      - 0, 0.0, "0", "outside" -> 0 (VISIBILITY_OUTSIDE)
+      - 1, 1.0, "1", "occluded" -> 1 (VISIBILITY_OCCLUDED)
+      - 2, 2.0, "2", "visible"  -> 2 (VISIBILITY_VISIBLE)
 
     Non-strict mode (strict=False) safe fallbacks:
       - None defaults to default (default: VISIBILITY_VISIBLE = 2)
       - Booleans: True -> 2 (visible), False -> 0 (outside)
       - Legacy string aliases: 'absent', 'false' -> 0; 'partial' -> 1; 'true' -> 2
-      - Unrecognized values, out-of-range numbers, and invalid strings return default.
+      - Unrecognized values, non-integer floats, out-of-range numbers, and invalid strings return default.
 
     Strict mode (strict=True) rejections (raise ValueError):
-      - Negative numbers (-1, -5, etc.)
-      - Numbers > 2 (3, 100, etc.)
-      - Non-finite floats (NaN, Inf)
-      - Ambiguous / ungrounded strings ('partial', 'uncertain', 'banana', etc.)
+      - Negative numbers (-1, -1.0, -5, etc.)
+      - Numbers > 2 (3, 3.0, 100, etc.)
+      - Non-integer floats (0.1, 0.4, 0.49, 0.5, 0.6, 0.999, 1.01, 1.5, 1.99, 2.001, etc.)
+      - Non-finite floats (NaN, Inf, -Inf)
+      - Ambiguous / ungrounded strings ('partial', 'uncertain', 'banana', '0.0', etc.)
       - Booleans and None
 
     Args:
@@ -179,7 +186,15 @@ def normalize_visibility(
                 raise ValueError(f"Invalid non-finite visibility float: {vis}")
             return default
         try:
-            iv = int(round(float(vis)))
+            f = float(vis)
+            if not f.is_integer():
+                if strict:
+                    raise ValueError(
+                        f"Non-integer numeric visibility {vis} is not allowed in strict mode. "
+                        f"Expected exact integer 0, 1, or 2."
+                    )
+                return default
+            iv = int(f)
         except (ValueError, TypeError, OverflowError) as e:
             if strict:
                 raise ValueError(f"Cannot parse visibility numeric: {vis}") from e
@@ -302,18 +317,37 @@ def load_pose17() -> Pose17Schema:
     """Load, validate, and cache Pose17 schema from YAML.
 
     Raises:
-        FileNotFoundError: If config/week2_pose17.yaml is missing.
-        AssertionError: If schema validation fails.
+        SchemaValidationError: If config/week2_pose17.yaml is missing or schema validation fails.
     """
-    with open(_POSE17_YAML, "r", encoding="utf-8") as f:
+    target_path = Path(_POSE17_YAML)
+    if not target_path.exists():
+        raise SchemaValidationError(f"Pose17 YAML file not found: {target_path}")
+
+    with open(target_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
+    if not isinstance(raw, dict):
+        raise SchemaValidationError("Pose17 YAML content must be a dictionary")
+
+    if "schema_version" not in raw:
+        raise SchemaValidationError("Pose17 schema missing required 'schema_version'")
+
+    if raw.get("laterality_convention") != LATERALITY_VIEWER:
+        raise SchemaValidationError(
+            f"Pose17 schema specifies unknown laterality: {raw.get('laterality_convention')!r}"
+        )
+
+    parent_labels = raw.get("parent_labels")
+    if not isinstance(parent_labels, list) or not parent_labels or parent_labels[0].get("name") != "person":
+        raise SchemaValidationError("Pose17 schema parent label must be 'person'")
+
     # Validate structure
-    sublabels = raw["sublabels"]
-    expected = raw["expected_point_count"]
-    assert len(sublabels) == expected == 17, (
-        f"Expected 17 sublabels, got {len(sublabels)}"
-    )
+    sublabels = raw.get("sublabels", raw.get("keypoints", []))
+    expected = raw.get("expected_point_count", len(sublabels))
+    if len(sublabels) != 17 or expected != 17:
+        raise SchemaValidationError(
+            f"Expected exactly 17 sublabels, got {len(sublabels)} (expected_point_count={expected})"
+        )
 
     keypoints: List[Keypoint] = []
     id_to_kp: Dict[int, Keypoint] = {}
@@ -325,12 +359,37 @@ def load_pose17() -> Pose17Schema:
     right_ids: set = set()
     left_ids: set = set()
 
+    seen_ids = set()
+    seen_names = set()
+    seen_semantics = set()
+
     for sl in sublabels:
+        kp_id = sl.get("id")
+        if not isinstance(kp_id, int):
+            raise SchemaValidationError(f"Pose17 keypoint ID must be an integer, got {kp_id!r}")
+        if kp_id in seen_ids:
+            raise SchemaValidationError(f"Duplicate keypoint ID {kp_id} in Pose17 schema")
+        seen_ids.add(kp_id)
+
+        numeric_name = str(sl.get("name", ""))
+        if numeric_name in seen_names:
+            raise SchemaValidationError(f"Duplicate numeric name {numeric_name!r} in Pose17 schema")
+        seen_names.add(numeric_name)
+
+        semantic_name = sl.get("semantic_name", "")
+        if semantic_name in seen_semantics:
+            raise SchemaValidationError(f"Duplicate semantic name {semantic_name!r} in Pose17 schema")
+        seen_semantics.add(semantic_name)
+
+        side = sl.get("side", "center")
+        if side not in ("center", "right", "left"):
+            raise SchemaValidationError(f"Invalid side {side!r} for keypoint {kp_id}")
+
         kp = Keypoint(
-            id=sl["id"],
-            numeric_name=str(sl["name"]),
-            semantic_name=sl["semantic_name"],
-            side=sl.get("side", "center"),
+            id=kp_id,
+            numeric_name=numeric_name,
+            semantic_name=semantic_name,
+            side=side,
             anatomical=sl.get("anatomical"),
         )
         keypoints.append(kp)
@@ -348,14 +407,29 @@ def load_pose17() -> Pose17Schema:
         elif kp.side == "left":
             left_ids.add(kp.id)
 
-    edges = tuple((e["from"], e["to"]) for e in raw["edges"])
+    if seen_ids != set(range(1, 18)):
+        raise SchemaValidationError(f"Pose17 keypoint IDs must be contiguous 1..17, got {sorted(seen_ids)}")
+
+    raw_edges = raw.get("edges", [])
+    if len(raw_edges) != 18:
+        raise SchemaValidationError(f"Expected exactly 18 edges for Pose17, got {len(raw_edges)}")
+
+    edges = tuple((e["from"], e["to"]) for e in raw_edges)
 
     # Validate all edge endpoints reference valid IDs
     valid_ids = {kp.id for kp in keypoints}
+    seen_edges = set()
     for u, v in edges:
-        assert u in valid_ids and v in valid_ids, (
-            f"Edge ({u},{v}) references invalid ID. Valid: {valid_ids}"
-        )
+        if u not in valid_ids or v not in valid_ids:
+            raise SchemaValidationError(
+                f"Edge ({u},{v}) references invalid ID. Valid: {valid_ids}"
+            )
+        if u == v:
+            raise SchemaValidationError(f"Self-loop edge ({u},{v}) is forbidden")
+        edge_key = (min(u, v), max(u, v))
+        if edge_key in seen_edges:
+            raise SchemaValidationError(f"Duplicate edge ({u},{v}) in Pose17 schema")
+        seen_edges.add(edge_key)
 
     # Build named edge pairs
     edges_as_coco = tuple(
@@ -396,15 +470,41 @@ def load_vf50() -> VF50Schema:
     """Load, validate, and cache VF50 schema from YAML.
 
     Raises:
-        FileNotFoundError: If config/week2_vf50.yaml is missing.
-        AssertionError: If schema validation fails.
+        SchemaValidationError: If config/week2_vf50.yaml is missing or schema validation fails.
     """
-    with open(_VF50_YAML, "r", encoding="utf-8") as f:
+    target_path = Path(_VF50_YAML)
+    if not target_path.exists():
+        raise SchemaValidationError(f"VF50 YAML file not found: {target_path}")
+
+    with open(target_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
-    assert raw["expected_point_count"] == 50, (
-        f"Expected 50 points, got {raw['expected_point_count']}"
+    if not isinstance(raw, dict):
+        raise SchemaValidationError("VF50 YAML content must be a dictionary")
+
+    if raw.get("expected_point_count") != 50:
+        raise SchemaValidationError(
+            f"Expected 50 points, got {raw.get('expected_point_count')}"
+        )
+
+    comps_raw = raw.get("components", [])
+    if len(comps_raw) != 7:
+        raise SchemaValidationError(f"Expected exactly 7 components in VF50 schema, got {len(comps_raw)}")
+
+    expected_comp_names = (
+        "longmaytrai",
+        "longmayphai",
+        "songmui",
+        "mattrai",
+        "matphai",
+        "moingoai",
+        "moitrong",
     )
+    actual_names = tuple(c.get("name") for c in comps_raw)
+    if actual_names != expected_comp_names:
+        raise SchemaValidationError(
+            f"VF50 component names or order mismatch: expected {expected_comp_names}, got {actual_names}"
+        )
 
     components: List[VF50Component] = []
     all_keypoints: List[Keypoint] = []
@@ -412,12 +512,39 @@ def load_vf50() -> VF50Schema:
     id_to_kp: Dict[int, Keypoint] = {}
     point_to_comp: Dict[int, str] = {}
     comp_by_name: Dict[str, VF50Component] = {}
+    seen_pt_ids = set()
 
-    for comp_raw in raw["components"]:
+    for comp_raw in comps_raw:
+        c_name = comp_raw.get("name")
+        pr = comp_raw.get("point_range")
+        if not pr or len(pr) != 2:
+            raise SchemaValidationError(f"Component {c_name} missing valid point_range [start, end]")
+        start_id, end_id = pr[0], pr[1]
+        c_count = comp_raw.get("point_count")
+        if end_id - start_id + 1 != c_count:
+            raise SchemaValidationError(
+                f"Component {c_name} point_count {c_count} does not match point_range [{start_id}, {end_id}]"
+            )
+
+        sublabels = comp_raw.get("sublabels", [])
+        if len(sublabels) != c_count:
+            raise SchemaValidationError(
+                f"Component {c_name} sublabels length {len(sublabels)} does not match point_count {c_count}"
+            )
+
         comp_kps: List[Keypoint] = []
-        for sl in comp_raw["sublabels"]:
+        for sl in sublabels:
+            pt_id = sl.get("id")
+            if not isinstance(pt_id, int) or not (start_id <= pt_id <= end_id):
+                raise SchemaValidationError(
+                    f"Sublabel ID {pt_id} outside component {c_name} range [{start_id}, {end_id}]"
+                )
+            if pt_id in seen_pt_ids:
+                raise SchemaValidationError(f"Duplicate keypoint ID {pt_id} in VF50 schema")
+            seen_pt_ids.add(pt_id)
+
             kp = Keypoint(
-                id=sl["id"],
+                id=pt_id,
                 numeric_name=str(sl["name"]),
                 semantic_name=sl["semantic_name"],
                 side="center",
@@ -426,17 +553,35 @@ def load_vf50() -> VF50Schema:
             comp_kps.append(kp)
             all_keypoints.append(kp)
             id_to_kp[kp.id] = kp
-            point_to_comp[kp.id] = comp_raw["name"]
+            point_to_comp[kp.id] = c_name
 
-        comp_edges = tuple(tuple(e) for e in comp_raw["edges"])
+        raw_comp_edges = comp_raw.get("edges", [])
+        c_seen_edges = set()
+        comp_edges_list = []
+        for e in raw_comp_edges:
+            if len(e) != 2:
+                raise SchemaValidationError(f"Component {c_name} has invalid edge tuple: {e}")
+            u, v = e[0], e[1]
+            if not (start_id <= u <= end_id and start_id <= v <= end_id):
+                raise SchemaValidationError(
+                    f"Component {c_name} edge ({u}, {v}) endpoint outside range [{start_id}, {end_id}]"
+                )
+            if u == v:
+                raise SchemaValidationError(f"Self-loop edge ({u}, {v}) forbidden in component {c_name}")
+            edge_key = (min(u, v), max(u, v))
+            if edge_key in c_seen_edges:
+                raise SchemaValidationError(f"Duplicate edge ({u}, {v}) in component {c_name}")
+            c_seen_edges.add(edge_key)
+            comp_edges_list.append((u, v))
+
+        comp_edges = tuple(comp_edges_list)
         all_edges.extend(comp_edges)
 
-        pr = comp_raw["point_range"]
         comp = VF50Component(
-            name=comp_raw["name"],
-            start_id=pr[0],
-            end_id=pr[1],
-            point_count=comp_raw["point_count"],
+            name=c_name,
+            start_id=start_id,
+            end_id=end_id,
+            point_count=c_count,
             topology=comp_raw["topology"],
             keypoints=tuple(comp_kps),
             edges=comp_edges,
@@ -445,8 +590,10 @@ def load_vf50() -> VF50Schema:
         components.append(comp)
         comp_by_name[comp.name] = comp
 
-    assert len(all_keypoints) == 50, f"Expected 50 keypoints, got {len(all_keypoints)}"
-    assert len(all_edges) == 47, f"Expected 47 edges, got {len(all_edges)}"
+    if len(all_keypoints) != 50 or seen_pt_ids != set(range(50)):
+        raise SchemaValidationError(f"Expected 50 contiguous keypoints (0..49), got {len(all_keypoints)}")
+    if len(all_edges) != 47:
+        raise SchemaValidationError(f"Expected exactly 47 edges across VF50 components, got {len(all_edges)}")
 
     # Compute fingerprint
     spec_data = {

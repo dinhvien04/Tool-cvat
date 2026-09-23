@@ -414,6 +414,40 @@ class TestOcclusionProductionSerialization:
         assert isinstance(elem["occluded"], bool)
         assert elem["points"] == [500.0, 500.0]
 
+    def test_sanitizer_normalizes_forbidden_invariant_pose17_and_vf50(self):
+        """Verify that malformed inputs with outside=True and occluded=True are sanitized."""
+        # Pose17 test with simultaneous outside and occluded
+        raw_pose = {
+            "keypoints": [
+                {"name": "nose", "point": [500, 150], "outside": True, "occluded": True},
+                {"name": "left_eye", "point": [470, 130], "visibility": "occluded"},
+            ]
+        }
+        pose_inst = parse_and_sanitize_pose17_instance(raw_pose, img_width=1000, img_height=1000)
+        assert pose_inst is not None
+        elem_map = {e.label: e for e in pose_inst.elements}
+        # nose should be normalized (outside takes precedence: outside=True, occluded=False)
+        assert elem_map["nose"].outside is True
+        assert elem_map["nose"].occluded is False
+        # left_eye should be occluded: outside=False, occluded=True
+        assert elem_map["left_eye"].outside is False
+        assert elem_map["left_eye"].occluded is True
+
+        # VF50 test with simultaneous outside and occluded
+        raw_vf50 = {
+            "landmarks": [
+                {"name": "longmaytrai_00", "point": [200, 300], "outside": True, "occluded": True},
+                {"name": "longmaytrai_01", "point": [250, 280], "visibility": 1},
+            ]
+        }
+        vf50_inst = parse_and_sanitize_vf50_instance(raw_vf50, img_width=1000, img_height=1000)
+        assert vf50_inst is not None
+        elem_map_vf = {e.label: e for e in vf50_inst.elements}
+        assert elem_map_vf["longmaytrai_00"].outside is True
+        assert elem_map_vf["longmaytrai_00"].occluded is False
+        assert elem_map_vf["longmaytrai_01"].outside is False
+        assert elem_map_vf["longmaytrai_01"].occluded is True
+
 
 # ==============================================================================
 # CATEGORY 7: REFINE MODEL PASS 1 VS PASS 2 ASSERTIONS & CALL COUNTS

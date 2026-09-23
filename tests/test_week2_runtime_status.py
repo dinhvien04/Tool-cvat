@@ -126,6 +126,47 @@ class TestDualRegistryQueries:
                 assert req.full_url == "http://127.0.0.1:18080/api/lambda/functions"
                 assert req.headers.get("Authorization") == "Token test-cvat-token-123"
 
+    def test_get_cvat_lambda_spec_parses_labels_v2_cvat2751(self):
+        labels_v2 = [
+            {
+                "name": "person",
+                "type": "skeleton",
+                "attributes": [],
+                "sublabels": [
+                    {"name": "nose", "type": "points", "attributes": []},
+                    {"name": "right_eye", "type": "points", "attributes": []},
+                ],
+                "svg": "<svg></svg>",
+            }
+        ]
+        mock_response_data = [
+            {
+                "id": "ninerouter-human-pose-17",
+                "kind": "detector",
+                "labels_v2": labels_v2,
+                "name": "9Router Human Pose 17",
+            }
+        ]
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = json.dumps(mock_response_data).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with mock.patch.dict("os.environ", {"CVAT_TOKEN": "test-cvat-token-123"}):
+            with mock.patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+                result = get_cvat_lambda_spec("ninerouter-human-pose-17", cvat_url="http://127.0.0.1:18080")
+                assert result is not None
+                assert len(result) == 1
+                assert result[0]["id"] == 1
+                assert result[0]["name"] == "person"
+                assert result[0]["type"] == "skeleton"
+                assert len(result[0]["sublabels"]) == 2
+                assert result[0]["sublabels"][0]["id"] == 1
+                assert result[0]["sublabels"][0]["name"] == "nose"
+                assert result[0]["sublabels"][1]["id"] == 2
+                assert result[0]["sublabels"][1]["name"] == "right_eye"
+                assert result[0]["svg"] == "<svg></svg>"
+                assert "application/vnd.cvat+json" in mock_urlopen.call_args[0][0].headers.get("Accept")
+
 
 class TestAnalyzeFunctionRuntime:
     """Validate runtime status, spec drift, and build SHA auditing."""

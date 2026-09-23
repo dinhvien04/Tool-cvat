@@ -165,6 +165,17 @@ class TestVF50PromptsAndOcclusionAudit:
             assert "upper eyelid" in prompt.lower()
             assert "viewer perspective" in prompt.lower() or "trai" in prompt
 
+    def test_no_ambiguous_visibility_choice_and_inner_lip_ordering_in_vf50_prompts(self):
+        """Mandate: No ambiguous visibility choice and explicit moitrong (42..49) ordering in VF50 prompts."""
+        for prompt_name, prompt in [("global", build_vf50_prompt()), ("crop", build_vf50_crop_prompt())]:
+            assert "visibility = 1 or 0" not in prompt, f"Ambiguous rule found in {prompt_name}"
+            assert "1 (occluded) or 0" not in prompt, f"Ambiguous rule found in {prompt_name}"
+            assert "Physical occlusion within frame & inferable -> visibility = 1" in prompt, f"Missing strict occlusion rule in {prompt_name}"
+            assert "visibility = 0 is ONLY for points outside image frame" in prompt, f"Missing strict visibility 0 rule in {prompt_name}"
+            # Verify explicit moitrong 42..49 ordering
+            assert "moitrong starts at inner left corner (42)" in prompt, f"Missing moitrong ordering in {prompt_name}"
+            assert "closes back to 42" in prompt, f"Missing moitrong closed loop in {prompt_name}"
+
 
 class TestVF50ModelResolutionAndInit:
     """Verify Pass 1 (VF50_MODEL) and Pass 2 (VF50_REFINE_MODEL) dynamic resolution and initialization."""

@@ -56,8 +56,9 @@ from core.skeleton_contract import (
     POSE17_OCCLUSION_INSTRUCTIONS,
     build_pose17_crop_prompt,
     build_pose17_prompt,
+    merge_refined_keypoint,
 )
-from core.week2_schema import get_build_sha, load_pose17
+from core.week2_schema import get_build_sha, load_pose17, normalize_visibility
 
 logger = logging.getLogger("cvat.nuclio.ninerouter.human_pose_17")
 
@@ -82,7 +83,7 @@ def derive_person_bbox(person_dict: Dict[str, Any], pad_ratio: float = 0.18) -> 
     if isinstance(kps, dict):
         for pt in kps.values():
             if isinstance(pt, (list, tuple)) and len(pt) >= 2:
-                vis = pt[2] if len(pt) > 2 else 2
+                vis = normalize_visibility(pt[2] if len(pt) > 2 else 2, strict=False, default=2)
                 if vis > 0:
                     coords.append((float(pt[0]), float(pt[1])))
     elif isinstance(kps, list):
@@ -90,7 +91,7 @@ def derive_person_bbox(person_dict: Dict[str, Any], pad_ratio: float = 0.18) -> 
             if isinstance(item, dict):
                 pt = item.get("point") or item.get("points")
                 if pt and len(pt) >= 2:
-                    vis = item.get("visibility", 2)
+                    vis = normalize_visibility(item.get("visibility", 2), strict=False, default=2)
                     if vis > 0:
                         coords.append((float(pt[0]), float(pt[1])))
 
@@ -249,12 +250,19 @@ class ModelHandler:
             working_img = base_pil_img.copy()
 
             # Apply ROI if specified
+            roi_box_norm = None
             if roi is not None and len(roi) == 4:
                 rx1 = max(0, min(orig_w - 1, int(round(float(roi[0])))))
                 ry1 = max(0, min(orig_h - 1, int(round(float(roi[1])))))
                 rx2 = max(rx1 + 1, min(orig_w, int(round(float(roi[2])))))
                 ry2 = max(ry1 + 1, min(orig_h, int(round(float(roi[3])))))
                 working_img = working_img.crop((rx1, ry1, rx2, ry2))
+                roi_box_norm = [
+                    int(round(ry1 / float(orig_h) * 1000.0)),
+                    int(round(rx1 / float(orig_w) * 1000.0)),
+                    int(round(ry2 / float(orig_h) * 1000.0)),
+                    int(round(rx2 / float(orig_w) * 1000.0)),
+                ]
 
             # Resize if exceeding max size
             curr_w, curr_h = working_img.size
@@ -299,6 +307,40 @@ class ModelHandler:
                 raw_people = [parsed]
         elif isinstance(parsed, list):
             raw_people = [p for p in parsed if isinstance(p, dict)]
+
+        # If inference ran on an ROI crop, map coordinates back to full image space [0..1000]
+        if roi_box_norm is not None and len(roi_box_norm) == 4:
+            c_ymin, c_xmin, c_ymax, c_xmax = [float(v) for v in roi_box_norm]
+            c_w = c_xmax - c_xmin
+            c_h = c_ymax - c_ymin
+            for p in raw_people:
+                raw_b = p.get("box_2d") or p.get("bbox")
+                if isinstance(raw_b, (list, tuple)) and len(raw_b) == 4:
+                    try:
+                        p["box_2d"] = [
+                            int(round(c_ymin + (float(raw_b[0]) / 1000.0) * c_h)),
+                            int(round(c_xmin + (float(raw_b[1]) / 1000.0) * c_w)),
+                            int(round(c_ymin + (float(raw_b[2]) / 1000.0) * c_h)),
+                            int(round(c_xmin + (float(raw_b[3]) / 1000.0) * c_w)),
+                        ]
+                    except (ValueError, TypeError):
+                        pass
+                kps = p.get("keypoints")
+                if isinstance(kps, dict):
+                    for k_name, pt_val in kps.items():
+                        if isinstance(pt_val, (list, tuple)) and len(pt_val) >= 2:
+                            x_full = c_xmin + (float(pt_val[0]) / 1000.0) * c_w
+                            y_full = c_ymin + (float(pt_val[1]) / 1000.0) * c_h
+                            kps[k_name] = [round(x_full, 1), round(y_full, 1)] + list(pt_val[2:])
+                elif isinstance(kps, list):
+                    for item in kps:
+                        if isinstance(item, dict):
+                            pt = item.get("point") or item.get("points")
+                            if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                                item["point"] = [
+                                    round(c_xmin + (float(pt[0]) / 1000.0) * c_w, 1),
+                                    round(c_ymin + (float(pt[1]) / 1000.0) * c_h, 1),
+                                ] + list(pt[2:])
 
         enable_two_pass = (
             refine_crops if refine_crops is not None
@@ -462,40 +504,43 @@ class ModelHandler:
                         pt = item.get("point") or item.get("points")
                         vis = item.get("visibility", 2)
                         if k_name and pt and isinstance(pt, (list, tuple)) and len(pt) >= 2:
-                            dict_kps[str(k_name)] = [pt[0], pt[1], vis]
+                            norm_vis = normalize_visibility(vis, strict=False, default=2)
+                            dict_kps[str(k_name)] = [pt[0], pt[1], norm_vis]
+                crop_kps = dict_kps
+            elif isinstance(crop_kps, dict):
+                dict_kps = {}
+                for k_name, val in crop_kps.items():
+                    if isinstance(val, dict):
+                        pt = val.get("point") or val.get("points")
+                        vis = val.get("visibility", 2)
+                        if pt and isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                            norm_vis = normalize_visibility(vis, strict=False, default=2)
+                            dict_kps[str(k_name)] = [pt[0], pt[1], norm_vis]
+                    elif isinstance(val, (list, tuple)) and len(val) >= 2:
+                        raw_vis = val[2] if len(val) > 2 else 2
+                        norm_vis = normalize_visibility(raw_vis, strict=False, default=2)
+                        dict_kps[str(k_name)] = [val[0], val[1], norm_vis]
                 crop_kps = dict_kps
 
             if not crop_kps:
                 return person_dict, initial_report
 
-            # Reproject coordinates back to full image [0..1000]
+            # Reproject coordinates and merge Pass 1 & Pass 2 using canonical merge policy
             reprojected: Dict[str, List[Any]] = {}
             for name in POSE17_KEYPOINTS:
-                pt_val = crop_kps.get(name)
-                if pt_val is None or not isinstance(pt_val, (list, tuple)) or len(pt_val) < 2:
-                    # Fall back to initial keypoint if missing in crop
-                    orig_pt = person_dict.get("keypoints", {}).get(name)
-                    if orig_pt:
-                        reprojected[name] = list(orig_pt)
-                    continue
-
-                vis = int(pt_val[2]) if len(pt_val) > 2 else 2
-                if vis == 0:
-                    orig_pt = person_dict.get("keypoints", {}).get(name)
-                    if orig_pt and (len(orig_pt) <= 2 or orig_pt[2] > 0):
-                        # Preserve Pass 1 visible detection if point fell outside the crop window
-                        reprojected[name] = list(orig_pt)
-                        continue
-
-                x_crop = float(pt_val[0])
-                y_crop = float(pt_val[1])
-
-                x_px = px1 + (x_crop / 1000.0) * crop_w
-                y_px = py1 + (y_crop / 1000.0) * crop_h
-
-                norm_x = max(0.0, min(1000.0, (x_px / float(orig_w)) * 1000.0))
-                norm_y = max(0.0, min(1000.0, (y_px / float(orig_h)) * 1000.0))
-                reprojected[name] = [round(norm_x, 1), round(norm_y, 1), vis]
+                orig_pt = person_dict.get("keypoints", {}).get(name)
+                crop_pt = crop_kps.get(name)
+                merged = merge_refined_keypoint(
+                    name=name,
+                    pass1_pt=orig_pt,
+                    pass2_pt=crop_pt,
+                    crop_bbox=bbox,
+                    orig_w=orig_w,
+                    orig_h=orig_h,
+                    crop_window_px=(px1, py1, px2, py2),
+                )
+                if merged is not None:
+                    reprojected[name] = merged
 
             refined_person = dict(person_dict)
             refined_person["keypoints"] = reprojected

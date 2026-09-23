@@ -103,6 +103,14 @@ class TestPose17PromptsAndBbox:
         assert "physically occluded" in crop_prompt.lower()
         assert "optical blur is not occlusion" in crop_prompt.lower()
 
+    def test_no_ambiguous_visibility_choice_in_pose17_prompts(self):
+        """Mandate: No ambiguous 'visibility = 1 or 0' allowing model to choose 0 for occluded limbs."""
+        for prompt_name, prompt in [("global", build_pose17_prompt()), ("crop", build_pose17_crop_prompt())]:
+            assert "visibility = 1 or 0" not in prompt, f"Ambiguous rule found in {prompt_name}"
+            assert "1 (occluded) or 0" not in prompt, f"Ambiguous rule found in {prompt_name}"
+            assert "Physical occlusion within frame & inferable -> visibility = 1" in prompt, f"Missing strict occlusion rule in {prompt_name}"
+            assert "visibility = 0 is ONLY for points outside image frame" in prompt, f"Missing strict visibility 0 rule in {prompt_name}"
+
     def test_prompt_keypoints_derived_from_canonical_schema_metadata(self):
         schema = load_pose17()
         prompt = build_pose17_prompt()
@@ -325,3 +333,143 @@ class TestPose17ModelHandlerInference:
             handler = ModelHandler(base_url="http://mock:20128", api_key="dummy")
             with pytest.raises(ValueError, match="Empty image payload"):
                 handler.infer(b"")
+
+    @patch.object(pose17_mod, "NineRouterClient")
+    def test_pass2_case_c_hallucinated_wrist_inside_crop_discarded(self, mock_client_cls):
+        """CASE C: Pass 1 hallucinated a wrist inside crop bbox; Pass 2 inspected crop and set vis=0.
+        Merge policy must NOT restore Pass 1, setting vis=0 (outside=True) and accepting refinement."""
+        mock_client = MagicMock()
+        mock_client.resolve_pose17_model.return_value = "ag/gemini-3.8-flash-low"
+        mock_client.resolve_vision_model.return_value = "ag/gemini-3.8-flash-low"
+
+        pass1_person = _create_canonical_pose17_person()
+        # Hallucinated floating wrist in cabin roof
+        pass1_person["keypoints"]["right_wrist"] = [950, 100, 2]
+        # box_2d covering the person including the hallucinated wrist
+        pass1_person["box_2d"] = [50, 300, 950, 990]
+
+        # Pass 2 inspected crop patch: true wrist is unlabelable/outside (vis=0)
+        pass2_person = _create_canonical_pose17_person()
+        pass2_person["keypoints"]["right_wrist"] = [0, 0, 0]
+
+        mock_resp_1 = MagicMock()
+        mock_resp_1.content = json.dumps({"people": [pass1_person]})
+        mock_resp_2 = MagicMock()
+        mock_resp_2.content = json.dumps({"people": [pass2_person]})
+        mock_client.send_vision_request.side_effect = [mock_resp_1, mock_resp_2]
+        mock_client_cls.return_value = mock_client
+
+        handler = ModelHandler(base_url="http://mock:20128", api_key="dummy")
+        img_bytes = _create_test_image(640, 480)
+        shapes = handler.infer(img_bytes, threshold=0.5, refine_crops=True)
+
+        assert mock_client.send_vision_request.call_count == 2
+        assert len(shapes) == 1
+        # Find right_wrist element in CVAT shape
+        rw_elem = next(el for el in shapes[0]["elements"] if el["label"] == "right_wrist")
+        # Must NOT be restored to Pass 1 visible! Must be outside=True
+        assert rw_elem["outside"] is True
+        assert rw_elem["occluded"] is False
+
+    @patch.object(pose17_mod, "NineRouterClient")
+    def test_pass2_case_a_out_of_crop_limb_retained(self, mock_client_cls):
+        """CASE A: Pass 1 detected an ankle extending outside upper-body crop bbox.
+        Pass 2 set vis=0 because limb was cut off. Merge policy must retain Pass 1 visible detection."""
+        mock_client = MagicMock()
+        mock_client.resolve_pose17_model.return_value = "ag/gemini-3.8-flash-low"
+        mock_client.resolve_vision_model.return_value = "ag/gemini-3.8-flash-low"
+
+        pass1_person = _create_canonical_pose17_person()
+        # Ankle is at [580, 950, 2]
+        pass1_person["keypoints"]["right_ankle"] = [580, 950, 2]
+        # Crop bbox tightly focused on upper body only (ymax=600 < 950)
+        pass1_person["box_2d"] = [100, 300, 600, 700]
+        # Needs refine due to suspect arm
+        pass1_person["keypoints"]["right_wrist"] = [950, 20, 2]
+
+        pass2_person = _create_canonical_pose17_person()
+        # Pass 2 fixes wrist inside crop
+        pass2_person["keypoints"]["right_wrist"] = [650, 520, 2]
+        # Pass 2 says ankle is outside crop (vis=0)
+        pass2_person["keypoints"]["right_ankle"] = [0, 0, 0]
+
+        mock_resp_1 = MagicMock()
+        mock_resp_1.content = json.dumps({"people": [pass1_person]})
+        mock_resp_2 = MagicMock()
+        mock_resp_2.content = json.dumps({"people": [pass2_person]})
+        mock_client.send_vision_request.side_effect = [mock_resp_1, mock_resp_2]
+        mock_client_cls.return_value = mock_client
+
+        handler = ModelHandler(base_url="http://mock:20128", api_key="dummy")
+        img_bytes = _create_test_image(640, 480)
+        shapes = handler.infer(img_bytes, threshold=0.5, refine_crops=True)
+
+        assert mock_client.send_vision_request.call_count == 2
+        assert len(shapes) == 1
+        ra_elem = next(el for el in shapes[0]["elements"] if el["label"] == "right_ankle")
+        # Pass 1 right_ankle was outside crop window, so Case A must retain it as visible!
+        assert ra_elem["outside"] is False
+
+    @patch.object(pose17_mod, "NineRouterClient")
+    def test_pass2_string_visibility_robustness(self, mock_client_cls):
+        """Verify Pass 2 parsing handles string visibility aliases ('visible', 'occluded') without crashing."""
+        mock_client = MagicMock()
+        mock_client.resolve_pose17_model.return_value = "ag/gemini-3.8-flash-low"
+        mock_client.resolve_vision_model.return_value = "ag/gemini-3.8-flash-low"
+
+        corrupt_person = _create_canonical_pose17_person()
+        corrupt_person["keypoints"]["right_wrist"] = [950, 20, 2]
+
+        # Pass 2 returns strings for visibility
+        refined_person = _create_canonical_pose17_person()
+        for k in refined_person["keypoints"]:
+            refined_person["keypoints"][k][2] = "visible"
+        refined_person["keypoints"]["left_wrist"][2] = "occluded"
+
+        mock_resp_1 = MagicMock()
+        mock_resp_1.content = json.dumps({"people": [corrupt_person]})
+        mock_resp_2 = MagicMock()
+        mock_resp_2.content = json.dumps({"people": [refined_person]})
+        mock_client.send_vision_request.side_effect = [mock_resp_1, mock_resp_2]
+        mock_client_cls.return_value = mock_client
+
+        handler = ModelHandler(base_url="http://mock:20128", api_key="dummy")
+        img_bytes = _create_test_image(640, 480)
+        shapes = handler.infer(img_bytes, threshold=0.5, refine_crops=True)
+
+        assert mock_client.send_vision_request.call_count == 2
+        assert len(shapes) == 1
+        lw_elem = next(el for el in shapes[0]["elements"] if el["label"] == "left_wrist")
+        assert lw_elem["occluded"] is True
+        assert lw_elem["outside"] is False
+
+    @patch.object(pose17_mod, "NineRouterClient")
+    def test_custom_roi_reprojects_to_full_image_coordinates(self, mock_client_cls):
+        """Verify that passing an explicit ROI crops the image and reprojects predictions to full image space."""
+        mock_client = MagicMock()
+        mock_client.resolve_pose17_model.return_value = "ag/gemini-3.8-flash-low"
+        mock_client.resolve_vision_model.return_value = "ag/gemini-3.8-flash-low"
+
+        # Vision model receives the ROI crop (which is 500x500 in a 1000x1000 image)
+        # Inside the crop, the person nose is at center (500, 500)
+        person_in_crop = _create_canonical_pose17_person()
+        person_in_crop["keypoints"]["nose"] = [500, 500, 2]
+
+        mock_resp = MagicMock()
+        mock_resp.content = json.dumps({"people": [person_in_crop]})
+        mock_client.send_vision_request.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        handler = ModelHandler(base_url="http://mock:20128", api_key="dummy")
+        img_bytes = _create_test_image(1000, 1000)
+
+        # ROI is bottom-right quadrant: [500, 500, 1000, 1000]
+        roi = [500, 500, 1000, 1000]
+        shapes = handler.infer(img_bytes, threshold=0.5, roi=roi, refine_crops=False)
+
+        assert len(shapes) == 1
+        nose_elem = next(el for el in shapes[0]["elements"] if el["label"] == "nose")
+        # Center of bottom-right quadrant (500..1000) is 750!
+        assert nose_elem["points"][0] == pytest.approx(750.0, abs=1.0)
+        assert nose_elem["points"][1] == pytest.approx(750.0, abs=1.0)
+

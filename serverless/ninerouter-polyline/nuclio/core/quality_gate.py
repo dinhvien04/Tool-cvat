@@ -161,6 +161,20 @@ class LateralityVerificationResult:
     crossed_limbs: List[str] = field(default_factory=list)
 
 
+@dataclass
+class VF50GeometryResult:
+    """Detailed geometric verification outcome for Face Landmark VF-50."""
+    is_valid: bool
+    reasons: List[str] = field(default_factory=list)
+    hard_errors: List[str] = field(default_factory=list)
+    soft_warnings: List[str] = field(default_factory=list)
+    suspect_components: List[str] = field(default_factory=list)
+    iod: float = 0.0
+    roll_angle_deg: float = 0.0
+    area_outer_lip: float = 0.0
+    area_inner_lip: float = 0.0
+
+
 # ==============================================================================
 # 3. BASIC GEOMETRY PRIMITIVES
 # ==============================================================================
@@ -529,7 +543,7 @@ def detect_coordinate_axis_swap(
         rs = pts.get("right_shoulder")
         lh = pts.get("left_hip")
         rh = pts.get("right_hip")
-        if not (ls and rs and lh and rh):
+        if not (ls and rs and lh and rh and ls[2] > 0 and rs[2] > 0 and lh[2] > 0 and rh[2] > 0):
             return False, "insufficient_points_for_pose_axis_check"
 
         s_mid = ((ls[0] + rs[0]) * 0.5, (ls[1] + rs[1]) * 0.5)
@@ -556,10 +570,10 @@ def detect_coordinate_axis_swap(
 
     elif "vf50" in schema_clean or "face" in schema_clean:
         pts_map = _extract_vf50_points(data)
-        left_eye_pts = [pts_map[i] for i in range(14, 22) if i in pts_map]
-        right_eye_pts = [pts_map[i] for i in range(22, 30) if i in pts_map]
-        nose_pts = [pts_map[i] for i in range(10, 14) if i in pts_map]
-        mouth_pts = [pts_map[i] for i in range(30, 42) if i in pts_map]
+        left_eye_pts = [pts_map[i] for i in range(14, 22) if i in pts_map and pts_map[i][2] > 0]
+        right_eye_pts = [pts_map[i] for i in range(22, 30) if i in pts_map and pts_map[i][2] > 0]
+        nose_pts = [pts_map[i] for i in range(10, 14) if i in pts_map and pts_map[i][2] > 0]
+        mouth_pts = [pts_map[i] for i in range(30, 42) if i in pts_map and pts_map[i][2] > 0]
 
         if not (left_eye_pts and right_eye_pts and nose_pts and mouth_pts):
             return False, "insufficient_landmarks_for_face_axis_check"
@@ -572,7 +586,11 @@ def detect_coordinate_axis_swap(
             sum(p[0] for p in right_eye_pts) / len(right_eye_pts),
             sum(p[1] for p in right_eye_pts) / len(right_eye_pts),
         )
-        c_nose_top = pts_map.get(10, (sum(p[0] for p in nose_pts)/len(nose_pts), sum(p[1] for p in nose_pts)/len(nose_pts)))
+        p10 = pts_map.get(10)
+        c_nose_top = (p10[0], p10[1]) if p10 and p10[2] > 0 else (
+            sum(p[0] for p in nose_pts) / len(nose_pts),
+            sum(p[1] for p in nose_pts) / len(nose_pts),
+        )
         c_mouth = (
             sum(p[0] for p in mouth_pts) / len(mouth_pts),
             sum(p[1] for p in mouth_pts) / len(mouth_pts),
@@ -618,7 +636,34 @@ def verify_laterality_convention(
         rs = pts.get("right_shoulder")
         nose = pts.get("nose")
 
-        if not (ls and rs):
+        # Determine primary rigid anchor for laterality baseline (prefer shoulders, fallback to hips, eyes, ears)
+        primary_left: Optional[Tuple[float, float, int, float]] = None
+        primary_right: Optional[Tuple[float, float, int, float]] = None
+        anchor_name = ""
+
+        if ls and rs and ls[2] > 0 and rs[2] > 0:
+            primary_left, primary_right = ls, rs
+            anchor_name = "shoulder"
+        else:
+            lh = pts.get("left_hip")
+            rh = pts.get("right_hip")
+            if lh and rh and lh[2] > 0 and rh[2] > 0:
+                primary_left, primary_right = lh, rh
+                anchor_name = "hip"
+            else:
+                le = pts.get("left_eye")
+                re = pts.get("right_eye")
+                if le and re and le[2] > 0 and re[2] > 0:
+                    primary_left, primary_right = le, re
+                    anchor_name = "eye"
+                else:
+                    lear = pts.get("left_ear")
+                    rear = pts.get("right_ear")
+                    if lear and rear and lear[2] > 0 and rear[2] > 0:
+                        primary_left, primary_right = lear, rear
+                        anchor_name = "ear"
+
+        if not (primary_left and primary_right):
             return LateralityVerificationResult(
                 is_valid=False,
                 detected_convention="unknown",
@@ -627,13 +672,13 @@ def verify_laterality_convention(
             )
 
         # delta_x = x_left - x_right
-        delta_x = ls[0] - rs[0]
+        delta_x = primary_left[0] - primary_right[0]
         detected = "subject" if delta_x > 0 else "viewer"
 
-        # Check front-facing subject: nose between shoulders horizontally
+        # Check front-facing subject: nose between anchors horizontally
         is_frontal = False
-        if nose:
-            min_sx, max_sx = min(ls[0], rs[0]), max(ls[0], rs[0])
+        if nose and nose[2] > 0:
+            min_sx, max_sx = min(primary_left[0], primary_right[0]), max(primary_left[0], primary_right[0])
             if min_sx - 20.0 <= nose[0] <= max_sx + 20.0:
                 is_frontal = True
 
@@ -643,13 +688,13 @@ def verify_laterality_convention(
         crossed_limbs: List[str] = []
         is_valid = True
         if target_conv == LATERALITY_SUBJECT:
-            if is_frontal and delta_x < 0:
+            if is_frontal and delta_x < -5.0:
                 is_valid = False
-                msg = "laterality_inversion: left_shoulder has smaller x than right_shoulder for frontal subject"
+                msg = f"laterality_inversion: left_{anchor_name} has smaller x than right_{anchor_name} for frontal subject"
                 reasons.append(msg)
                 hard_errors.append(msg)
         elif target_conv == LATERALITY_VIEWER:
-            if delta_x > 0:
+            if delta_x > 5.0:
                 is_valid = False
                 msg = "laterality_inversion: viewer left has larger x than viewer right"
                 reasons.append(msg)
@@ -706,8 +751,8 @@ def verify_laterality_convention(
     elif "vf50" in schema_clean or "face" in schema_clean:
         target_conv = expected_convention or LATERALITY_VIEWER  # VF-50 standard is viewer convention
         pts_map = _extract_vf50_points(data)
-        left_eye_pts = [pts_map[i] for i in range(14, 22) if i in pts_map]
-        right_eye_pts = [pts_map[i] for i in range(22, 30) if i in pts_map]
+        left_eye_pts = [pts_map[i] for i in range(14, 22) if i in pts_map and pts_map[i][2] > 0]
+        right_eye_pts = [pts_map[i] for i in range(22, 30) if i in pts_map and pts_map[i][2] > 0]
 
         if not (left_eye_pts and right_eye_pts):
             return LateralityVerificationResult(
@@ -730,30 +775,30 @@ def verify_laterality_convention(
         soft_warnings: List[str] = []
         is_valid = True
         if target_conv == LATERALITY_VIEWER:
-            if delta_x < 0:
+            if delta_x < -5.0:
                 is_valid = False
                 msg = "laterality_inversion: mattrai has larger x than matphai (violates viewer convention)"
                 reasons.append(msg)
                 hard_errors.append(msg)
         elif target_conv == LATERALITY_SUBJECT:
-            if delta_x > 0:
+            if delta_x > 5.0:
                 is_valid = False
                 msg = "laterality_inversion: subject right eye has larger x than left eye"
                 reasons.append(msg)
                 hard_errors.append(msg)
 
         # Check eyebrows (longmaytrai 0..4 vs longmayphai 5..9)
-        left_eb_pts = [pts_map[i] for i in range(0, 5) if i in pts_map]
-        right_eb_pts = [pts_map[i] for i in range(5, 10) if i in pts_map]
+        left_eb_pts = [pts_map[i] for i in range(0, 5) if i in pts_map and pts_map[i][2] > 0]
+        right_eb_pts = [pts_map[i] for i in range(5, 10) if i in pts_map and pts_map[i][2] > 0]
         if left_eb_pts and right_eb_pts:
             c_left_eb = sum(p[0] for p in left_eb_pts) / len(left_eb_pts)
             c_right_eb = sum(p[0] for p in right_eb_pts) / len(right_eb_pts)
-            if target_conv == LATERALITY_VIEWER and c_left_eb > c_right_eb:
+            if target_conv == LATERALITY_VIEWER and c_left_eb > c_right_eb + 5.0:
                 is_valid = False
                 msg = f"eyebrow_laterality_inversion: longmaytrai ({c_left_eb:.1f}) > longmayphai ({c_right_eb:.1f})"
                 reasons.append(msg)
                 hard_errors.append(msg)
-            elif target_conv == LATERALITY_SUBJECT and c_left_eb < c_right_eb:
+            elif target_conv == LATERALITY_SUBJECT and c_left_eb < c_right_eb - 5.0:
                 is_valid = False
                 msg = f"eyebrow_laterality_inversion: subject right eyebrow ({c_right_eb:.1f}) > left eyebrow ({c_left_eb:.1f})"
                 reasons.append(msg)
@@ -1018,7 +1063,7 @@ def assess_pose17_quality(
     ra = pts.get("right_ankle")
     nose = pts.get("nose")
 
-    if ls and rs and lh and rh:
+    if ls and rs and lh and rh and ls[2] > 0 and rs[2] > 0 and lh[2] > 0 and rh[2] > 0:
         shoulder_y = (ls[1] + rs[1]) * 0.5
         hip_y = (lh[1] + rh[1]) * 0.5
         ankles_y = None
@@ -1175,6 +1220,206 @@ def assess_pose17_quality(
 # 8. QUALITY GATE: FACE LANDMARK VF-50 (Sections 17 & 18)
 # ==============================================================================
 
+def verify_vf50_geometry(
+    data: Any,
+    *,
+    laterality_convention: str = LATERALITY_VIEWER,
+) -> VF50GeometryResult:
+    """Rigorous geometric verification for Face Landmark VF-50 (50 points, 7 skeletons).
+
+    Evaluates:
+    1. Active landmarks filtering (strictly visibility > 0: occluded=1 or visible=2, excluding outside=0).
+    2. Head roll angle & Inter-Ocular Distance (IOD) calculation.
+    3. Eye line laterality and eyebrow position in head-roll compensated frame.
+    4. Eyelid contours (upper above lower, no figure-8 self-intersection).
+    5. Nose bridge monotonicity and vertical placement between eyes and mouth.
+    6. Outer lip vs inner lip topological constraints:
+       - Area containment: Area(inner) <= Area(outer).
+       - Horizontal nesting: inner corners within outer corners.
+       - Contour self-intersection checks.
+    """
+    pts_map = _extract_vf50_points(data)
+    reasons: List[str] = []
+    hard_errors: List[str] = []
+    soft_warnings: List[str] = []
+    suspect_components: List[str] = []
+
+    # Filter active points (visibility > 0)
+    active_map = {k: v for k, v in pts_map.items() if v[2] > 0}
+
+    # 1. Laterality verification (Viewer convention: mattrai on screen left)
+    lat_result = verify_laterality_convention(active_map, schema_type="vf50", expected_convention=laterality_convention)
+    if not lat_result.is_valid:
+        suspect_components.extend(["mattrai", "matphai"])
+        hard_errors.extend(lat_result.hard_errors)
+        reasons.extend(lat_result.reasons)
+    elif lat_result.soft_warnings:
+        soft_warnings.extend(lat_result.soft_warnings)
+        reasons.extend(lat_result.soft_warnings)
+
+    # 2. Calculate face roll angle and inter-ocular distance (IOD)
+    left_eye_pts = [active_map[i] for i in range(14, 22) if i in active_map]
+    right_eye_pts = [active_map[i] for i in range(22, 30) if i in active_map]
+
+    iod = 0.0
+    roll_angle_rad = 0.0
+    c_left_eye = (0.0, 0.0)
+    c_right_eye = (0.0, 0.0)
+
+    if left_eye_pts and right_eye_pts:
+        c_left_eye = (
+            sum(p[0] for p in left_eye_pts) / len(left_eye_pts),
+            sum(p[1] for p in left_eye_pts) / len(left_eye_pts),
+        )
+        c_right_eye = (
+            sum(p[0] for p in right_eye_pts) / len(right_eye_pts),
+            sum(p[1] for p in right_eye_pts) / len(right_eye_pts),
+        )
+        iod = math.hypot(c_right_eye[0] - c_left_eye[0], c_right_eye[1] - c_left_eye[1])
+        roll_angle_rad = math.atan2(c_right_eye[1] - c_left_eye[1], c_right_eye[0] - c_left_eye[0])
+
+    roll_angle_deg = math.degrees(roll_angle_rad)
+
+    # Un-rotated coordinates helper for robust tilt evaluation
+    cos_r = math.cos(-roll_angle_rad)
+    sin_r = math.sin(-roll_angle_rad)
+    cx_face = (c_left_eye[0] + c_right_eye[0]) * 0.5
+    cy_face = (c_left_eye[1] + c_right_eye[1]) * 0.5
+
+    def to_face_frame(pt: Tuple[float, float, int, float]) -> Tuple[float, float]:
+        dx = pt[0] - cx_face
+        dy = pt[1] - cy_face
+        return (cx_face + dx * cos_r - dy * sin_r, cy_face + dx * sin_r + dy * cos_r)
+
+    # 3. Eyebrows above eyes
+    left_eb_pts = [active_map[i] for i in range(0, 5) if i in active_map]
+    right_eb_pts = [active_map[i] for i in range(5, 10) if i in active_map]
+
+    if left_eb_pts and left_eye_pts:
+        y_eb_left = sum(to_face_frame(p)[1] for p in left_eb_pts) / len(left_eb_pts)
+        y_eye_left = sum(to_face_frame(p)[1] for p in left_eye_pts) / len(left_eye_pts)
+        if y_eb_left > y_eye_left - 3.0:
+            suspect_components.append("longmaytrai")
+            msg = f"eyebrow_below_eye: longmaytrai (y={y_eb_left:.1f}) below or touching mattrai (y={y_eye_left:.1f})"
+            soft_warnings.append(msg)
+            reasons.append(msg)
+
+    if right_eb_pts and right_eye_pts:
+        y_eb_right = sum(to_face_frame(p)[1] for p in right_eb_pts) / len(right_eb_pts)
+        y_eye_right = sum(to_face_frame(p)[1] for p in right_eye_pts) / len(right_eye_pts)
+        if y_eb_right > y_eye_right - 3.0:
+            suspect_components.append("longmayphai")
+            msg = f"eyebrow_below_eye: longmayphai (y={y_eb_right:.1f}) below or touching matphai (y={y_eye_right:.1f})"
+            soft_warnings.append(msg)
+            reasons.append(msg)
+
+    # 4. Eyelid contour vs pupil/iris & opposing eyelid checks
+    for upper_id, lower_id in VF50_EYELID_OPPOSING_PAIRS:
+        if upper_id in active_map and lower_id in active_map:
+            u_rot = to_face_frame(active_map[upper_id])
+            l_rot = to_face_frame(active_map[lower_id])
+            if u_rot[1] > l_rot[1] + 4.0:
+                comp = "mattrai" if upper_id < 22 else "matphai"
+                suspect_components.append(comp)
+                msg = f"inverted_eyelid: upper pt {upper_id} below lower pt {lower_id}"
+                soft_warnings.append(msg)
+                reasons.append(msg)
+
+    # Check for self-intersecting eye loops (figure-8 / X-shape) - Hard error
+    if len(left_eye_pts) == 8:
+        poly_left_eye = [(active_map[i][0], active_map[i][1]) for i in range(14, 22) if i in active_map]
+        if len(poly_left_eye) == 8 and _self_intersects(poly_left_eye, closed=True):
+            suspect_components.append("mattrai")
+            msg = "self_intersecting_eye_contour: mattrai forms figure-8"
+            hard_errors.append(msg)
+            reasons.append(msg)
+
+    if len(right_eye_pts) == 8:
+        poly_right_eye = [(active_map[i][0], active_map[i][1]) for i in range(22, 30) if i in active_map]
+        if len(poly_right_eye) == 8 and _self_intersects(poly_right_eye, closed=True):
+            suspect_components.append("matphai")
+            msg = "self_intersecting_eye_contour: matphai forms figure-8"
+            hard_errors.append(msg)
+            reasons.append(msg)
+
+    # 5. Nose alignment & position between eyes and mouth
+    nose_pts = [active_map[i] for i in range(10, 14) if i in active_map]
+    if len(nose_pts) == 4:
+        y_nose_rot = [to_face_frame(active_map[i])[1] for i in range(10, 14)]
+        if not (y_nose_rot[0] <= y_nose_rot[1] + 3.0 <= y_nose_rot[2] + 6.0 <= y_nose_rot[3] + 9.0):
+            suspect_components.append("songmui")
+            msg = "disordered_nose_bridge: points 10..13 not monotonic down bridge"
+            soft_warnings.append(msg)
+            reasons.append(msg)
+
+    mouth_outer_pts = [active_map[i] for i in range(30, 42) if i in active_map]
+    if 13 in active_map and left_eye_pts and right_eye_pts and mouth_outer_pts:
+        y_nose_base = to_face_frame(active_map[13])[1]
+        y_eyes = (to_face_frame((c_left_eye[0], c_left_eye[1], 2, 1.0))[1] + to_face_frame((c_right_eye[0], c_right_eye[1], 2, 1.0))[1]) * 0.5
+        y_mouth_top = min(to_face_frame(p)[1] for p in mouth_outer_pts)
+
+        if not (y_eyes < y_nose_base < y_mouth_top):
+            suspect_components.append("songmui")
+            msg = f"nose_vertical_position_invalid: base y={y_nose_base:.1f} not between eyes ({y_eyes:.1f}) and mouth ({y_mouth_top:.1f})"
+            soft_warnings.append(msg)
+            reasons.append(msg)
+
+    # 6. Outer lip vs Inner lip topological constraints
+    mouth_inner_pts = [active_map[i] for i in range(42, 50) if i in active_map]
+    area_outer = 0.0
+    area_inner = 0.0
+    if len(mouth_outer_pts) == 12 and len(mouth_inner_pts) == 8:
+        poly_outer = [(active_map[i][0], active_map[i][1]) for i in range(30, 42)]
+        poly_inner = [(active_map[i][0], active_map[i][1]) for i in range(42, 50)]
+
+        area_outer = _polygon_area(poly_outer)
+        area_inner = _polygon_area(poly_inner)
+
+        # Topological constraint: inner lip area cannot exceed outer lip area (Hard Error)
+        if area_inner > area_outer + 5.0:
+            suspect_components.append("moitrong")
+            msg = f"inner_lip_larger_than_outer: inner={area_inner:.1f} > outer={area_outer:.1f}"
+            hard_errors.append(msg)
+            reasons.append(msg)
+
+        # Horizontal nesting constraint: inner corners inside outer corners
+        x_outer_left = active_map[30][0]
+        x_outer_right = active_map[36][0]
+        x_inner_left = active_map[42][0]
+        x_inner_right = active_map[46][0]
+
+        if x_inner_left < x_outer_left - 4.0 or x_inner_right > x_outer_right + 4.0:
+            suspect_components.append("moitrong")
+            msg = f"inner_lip_protrudes_horizontally: inner=[{x_inner_left:.1f},{x_inner_right:.1f}] outer=[{x_outer_left:.1f},{x_outer_right:.1f}]"
+            soft_warnings.append(msg)
+            reasons.append(msg)
+
+        if _self_intersects(poly_outer, closed=True):
+            suspect_components.append("moingoai")
+            msg = "self_intersecting_lip_contour: moingoai self-intersects"
+            soft_warnings.append(msg)
+            reasons.append(msg)
+        if _self_intersects(poly_inner, closed=True):
+            suspect_components.append("moitrong")
+            msg = "self_intersecting_lip_contour: moitrong self-intersects"
+            soft_warnings.append(msg)
+            reasons.append(msg)
+
+    is_valid = len(hard_errors) == 0
+
+    return VF50GeometryResult(
+        is_valid=is_valid,
+        reasons=reasons,
+        hard_errors=hard_errors,
+        soft_warnings=soft_warnings,
+        suspect_components=list(set(suspect_components)),
+        iod=round(iod, 2),
+        roll_angle_deg=round(roll_angle_deg, 2),
+        area_outer_lip=round(area_outer, 2),
+        area_inner_lip=round(area_inner, 2),
+    )
+
+
 def assess_vf50_quality(
     data: Any,
     *,
@@ -1269,176 +1514,48 @@ def assess_vf50_quality(
         hard_errors.append(swap_reason)
         reasons.append(swap_reason)
 
-    # 4. Laterality verification (Viewer convention: mattrai is on screen left)
-    lat_result = verify_laterality_convention(pts_map, schema_type="vf50", expected_convention=laterality_convention)
-    if not lat_result.is_valid:
-        score -= 0.35
-        suspect_components.extend(["mattrai", "matphai"])
-        hard_errors.extend(lat_result.hard_errors)
-        reasons.extend(lat_result.reasons)
-    elif lat_result.soft_warnings:
-        score -= 0.08
-        soft_warnings.extend(lat_result.soft_warnings)
-        reasons.extend(lat_result.soft_warnings)
+    # 4. Detailed geometric verification (roll, laterality, eyelids, nose, lips)
+    geom_res = verify_vf50_geometry(pts_map, laterality_convention=laterality_convention)
+    for err in geom_res.hard_errors:
+        if err not in hard_errors:
+            hard_errors.append(err)
+            reasons.append(err)
+            if "inner_lip_larger_than_outer" in err:
+                score -= 0.35
+            elif "self_intersecting_eye_contour" in err:
+                score -= 0.25
+            elif "laterality_inversion" in err or "paired_laterality" in err:
+                score -= 0.35
+            else:
+                score -= 0.25
 
-    # Calculate face roll angle and inter-ocular distance (IOD)
-    left_eye_pts = [pts_map[i] for i in range(14, 22) if i in pts_map]
-    right_eye_pts = [pts_map[i] for i in range(22, 30) if i in pts_map]
-
-    iod = 0.0
-    roll_angle_rad = 0.0
-    c_left_eye = (0.0, 0.0)
-    c_right_eye = (0.0, 0.0)
-
-    if left_eye_pts and right_eye_pts:
-        c_left_eye = (
-            sum(p[0] for p in left_eye_pts) / len(left_eye_pts),
-            sum(p[1] for p in left_eye_pts) / len(left_eye_pts),
-        )
-        c_right_eye = (
-            sum(p[0] for p in right_eye_pts) / len(right_eye_pts),
-            sum(p[1] for p in right_eye_pts) / len(right_eye_pts),
-        )
-        iod = math.hypot(c_right_eye[0] - c_left_eye[0], c_right_eye[1] - c_left_eye[1])
-        roll_angle_rad = math.atan2(c_right_eye[1] - c_left_eye[1], c_right_eye[0] - c_left_eye[0])
-
-    # Un-rotated coordinates helper for robust tilt evaluation
-    cos_r = math.cos(-roll_angle_rad)
-    sin_r = math.sin(-roll_angle_rad)
-    cx_face = (c_left_eye[0] + c_right_eye[0]) * 0.5
-    cy_face = (c_left_eye[1] + c_right_eye[1]) * 0.5
-
-    def to_face_frame(pt: Tuple[float, float, int, float]) -> Tuple[float, float]:
-        dx = pt[0] - cx_face
-        dy = pt[1] - cy_face
-        return (cx_face + dx * cos_r - dy * sin_r, cy_face + dx * sin_r + dy * cos_r)
-
-    # 5. Eyebrows above eyes
-    left_eb_pts = [pts_map[i] for i in range(0, 5) if i in pts_map]
-    right_eb_pts = [pts_map[i] for i in range(5, 10) if i in pts_map]
-
-    if left_eb_pts and left_eye_pts:
-        y_eb_left = sum(to_face_frame(p)[1] for p in left_eb_pts) / len(left_eb_pts)
-        y_eye_left = sum(to_face_frame(p)[1] for p in left_eye_pts) / len(left_eye_pts)
-        # Eyebrows must be above eyes (smaller y in un-rotated face frame)
-        if y_eb_left > y_eye_left - 3.0:
-            score -= 0.20
-            suspect_components.append("longmaytrai")
-            msg = f"eyebrow_below_eye: longmaytrai (y={y_eb_left:.1f}) below or touching mattrai (y={y_eye_left:.1f})"
-            soft_warnings.append(msg)
-            reasons.append(msg)
-
-    if right_eb_pts and right_eye_pts:
-        y_eb_right = sum(to_face_frame(p)[1] for p in right_eb_pts) / len(right_eb_pts)
-        y_eye_right = sum(to_face_frame(p)[1] for p in right_eye_pts) / len(right_eye_pts)
-        if y_eb_right > y_eye_right - 3.0:
-            score -= 0.20
-            suspect_components.append("longmayphai")
-            msg = f"eyebrow_below_eye: longmayphai (y={y_eb_right:.1f}) below or touching matphai (y={y_eye_right:.1f})"
-            soft_warnings.append(msg)
-            reasons.append(msg)
-
-    # 6. Eyelid contour vs pupil/iris & opposing eyelid checks
-    # Upper eyelid points must be higher (or equal) to opposing lower eyelid points
-    for upper_id, lower_id in VF50_EYELID_OPPOSING_PAIRS:
-        if upper_id in pts_map and lower_id in pts_map:
-            u_rot = to_face_frame(pts_map[upper_id])
-            l_rot = to_face_frame(pts_map[lower_id])
-            # Tolerance 4.0 normalized units for squinting/closed eyes
-            if u_rot[1] > l_rot[1] + 4.0:
+    for warn in geom_res.soft_warnings:
+        if warn not in soft_warnings:
+            soft_warnings.append(warn)
+            reasons.append(warn)
+            if "eyebrow_below_eye" in warn:
+                score -= 0.20
+            elif "inverted_eyelid" in warn:
                 score -= 0.15
-                comp = "mattrai" if upper_id < 22 else "matphai"
-                suspect_components.append(comp)
-                msg = f"inverted_eyelid: upper pt {upper_id} below lower pt {lower_id}"
-                soft_warnings.append(msg)
-                reasons.append(msg)
+            elif "nose_vertical_position_invalid" in warn:
+                score -= 0.25
+            elif "disordered_nose_bridge" in warn:
+                score -= 0.15
+            elif "inner_lip_protrudes" in warn:
+                score -= 0.25
+            elif "self_intersecting_lip" in warn:
+                score -= 0.20
+            elif "crossed_limbs" in warn:
+                score -= 0.08
+            else:
+                score -= 0.10
 
-    # Check for self-intersecting eye loops (figure-8 / X-shape) - Hard error
-    if len(left_eye_pts) == 8:
-        poly_left_eye = [(pts_map[i][0], pts_map[i][1]) for i in range(14, 22)]
-        if _self_intersects(poly_left_eye, closed=True):
-            score -= 0.25
-            suspect_components.append("mattrai")
-            msg = "self_intersecting_eye_contour: mattrai forms figure-8"
-            hard_errors.append(msg)
-            reasons.append(msg)
+    for comp in geom_res.suspect_components:
+        if comp not in suspect_components:
+            suspect_components.append(comp)
 
-    if len(right_eye_pts) == 8:
-        poly_right_eye = [(pts_map[i][0], pts_map[i][1]) for i in range(22, 30)]
-        if _self_intersects(poly_right_eye, closed=True):
-            score -= 0.25
-            suspect_components.append("matphai")
-            msg = "self_intersecting_eye_contour: matphai forms figure-8"
-            hard_errors.append(msg)
-            reasons.append(msg)
-
-    # 7. Nose alignment & position between eyes and mouth
-    nose_pts = [pts_map[i] for i in range(10, 14) if i in pts_map]
-    if len(nose_pts) == 4:
-        # Check monotonic downwards progression along nose bridge
-        y_nose_rot = [to_face_frame(pts_map[i])[1] for i in range(10, 14)]
-        if not (y_nose_rot[0] <= y_nose_rot[1] + 3.0 <= y_nose_rot[2] + 6.0 <= y_nose_rot[3] + 9.0):
-            score -= 0.15
-            suspect_components.append("songmui")
-            msg = "disordered_nose_bridge: points 10..13 not monotonic down bridge"
-            soft_warnings.append(msg)
-            reasons.append(msg)
-
-    mouth_outer_pts = [pts_map[i] for i in range(30, 42) if i in pts_map]
-    if 13 in pts_map and left_eye_pts and right_eye_pts and mouth_outer_pts:
-        y_nose_base = to_face_frame(pts_map[13])[1]
-        y_eyes = (to_face_frame(c_left_eye + (0, 0))[1] + to_face_frame(c_right_eye + (0, 0))[1]) * 0.5
-        y_mouth_top = min(to_face_frame(p)[1] for p in mouth_outer_pts)
-
-        if not (y_eyes < y_nose_base < y_mouth_top):
-            score -= 0.25
-            suspect_components.append("songmui")
-            msg = f"nose_vertical_position_invalid: base y={y_nose_base:.1f} not between eyes ({y_eyes:.1f}) and mouth ({y_mouth_top:.1f})"
-            soft_warnings.append(msg)
-            reasons.append(msg)
-
-    # 8. Outer lip vs Inner lip topological constraints
-    mouth_inner_pts = [pts_map[i] for i in range(42, 50) if i in pts_map]
-    if len(mouth_outer_pts) == 12 and len(mouth_inner_pts) == 8:
-        poly_outer = [(pts_map[i][0], pts_map[i][1]) for i in range(30, 42)]
-        poly_inner = [(pts_map[i][0], pts_map[i][1]) for i in range(42, 50)]
-
-        area_outer = _polygon_area(poly_outer)
-        area_inner = _polygon_area(poly_inner)
-
-        # Topological constraint: inner lip area cannot exceed outer lip area (Hard Error)
-        if area_inner > area_outer + 5.0:
-            score -= 0.35
-            suspect_components.append("moitrong")
-            msg = f"inner_lip_larger_than_outer: inner={area_inner:.1f} > outer={area_outer:.1f}"
-            hard_errors.append(msg)
-            reasons.append(msg)
-
-        # Horizontal nesting constraint: inner corners inside outer corners
-        x_outer_left = pts_map[30][0]
-        x_outer_right = pts_map[36][0]
-        x_inner_left = pts_map[42][0]
-        x_inner_right = pts_map[46][0]
-
-        if x_inner_left < x_outer_left - 4.0 or x_inner_right > x_outer_right + 4.0:
-            score -= 0.25
-            suspect_components.append("moitrong")
-            msg = f"inner_lip_protrudes_horizontally: inner=[{x_inner_left:.1f},{x_inner_right:.1f}] outer=[{x_outer_left:.1f},{x_outer_right:.1f}]"
-            soft_warnings.append(msg)
-            reasons.append(msg)
-
-        if _self_intersects(poly_outer, closed=True):
-            score -= 0.20
-            suspect_components.append("moingoai")
-            msg = "self_intersecting_lip_contour: moingoai self-intersects"
-            soft_warnings.append(msg)
-            reasons.append(msg)
-        if _self_intersects(poly_inner, closed=True):
-            score -= 0.20
-            suspect_components.append("moitrong")
-            msg = "self_intersecting_lip_contour: moitrong self-intersects"
-            soft_warnings.append(msg)
-            reasons.append(msg)
+    # Extract laterality status
+    lat_result = verify_laterality_convention(pts_map, schema_type="vf50", expected_convention=laterality_convention)
 
     score = max(0.0, min(1.0, score))
     is_valid = len(hard_errors) == 0 and score >= 0.35 and not axis_swapped
