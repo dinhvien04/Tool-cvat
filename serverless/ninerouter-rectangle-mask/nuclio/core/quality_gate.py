@@ -96,11 +96,15 @@ VINFAST_POSE17_INDEX_TO_NAME: Dict[int, str] = {
 }
 
 # Canonical bone connectivity graph for Pose 17
+# Matches config/week2_pose17.yaml authoritative edge set (18 edges including ear-to-shoulder)
 POSE17_SKELETON_EDGES: Tuple[Tuple[str, str], ...] = (
     ("nose", "left_eye"),
     ("nose", "right_eye"),
     ("left_eye", "left_ear"),
     ("right_eye", "right_ear"),
+    # Ear-to-shoulder (per VinFast Pose17 YAML spec, edges 4→6 and 5→7)
+    ("right_ear", "right_shoulder"),
+    ("left_ear", "left_shoulder"),
     ("left_shoulder", "right_shoulder"),
     ("left_shoulder", "left_hip"),
     ("right_shoulder", "right_hip"),

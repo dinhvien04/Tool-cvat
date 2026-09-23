@@ -70,11 +70,14 @@ POSE17_ID_TO_KEYPOINT: Dict[int, str] = {
 }
 
 # Standard 17-keypoint skeleton edges (1-indexed node IDs)
+# Matches config/week2_pose17.yaml authoritative edge set (18 edges including ear-to-shoulder)
 POSE17_EDGES: Tuple[Tuple[int, int], ...] = (
     (1, 2),    # nose -> right_eye
     (1, 3),    # nose -> left_eye
     (2, 4),    # right_eye -> right_ear
     (3, 5),    # left_eye -> left_ear
+    (4, 6),    # right_ear -> right_shoulder (ear-to-shoulder per YAML)
+    (5, 7),    # left_ear -> left_shoulder (ear-to-shoulder per YAML)
     (6, 7),    # right_shoulder -> left_shoulder
     (6, 8),    # right_shoulder -> right_elbow
     (8, 10),   # right_elbow -> right_wrist
@@ -206,19 +209,29 @@ def generate_svg_representation(
     id_offset: int = 1,
     width: int = 100,
     height: int = 100,
+    node_coords: Optional[Dict[int, Tuple[int, int]]] = None,
 ) -> str:
     """Build an SVG string connecting node IDs for CVAT skeleton visualization."""
     lines: List[str] = [f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">']
+
+    coord_map: Dict[int, Tuple[int, int]] = {}
     for idx, name in enumerate(sublabels):
         nid = idx + id_offset
+        if node_coords and nid in node_coords:
+            cx, cy = node_coords[nid]
+        else:
+            cx, cy = width // 2, height // 2
+        coord_map[nid] = (cx, cy)
         lines.append(
             f'  <circle id="node_{nid}" data-type="element node" data-element-id="{nid}" '
-            f'data-node-id="{nid}" data-label-name="{name}" cx="{width//2}" cy="{height//2}" r="3" />'
+            f'data-node-id="{nid}" data-label-name="{name}" cx="{cx}" cy="{cy}" r="3" />'
         )
     for u, v in edges:
+        x1, y1 = coord_map.get(u, (0, 0))
+        x2, y2 = coord_map.get(v, (0, 0))
         lines.append(
             f'  <line id="edge_{u}_{v}" data-type="edge" data-node-from="{u}" data-node-to="{v}" '
-            f'x1="0" y1="0" x2="0" y2="0" stroke="red" stroke-width="1" />'
+            f'x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="red" stroke-width="1" />'
         )
     lines.append("</svg>")
     return "\n".join(lines)
@@ -230,6 +243,7 @@ def build_cvat_skeleton_spec(
     edges: Sequence[Tuple[int, int]],
     label_id: int = 1,
     id_offset: int = 1,
+    node_coords: Optional[Dict[int, Tuple[int, int]]] = None,
 ) -> Dict[str, Any]:
     """Construct CVAT function.yaml spec entry for a skeleton detector."""
     sublabel_items: List[Dict[str, Any]] = []
@@ -242,7 +256,7 @@ def build_cvat_skeleton_spec(
             "attributes": [],
         })
 
-    svg_str = generate_svg_representation(sublabels, edges, id_offset=id_offset)
+    svg_str = generate_svg_representation(sublabels, edges, id_offset=id_offset, node_coords=node_coords)
 
     return {
         "id": label_id,

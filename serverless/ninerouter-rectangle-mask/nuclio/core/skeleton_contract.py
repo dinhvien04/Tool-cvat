@@ -62,13 +62,17 @@ KEYPOINT_COUNT: int = len(POSE17_KEYPOINTS)  # exactly 17
 
 KEYPOINT_INDEX_MAP: Dict[str, int] = {name: idx for idx, name in enumerate(POSE17_KEYPOINTS)}
 
-# Canonical 16 bone pairs connecting keypoints in human anatomical topology
+# Canonical 18 bone pairs connecting keypoints in human anatomical topology
+# Matches config/week2_pose17.yaml authoritative edge set (including ear-to-shoulder)
 POSE17_SKELETON_EDGES: Tuple[Tuple[str, str], ...] = (
     # Head / Facial features
     ("nose", "left_eye"),
     ("nose", "right_eye"),
     ("left_eye", "left_ear"),
     ("right_eye", "right_ear"),
+    # Ear-to-shoulder (per VinFast Pose17 YAML spec, edges 4→6 and 5→7)
+    ("right_ear", "right_shoulder"),
+    ("left_ear", "left_shoulder"),
     # Torso
     ("left_shoulder", "right_shoulder"),
     ("left_shoulder", "left_hip"),
@@ -925,23 +929,27 @@ def generate_cvat_pose17_svg(sublabel_names: Optional[Sequence[str]] = None) -> 
         (17, 46.186973571777344, 92.51050567626953),   # right_ankle
     ]
 
+    # Edges matching config/week2_pose17.yaml authoritative 18-edge topology
+    # Using VinFast 1-indexed IDs matching the sublabel numbering
     edges_pairs = [
-        (4, 2),
-        (3, 5),
-        (1, 3),
-        (1, 2),
-        (6, 1),
-        (8, 6),
-        (10, 8),
-        (14, 16),
-        (12, 14),
-        (1, 12),
-        (13, 1),
-        (15, 13),
-        (17, 15),
-        (9, 11),
-        (7, 9),
-        (1, 7),
+        (1, 2),    # nose -> right_eye (R=even in VinFast order, but SVG uses generic node IDs)
+        (1, 3),    # nose -> left_eye
+        (2, 4),    # right_eye -> right_ear (node 2 = left_eye in COCO order, but labels handle mapping)
+        (3, 5),    # left_eye -> left_ear
+        (4, 6),    # right_ear -> right_shoulder (ear-to-shoulder)
+        (5, 7),    # left_ear -> left_shoulder (ear-to-shoulder)
+        (6, 7),    # left_shoulder -> right_shoulder
+        (6, 8),    # left_shoulder -> left_elbow
+        (8, 10),   # left_elbow -> left_wrist
+        (7, 9),    # right_shoulder -> right_elbow
+        (9, 11),   # right_elbow -> right_wrist
+        (6, 12),   # left_shoulder -> left_hip
+        (7, 13),   # right_shoulder -> right_hip
+        (12, 13),  # left_hip -> right_hip
+        (12, 14),  # left_hip -> left_knee
+        (14, 16),  # left_knee -> left_ankle
+        (13, 15),  # right_hip -> right_knee
+        (15, 17),  # right_knee -> right_ankle
     ]
     node_coords = {nid: (cx, cy) for nid, cx, cy in nodes_info}
 
@@ -972,25 +980,9 @@ def build_cvat_pose17_spec(
         sublabel_names: Optional custom sublabel names (defaults to canonical VinFast sequence).
         include_svg: If True, populates mandatory 'svg' attribute for CVAT Lambda Manager.
     """
-    vinfast_default_names = (
-        "nose",
-        "right_eye",
-        "left_eye",
-        "right_ear",
-        "left_ear",
-        "right_shoulder",
-        "left_shoulder",
-        "right_elbow",
-        "left_elbow",
-        "right_wrist",
-        "left_wrist",
-        "right_hip",
-        "left_hip",
-        "right_knee",
-        "left_knee",
-        "right_ankle",
-        "left_ankle",
-    )
+    # Default sublabel names: VinFast COCO-style order (R before L), derived from VINFAST_ID_TO_COCO_NAME
+    # This matches config/week2_pose17.yaml sublabel ordering: 1=nose, 2=right_eye, 3=left_eye, ...
+    vinfast_default_names = tuple(VINFAST_ID_TO_COCO_NAME[str(i)] for i in range(1, 18))
     names = list(sublabel_names) if sublabel_names and len(sublabel_names) == KEYPOINT_COUNT else list(vinfast_default_names)
     sublabels = [
         {"id": idx + 1, "name": name, "type": "points", "attributes": []}
@@ -1120,6 +1112,29 @@ assert len(VF50_ALL_EDGES) == 47, f"VF-50 must have exactly 47 edges, got {len(V
 VF50_ANCHOR_POINTS: Tuple[int, ...] = (0, 4, 5, 9, 10, 13, 14, 18, 22, 26, 30, 36)
 
 VF50_LATERALITY: str = "image_perspective"  # Left on image is mattrai/longmaytrai (x_left < x_right)
+
+# Anatomically-positioned VF50 SVG coordinates (100x100 viewport)
+VF50_SVG_COORDS: Dict[int, Tuple[int, int]] = {
+    # longmaytrai (left eyebrow, 5 points: 0-4, open, left->right)
+    0: (18, 28), 1: (23, 24), 2: (30, 22), 3: (37, 23), 4: (43, 27),
+    # longmayphai (right eyebrow, 5 points: 5-9, left->right)
+    5: (57, 27), 6: (63, 23), 7: (70, 22), 8: (77, 24), 9: (82, 28),
+    # songmui (nose bridge, 4 points: 10-13, top->bottom)
+    10: (50, 28), 11: (50, 38), 12: (50, 48), 13: (50, 55),
+    # mattrai (left eye, 8 points: 14-21, closed contour)
+    14: (24, 34), 15: (28, 31), 16: (33, 30), 17: (38, 31),
+    18: (42, 34), 19: (38, 37), 20: (33, 38), 21: (28, 37),
+    # matphai (right eye, 8 points: 22-29, closed contour)
+    22: (58, 34), 23: (62, 31), 24: (67, 30), 25: (72, 31),
+    26: (76, 34), 27: (72, 37), 28: (67, 38), 29: (62, 37),
+    # moingoai (outer lip, 12 points: 30-41, closed contour)
+    30: (34, 68), 31: (38, 64), 32: (43, 62), 33: (50, 61),
+    34: (57, 62), 35: (62, 64), 36: (66, 68), 37: (62, 73),
+    38: (57, 76), 39: (50, 77), 40: (43, 76), 41: (38, 73),
+    # moitrong (inner lip, 8 points: 42-49, closed contour)
+    42: (38, 68), 43: (43, 66), 44: (50, 65), 45: (57, 66),
+    46: (62, 68), 47: (57, 72), 48: (50, 73), 49: (43, 72),
+}
 
 
 # ==============================================================================
@@ -1417,38 +1432,8 @@ class VF50Face:
 
         return skeletons
 
-    def to_cvat_single_skeleton(
-        self,
-        width: int,
-        height: int,
-        label: str = "face",
-        group_id: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """Convert into a single unified 50-point skeleton (parent architecture mode)."""
-        elements = []
-        for pt_id in range(VF50_POINTS_COUNT):
-            lm = self.landmarks.get(pt_id)
-            if lm is None:
-                lm = VF50Landmark(
-                    id=pt_id,
-                    name=str(pt_id),
-                    x=0.0,
-                    y=0.0,
-                    visibility=VISIBILITY_OUTSIDE,
-                    confidence=0.0,
-                )
-            elements.append(lm.to_cvat_element(width=width, height=height))
-
-        skel_dict: Dict[str, Any] = {
-            "label": label,
-            "type": "skeleton",
-            "confidence": round(self.confidence, 3),
-            "elements": elements,
-        }
-        if group_id is not None:
-            skel_dict["group_id"] = int(group_id)
-            skel_dict["group"] = int(group_id)
-        return skel_dict
+    # NOTE: Legacy to_cvat_single_skeleton() removed in Phase 4 cleanup.
+    # VF50 always emits 7-component skeletons via to_cvat_component_skeletons().
 
 
 # ==============================================================================
@@ -1749,14 +1734,14 @@ def faces_to_cvat_skeletons(
     *,
     base_group_id: int = 1,
     filter_corrupt: bool = True,
-    as_components: bool = True,
+    as_components: bool = True,  # Deprecated: always True. Kept for backward compat.
     fallback_on_corrupt: bool = True,
 ) -> List[Dict[str, Any]]:
     """Convert multiple detected faces to native CVAT skeleton shape dictionaries.
 
     Multi-Face Isolation Guarantees (Section 12):
     - 0 faces -> returns []
-    - 1 face -> returns exactly 7 component skeletons (or 1 parent skeleton), sharing group_id.
+    - 1 face -> returns exactly 7 component skeletons sharing group_id.
     - N faces -> returns N * 7 component skeletons. Skeletons for Face k share group_id = base_group_id + k.
     - Skeletons belonging to distinct faces never share group_id.
     - Completely separate landmark instances preventing any cross-contamination.
@@ -1768,10 +1753,9 @@ def faces_to_cvat_skeletons(
         height: Image pixel height.
         base_group_id: Starting group_id for instance grouping.
         filter_corrupt: If True, filters out anatomically collapsed or corrupted faces.
-        as_components: If True, outputs authoritative 7 component skeletons.
-                       If False, outputs 1 unified parent skeleton per face.
+        as_components: Deprecated, always True. Kept for backward compatibility.
         fallback_on_corrupt: If True, when strict quality gate rejects all detected faces,
-                             salvages the highest-scoring candidate to prevent silent drop in CVAT.
+                             salvages up to 5 highest-scoring candidates to prevent silent drop in CVAT.
 
     Returns:
         List of CVAT skeleton shape dictionaries.
@@ -1793,20 +1777,13 @@ def faces_to_cvat_skeletons(
                 rejected_faces.append((face, report))
                 continue
 
-        if as_components:
-            face_skels = face.to_cvat_component_skeletons(
-                width=width,
-                height=height,
-                group_id=curr_group_id,
-            )
-            skeletons.extend(face_skels)
-        else:
-            skel = face.to_cvat_single_skeleton(
-                width=width,
-                height=height,
-                group_id=curr_group_id,
-            )
-            skeletons.append(skel)
+        # Always emit 7-component skeletons (legacy single-skeleton path removed)
+        face_skels = face.to_cvat_component_skeletons(
+            width=width,
+            height=height,
+            group_id=curr_group_id,
+        )
+        skeletons.extend(face_skels)
 
         curr_group_id += 1
 
@@ -1818,25 +1795,21 @@ def faces_to_cvat_skeletons(
         ]
         if salvageable:
             salvageable.sort(key=lambda item: item[1].score, reverse=True)
-            best_face, best_report = salvageable[0]
-            logger.info(
-                f"Quality gate fallback triggered: emitting detected face (id={best_face.face_id}, score={best_report.score:.2f}) "
-                f"to prevent silent drop in CVAT."
-            )
-            if as_components:
-                face_skels = best_face.to_cvat_component_skeletons(
+            max_fallback = min(len(salvageable), 5)
+            for salvaged_face, salvaged_report in salvageable[:max_fallback]:
+                logger.info(
+                    f"Quality gate fallback: salvaging face (id={salvaged_face.face_id}, "
+                    f"score={salvaged_report.score:.2f}, "
+                    f"active={salvaged_report.active_count}/50) to prevent silent drop."
+                )
+                # Always emit 7-component skeletons (legacy single-skeleton path removed)
+                face_skels = salvaged_face.to_cvat_component_skeletons(
                     width=width,
                     height=height,
                     group_id=curr_group_id,
                 )
                 skeletons.extend(face_skels)
-            else:
-                skel = best_face.to_cvat_single_skeleton(
-                    width=width,
-                    height=height,
-                    group_id=curr_group_id,
-                )
-                skeletons.append(skel)
+                curr_group_id += 1
 
     return skeletons
 
@@ -2165,12 +2138,13 @@ def build_cvat_vf50_spec() -> List[Dict[str, Any]]:
             for pt_id in range(cfg["start"], cfg["end"] + 1)
         ]
 
-        # Generate minimal valid SVG template for CVAT UI
+        # Generate SVG template with anatomically-positioned coordinates
         svg_circles = []
         for pt_id in range(cfg["start"], cfg["end"] + 1):
             n_id = pt_id - node_offset + 1
+            cx, cy = VF50_SVG_COORDS[pt_id]
             svg_circles.append(
-                f'<circle cx="50" cy="50" r="3" data-type="element node" '
+                f'<circle cx="{cx}" cy="{cy}" r="3" data-type="element node" '
                 f'data-element-id="{n_id}" data-node-id="{n_id}" data-label-name="{pt_id}"/>'
             )
 
@@ -2178,8 +2152,11 @@ def build_cvat_vf50_spec() -> List[Dict[str, Any]]:
         for p1, p2 in edges:
             n1 = p1 - node_offset + 1
             n2 = p2 - node_offset + 1
+            x1, y1 = VF50_SVG_COORDS[p1]
+            x2, y2 = VF50_SVG_COORDS[p2]
             svg_lines.append(
-                f'<line data-type="edge" data-node-from="{n1}" data-node-to="{n2}"/>'
+                f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" '
+                f'data-type="edge" data-node-from="{n1}" data-node-to="{n2}"/>'
             )
 
         svg_content = f'<svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">{"".join(svg_circles + svg_lines)}</svg>'
