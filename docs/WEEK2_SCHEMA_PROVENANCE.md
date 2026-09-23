@@ -23,7 +23,7 @@ The single authoritative source of truth for each detector is maintained under `
 
 | Detector | Schema File | Authoritative Source Document | Keypoint / Landmark Count | Topology Structure |
 |---|---|---|---|---|
-| **Human Pose 17** | `config/week2_pose17.yaml` | `Week2_Guideline_HumanPose17_HocVien_v1.1.docx` | 17 keypoints | 1 parent skeleton (`person`), 16 edges |
+| **Human Pose 17** | `config/week2_pose17.yaml` | `Week2_Guideline_HumanPose17_HocVien_v1.1.docx` | 17 keypoints | 1 parent skeleton (`person`), 18 edges (incl. ear-to-shoulder) |
 | **Face Landmark VF-50** | `config/week2_vf50.yaml` | `Week2_Guideline_Face_Landmark_VF50_HocVien_v1.3.docx` | 50 landmarks | 7 component skeletons, 47 edges |
 
 Any changes to labels, keypoints, topologies, or bounding conditions must be authored in these YAML files. All downstream artifacts (Nuclio `function.yaml` files, test fixtures, CVAT specs, prompt builders) derive directly from these schemas.
@@ -162,7 +162,9 @@ In `/tasks/13/jobs/13`, Human Pose 17 produced severe geometric anomalies: `RIGH
 1. **Two-Pass Face Crop:** For small faces ($< 100\text{px}$) or faces with anomalies, a high-resolution face crop with 20% margin is passed to 9Router.
 2. **Zero Silent Drop Guarantee:** When quality assessment detects minor anomalies on difficult poses or low-resolution faces, `faces_to_cvat_skeletons()` activates a salvageable candidate fallback:
    * Pure point collapses ($< 15$ diagonal units) are still rejected.
-   * Valid detected faces with minor discretizations are salvaged and emitted, ensuring annotators never receive an unexpected 0-shape result.
+   * Up to 5 valid detected faces with minor discretizations are salvaged and emitted (sorted by quality score), ensuring annotators never receive an unexpected 0-shape result.
+3. **Canonical Schema Loader (`core/week2_schema.py`):** Single source of truth for both Pose17 and VF50 schemas, loaded from YAML with SHA-256 fingerprinting for drift detection.
+4. **Refine Model Resolution:** Second-pass crop refinement now correctly uses the configured `active_refine_model` (not the primary `active_model`), allowing independent model selection for initial detection and crop refinement.
 
 ---
 
