@@ -801,7 +801,7 @@ def build_pose17_prompt(
 
     laterality_explanation = (
         "VinFast Viewer-Perspective Convention (MANDATORY):\n"
-        "VinFast Week-2 HumanPose-17 uses a canonical 17-joint topology with explicit VinFast viewer-space point naming below (RIGHT/LEFT refer to displayed image sides):\n"
+        "VinFast Week-2 HumanPose-17 topology uses explicit VinFast viewer-space point naming below (RIGHT/LEFT refer to displayed image sides):\n"
         f"- 'right_*' ({right_str}) refer to the VIEWER'S RIGHT side of the displayed image/frame (larger X coordinate).\n"
         "  For example, 'right_eye' means the eye appearing on the RIGHT side of the image, NOT the anatomical right of the person.\n"
         "  Similarly, right_ear, right_shoulder, right_elbow, right_wrist, right_hip, right_knee, right_ankle are on the image's right.\n"
