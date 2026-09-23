@@ -51,6 +51,7 @@ from core.quality_gate import (
     LATERALITY_VIEWER,
     Pose17QualityReport,
 )
+from core.week2_schema import get_build_sha, load_pose17
 
 logger = logging.getLogger("cvat.nuclio.ninerouter.human_pose_17")
 
@@ -232,11 +233,25 @@ class ModelHandler:
             logger.error(f"Failed to resolve vision model {self.requested_model!r} from 9Router: {e}")
             raise
 
+        # Resolve refinement model (falls back to active_model if not configured)
+        self.active_refine_model = self.active_model
+        if self.refine_model:
+            try:
+                self.active_refine_model = self.client.resolve_vision_model(self.refine_model)
+                logger.info(f"Resolved refine model: {self.active_refine_model!r}")
+            except Exception as e:
+                logger.warning(f"Failed to resolve refine model {self.refine_model!r}, using primary: {e}")
+                self.active_refine_model = self.active_model
+
         logger.info(
             f"Initialized ModelHandler (Human Pose 17): base_url={self.base_url!r}, "
             f"key={mask_api_key(self.api_key)}, model={self.active_model!r}, "
-            f"timeout={self.timeout}s"
+            f"refine_model={self.active_refine_model!r}, timeout={self.timeout}s"
         )
+        logger.info(f"Pose17 spec fingerprint: {load_pose17().spec_fingerprint}")
+        build_sha = get_build_sha()
+        if build_sha:
+            logger.info(f"TOOL_CVAT_BUILD_SHA: {build_sha}")
 
     def __repr__(self) -> str:
         """Safe string representation masking API keys."""
@@ -379,7 +394,11 @@ class ModelHandler:
                 shapes.append(instance.to_cvat_dict())
 
         elapsed = time.perf_counter() - t0
-        logger.info(f"Human Pose 17 inference completed in {elapsed:.2f}s: detected {len(shapes)} person skeleton(s)")
+        logger.info(
+            f"Human Pose 17 inference completed in {elapsed:.2f}s: "
+            f"detected {len(shapes)} person skeleton(s), "
+            f"spec_fingerprint={load_pose17().spec_fingerprint[:12]}"
+        )
         return shapes
 
     def _refine_person_crop(
@@ -425,7 +444,7 @@ class ModelHandler:
 
             prompt = build_pose17_crop_prompt(POSE17_KEYPOINTS)
             resp = self.client.send_vision_request(
-                model=self.active_model,
+                model=self.active_refine_model,
                 image_bytes_or_b64=crop_bytes,
                 prompt=prompt,
                 max_tokens=self.max_tokens,
