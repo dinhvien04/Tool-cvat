@@ -686,4 +686,33 @@ class TestMergeVF50Landmarks:
         # Must respect Pass 2 determination, do NOT restore Pass 1
         assert merged.landmarks[16].visibility == 0
 
+    def test_low_confidence_pass2_falls_back_to_pass1(self, crop_bbox):
+        # Pass 1 has high-confidence detection (0.85)
+        f1 = VF50Face(face_id=1, confidence=0.85)
+        f1.landmarks[5] = VF50Landmark(id=5, name="5", x=590.0, y=200.0, visibility=2, confidence=0.85)
+
+        # Pass 2 has low-confidence detection (0.15 < min_confidence 0.30)
+        f2 = VF50Face(face_id=1, confidence=0.9)
+        f2.landmarks[5] = VF50Landmark(id=5, name="5", x=600.0, y=210.0, visibility=2, confidence=0.15)
+
+        merged = merge_vf50_landmarks(pass1_face=f1, pass2_face=f2, crop_box_norm=crop_bbox, min_confidence=0.30)
+        # Should retain Pass 1 due to low confidence in Pass 2
+        assert merged.landmarks[5].confidence == 0.85
+        assert merged.landmarks[5].x == 590.0
+
+    def test_reprojection_when_pass2_not_pre_reprojected(self, crop_bbox):
+        # Crop box [ymin=200, xmin=200, ymax=600, xmax=600]
+        # In crop space [0..1000], center is [500, 500] -> maps to [400, 400] in full space
+        f1 = VF50Face(face_id=1, confidence=0.8)
+        f2 = VF50Face(face_id=1, confidence=0.95)
+        f2.landmarks[10] = VF50Landmark(id=10, name="10", x=500.0, y=500.0, visibility=2, confidence=0.9)
+
+        merged = merge_vf50_landmarks(
+            f1, f2, crop_bbox,
+            pass2_is_reprojected=False,
+        )
+        assert merged.landmarks[10].x == pytest.approx(400.0, abs=0.5)
+        assert merged.landmarks[10].y == pytest.approx(400.0, abs=0.5)
+        assert merged.landmarks[10].visibility == 2
+
 

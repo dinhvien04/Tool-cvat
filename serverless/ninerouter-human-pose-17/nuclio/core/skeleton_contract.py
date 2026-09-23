@@ -1578,88 +1578,188 @@ def _has_self_intersection(points: Sequence[Tuple[float, float]]) -> bool:
 
 
 def merge_vf50_landmarks(
-    initial_face: VF50Face,
-    refined_face: VF50Face,
-    crop_bbox: Sequence[Union[int, float]],
+    pass1_face: Optional[VF50Face] = None,
+    pass2_face: Optional[VF50Face] = None,
+    crop_box_norm: Optional[Sequence[Union[int, float]]] = None,
+    *,
+    initial_face: Optional[VF50Face] = None,
+    refined_face: Optional[VF50Face] = None,
+    crop_bbox: Optional[Sequence[Union[int, float]]] = None,
+    min_confidence: float = 0.30,
+    edge_margin: float = 5.0,
+    pass2_is_reprojected: bool = True,
 ) -> VF50Face:
-    """Deterministically merge Pass 1 global face detection and Pass 2 crop refinement landmarks.
+    """Deterministically merge Pass 1 global detection and Pass 2 crop refinement facial landmarks.
 
-    Implements a 5-case landmark-level resolution policy:
-      - Case D (Omitted in Pass 2): Pass 2 omitted the landmark or emitted default (vis=0, conf=0)
-        while Pass 1 had an active detection -> fallback to Pass 1 landmark.
-      - Case B (Occluded): Pass 2 refined the landmark as physically occluded (vis=1) ->
-        use Pass 2 coordinates and vis=1.
-      - Case A (Outside Crop): Pass 2 says vis=0, but Pass 1 coordinate lies OUTSIDE
-        the crop bounds [ymin, xmin, ymax, xmax] -> retain Pass 1 active detection.
-      - Case C (Inside Crop Verified Absent): Pass 2 says vis=0, and Pass 1 was INSIDE
-        the crop bounds -> respect Pass 2 determination (vis=0).
-      - Happy Path (Visible): Pass 2 says vis=2 -> use Pass 2 refined landmark.
+    Adheres to the 5 canonical merge policies:
+      1. Missing / Malformed Pass 2 landmark: If Pass 2 response omitted a point or returned
+         a dummy placeholder (0, 0, vis=0, conf=0), fallback to Pass 1 landmark.
+      2. Low Confidence Pass 2: If Pass 2 point has confidence < min_confidence while Pass 1 has
+         confidence >= min_confidence and is active, retain Pass 1.
+      3. Pass 2 Visibility 0 (outside): If Pass 1 was active (vis > 0), check whether Pass 1 coordinate
+         lies outside or near the border of crop window [ymin, xmin, ymax, xmax]. If outside crop coverage,
+         Pass 2 never saw this area; retain Pass 1. If inside crop coverage and Pass 2 inspected the area,
+         accept Pass 2 vis=0.
+      4. Pass 2 Visibility 1 (occluded): High-resolution physical occlusion (fine hair, opaque glasses frame,
+         mask, hand) takes precedence over coarse Pass 1 visibility=2 if Pass 2 confidence >= min_confidence.
+         A coarse Pass 1 detection must never override legitimate Pass 2 physical occlusion.
+      5. Pass 2 Visibility 2 (visible): High-resolution refined coordinates and confidence are adopted.
+
+    Args:
+        pass1_face: Initial VF50Face from global image inference (alias: initial_face).
+        pass2_face: Refined VF50Face from face crop inference (alias: refined_face).
+        crop_box_norm: Crop bounding box [ymin, xmin, ymax, xmax] in normalized [0..1000] space (alias: crop_bbox).
+        min_confidence: Minimum confidence threshold to accept refined points (default: 0.30).
+        edge_margin: Margin in normalized units to detect crop window boundaries (default: 5.0).
+        pass2_is_reprojected: Whether pass2_face coordinates are already reprojected to full image space.
+
+    Returns:
+        Merged VF50Face instance.
     """
-    if len(crop_bbox) < 4:
-        raise ValueError("crop_bbox must contain [ymin, xmin, ymax, xmax]")
+    p1_target = pass1_face if pass1_face is not None else initial_face
+    p2_target = pass2_face if pass2_face is not None else refined_face
+    effective_crop_box = crop_box_norm if crop_box_norm is not None else crop_bbox
 
-    c_ymin, c_xmin, c_ymax, c_xmax = [float(v) for v in crop_bbox[:4]]
-    merged_landmarks: Dict[int, VF50Landmark] = {}
+    if p1_target is None or p2_target is None:
+        raise ValueError("Both pass1_face (initial_face) and pass2_face (refined_face) must be provided")
+    if effective_crop_box is None or len(effective_crop_box) < 4:
+        raise ValueError("crop_box_norm or crop_bbox must contain [ymin, xmin, ymax, xmax]")
+
+    c_ymin, c_xmin, c_ymax, c_xmax = [float(v) for v in effective_crop_box[:4]]
+    merged_lms: Dict[int, VF50Landmark] = {}
 
     for pt_id in range(VF50_POINTS_COUNT):
-        p1 = initial_face.landmarks.get(pt_id)
-        p2 = refined_face.landmarks.get(pt_id)
+        p1_lm = p1_target.landmarks.get(pt_id)
+        p2_lm = p2_target.landmarks.get(pt_id)
 
-        has_p1 = (
-            p1 is not None
-            and not p1.is_outside
-            and 0.0 <= p1.x <= 1000.0
-            and 0.0 <= p1.y <= 1000.0
-            and not (math.isnan(p1.x) or math.isnan(p1.y))
-        )
-        has_p2 = (
-            p2 is not None
-            and 0.0 <= p2.x <= 1000.0
-            and 0.0 <= p2.y <= 1000.0
-            and not (math.isnan(p2.x) or math.isnan(p2.y))
+        # Normalize visibilities
+        p1_vis = normalize_visibility(p1_lm.visibility, strict=False, default=VISIBILITY_VISIBLE) if p1_lm else VISIBILITY_OUTSIDE
+        p2_vis = normalize_visibility(p2_lm.visibility, strict=False, default=VISIBILITY_VISIBLE) if p2_lm else VISIBILITY_OUTSIDE
+
+        # Detect dummy placeholder from VF50Face.__post_init__ or missing in Pass 2
+        p2_is_dummy = (
+            p2_lm is None
+            or (p2_lm.x == 0.0 and p2_lm.y == 0.0 and p2_lm.confidence == 0.0 and p2_vis == VISIBILITY_OUTSIDE)
+            or math.isnan(p2_lm.x)
+            or math.isnan(p2_lm.y)
         )
 
-        if not has_p2:
-            if p1 is not None:
-                merged_landmarks[pt_id] = p1
-            continue
-
-        # Case D: Pass 2 response omitted point (confidence == 0.0 and visibility == VISIBILITY_OUTSIDE)
-        if p2.is_outside and p2.confidence <= 0.0 and has_p1:
-            merged_landmarks[pt_id] = p1
-            continue
-
-        # Happy path: Pass 2 clearly visible
-        if p2.is_visible:
-            merged_landmarks[pt_id] = p2
-            continue
-
-        # Case B: Pass 2 physically occluded
-        if p2.is_occluded:
-            merged_landmarks[pt_id] = p2
-            continue
-
-        # Pass 2 says outside (vis == 0)
-        if not has_p1:
-            merged_landmarks[pt_id] = p2
-            continue
-
-        p1_inside_crop = (
-            (c_xmin - 5.0) <= p1.x <= (c_xmax + 5.0)
-            and (c_ymin - 5.0) <= p1.y <= (c_ymax + 5.0)
+        p1_is_valid = (
+            p1_lm is not None
+            and not (p1_lm.x == 0.0 and p1_lm.y == 0.0 and p1_lm.confidence == 0.0 and p1_vis == VISIBILITY_OUTSIDE)
+            and not (math.isnan(p1_lm.x) or math.isnan(p1_lm.y))
         )
-        if not p1_inside_crop:
-            # Case A: Out-of-crop preservation
-            merged_landmarks[pt_id] = p1
+
+        # CASE 1: Pass 2 omitted or malformed landmark -> fallback to Pass 1
+        if p2_is_dummy:
+            if p1_is_valid and p1_lm is not None:
+                merged_lms[pt_id] = VF50Landmark(
+                    id=pt_id,
+                    name=str(pt_id),
+                    x=p1_lm.x,
+                    y=p1_lm.y,
+                    visibility=p1_vis,
+                    confidence=p1_lm.confidence,
+                    component=VF50_POINT_TO_COMPONENT.get(pt_id, ""),
+                )
+            continue
+
+        assert p2_lm is not None
+
+        # Determine coordinates in full image [0..1000]
+        if pass2_is_reprojected:
+            p2_x = float(max(0.0, min(1000.0, p2_lm.x)))
+            p2_y = float(max(0.0, min(1000.0, p2_lm.y)))
         else:
-            # Case C: Pass 2 inspected crop and verified absent
-            merged_landmarks[pt_id] = p2
+            p2_x = float(max(0.0, min(1000.0, c_xmin + (p2_lm.x / 1000.0) * (c_xmax - c_xmin))))
+            p2_y = float(max(0.0, min(1000.0, c_ymin + (p2_lm.y / 1000.0) * (c_ymax - c_ymin))))
+
+        # CASE 2: Low confidence in Pass 2 while Pass 1 has reliable detection
+        if (
+            p2_lm.confidence < min_confidence
+            and p1_is_valid
+            and p1_lm is not None
+            and p1_lm.confidence >= min_confidence
+            and p1_vis != VISIBILITY_OUTSIDE
+        ):
+            merged_lms[pt_id] = VF50Landmark(
+                id=pt_id,
+                name=str(pt_id),
+                x=p1_lm.x,
+                y=p1_lm.y,
+                visibility=p1_vis,
+                confidence=p1_lm.confidence,
+                component=VF50_POINT_TO_COMPONENT.get(pt_id, ""),
+            )
+            continue
+
+        # CASE 3: Pass 2 says visibility=0 (outside)
+        if p2_vis == VISIBILITY_OUTSIDE:
+            if p1_is_valid and p1_lm is not None and p1_vis != VISIBILITY_OUTSIDE:
+                # Check if Pass 1 point is inside crop coverage
+                inside_crop = (
+                    (c_xmin + edge_margin <= p1_lm.x <= c_xmax - edge_margin)
+                    and (c_ymin + edge_margin <= p1_lm.y <= c_ymax - edge_margin)
+                )
+                if not inside_crop:
+                    # Pass 2 crop cut off this landmark; retain Pass 1
+                    merged_lms[pt_id] = VF50Landmark(
+                        id=pt_id,
+                        name=str(pt_id),
+                        x=p1_lm.x,
+                        y=p1_lm.y,
+                        visibility=p1_vis,
+                        confidence=p1_lm.confidence,
+                        component=VF50_POINT_TO_COMPONENT.get(pt_id, ""),
+                    )
+                    continue
+
+            # Pass 2 had crop access and verified point is outside
+            merged_lms[pt_id] = VF50Landmark(
+                id=pt_id,
+                name=str(pt_id),
+                x=p2_x,
+                y=p2_y,
+                visibility=VISIBILITY_OUTSIDE,
+                confidence=p2_lm.confidence,
+                component=VF50_POINT_TO_COMPONENT.get(pt_id, ""),
+            )
+            continue
+
+        # CASE 4: Pass 2 says visibility=1 (occluded)
+        # Legitimate physical occlusion observed at high resolution overrides coarse Pass 1
+        if p2_vis == VISIBILITY_OCCLUDED:
+            merged_lms[pt_id] = VF50Landmark(
+                id=pt_id,
+                name=str(pt_id),
+                x=p2_x,
+                y=p2_y,
+                visibility=VISIBILITY_OCCLUDED,
+                confidence=p2_lm.confidence,
+                component=VF50_POINT_TO_COMPONENT.get(pt_id, ""),
+            )
+            continue
+
+        # CASE 5: Pass 2 says visibility=2 (visible) -> use refined point
+        merged_lms[pt_id] = VF50Landmark(
+            id=pt_id,
+            name=str(pt_id),
+            x=p2_x,
+            y=p2_y,
+            visibility=VISIBILITY_VISIBLE,
+            confidence=max(p2_lm.confidence, p1_lm.confidence if p1_lm else 0.0),
+            component=VF50_POINT_TO_COMPONENT.get(pt_id, ""),
+        )
+
+    # Preserve bounding box and face metadata
+    box_2d = p1_target.box_2d or p2_target.box_2d
+    conf = max(p1_target.confidence, p2_target.confidence)
 
     return VF50Face(
-        face_id=refined_face.face_id if refined_face.face_id is not None else initial_face.face_id,
-        box_2d=list(refined_face.box_2d) if refined_face.box_2d is not None else (list(initial_face.box_2d) if initial_face.box_2d is not None else None),
-        confidence=max(initial_face.confidence, refined_face.confidence),
-        landmarks=merged_landmarks,
+        face_id=p1_target.face_id if p1_target.face_id is not None else p2_target.face_id,
+        box_2d=list(box_2d) if box_2d else None,
+        confidence=conf,
+        landmarks=merged_lms,
     )
 
 
