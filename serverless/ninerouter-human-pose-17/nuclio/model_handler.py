@@ -420,7 +420,7 @@ class ModelHandler:
                 coord_range=1000.0,
             )
             if instance and instance.elements:
-                shapes.append(instance.to_cvat_dict())
+                shapes.append(instance.to_cvat_dict(numeric_sublabels=True))
 
         elapsed = time.perf_counter() - t0
         logger.info(

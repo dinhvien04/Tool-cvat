@@ -268,24 +268,30 @@ class SkeletonInstance:
     group: int = 0
     attributes: List[Dict[str, Any]] = field(default_factory=list)
 
-    def to_cvat_dict(self) -> Dict[str, Any]:
+    def to_cvat_dict(self, numeric_sublabels: bool = False) -> Dict[str, Any]:
+        elements = []
+        for elem in self.elements:
+            label = elem.label
+            if numeric_sublabels and self.label == "person":
+                if label in POSE17_KEYPOINT_TO_ID:
+                    label = str(POSE17_KEYPOINT_TO_ID[label])
+                elif label.lower() in POSE17_KEYPOINT_TO_ID:
+                    label = str(POSE17_KEYPOINT_TO_ID[label.lower()])
+            elements.append({
+                "type": elem.type,
+                "label": label,
+                "points": elem.points,
+                "occluded": elem.occluded,
+                "outside": elem.outside,
+                "attributes": elem.attributes,
+            })
         return {
             "type": self.type,
             "label": self.label,
             "confidence": self.confidence,
             "group": self.group,
             "attributes": self.attributes,
-            "elements": [
-                {
-                    "type": elem.type,
-                    "label": elem.label,
-                    "points": elem.points,
-                    "occluded": elem.occluded,
-                    "outside": elem.outside,
-                    "attributes": elem.attributes,
-                }
-                for elem in self.elements
-            ],
+            "elements": elements,
         }
 
 

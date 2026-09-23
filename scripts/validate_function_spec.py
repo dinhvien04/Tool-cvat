@@ -200,9 +200,9 @@ def validate_function_yaml(yaml_path: Path) -> Tuple[bool, List[str]]:
                 )
             else:
                 sub_names = [s.get("name") for s in sublabels if isinstance(s, dict)]
-                missing_kps = set(POSE17_KEYPOINTS) - set(sub_names)
-                if missing_kps:
-                    errors.append(f"ninerouter-human-pose-17 missing keypoints: {sorted(missing_kps)}")
+                numeric_17 = {str(i) for i in range(1, 18)}
+                if set(sub_names) != set(POSE17_KEYPOINTS) and set(sub_names) != numeric_17:
+                    errors.append(f"ninerouter-human-pose-17 sublabels must be either 17 COCO names or '1'..'17', got: {sorted(sub_names)}")
                 for sub in sublabels:
                     if isinstance(sub, dict) and sub.get("type") != "points":
                         errors.append(

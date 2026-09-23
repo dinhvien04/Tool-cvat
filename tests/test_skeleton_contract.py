@@ -415,7 +415,7 @@ class TestCVATSpecHelper:
         assert len(spec["sublabels"]) == 17
         for sub in spec["sublabels"]:
             assert sub["type"] == "points"
-            assert sub["name"] in POSE17_KEYPOINTS_SET
+            assert sub["name"] in POSE17_KEYPOINTS_SET or sub["name"] in {str(i) for i in range(1, 18)}
 
         # Mandatory SVG field for CVAT lambda_manager
         assert "svg" in spec

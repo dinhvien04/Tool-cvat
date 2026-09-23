@@ -1088,7 +1088,10 @@ def merge_refined_keypoint(
         return [round(norm_x, 1), round(norm_y, 1), VISIBILITY_OUTSIDE]
 
 
-def generate_cvat_pose17_svg(sublabel_names: Optional[Sequence[str]] = None) -> str:
+def generate_cvat_pose17_svg(
+    sublabel_names: Optional[Sequence[str]] = None,
+    numeric_sublabels: bool = True,
+) -> str:
     """Generate the canonical SVG topology string required by CVAT function.yaml spec.
 
     Matches CVAT lambda_manager/views.py expectations (lines and circles with data-node-id).
@@ -1096,7 +1099,12 @@ def generate_cvat_pose17_svg(sublabel_names: Optional[Sequence[str]] = None) -> 
     """
     from core.week2_schema import load_pose17
     schema = load_pose17()
-    labels = list(sublabel_names) if sublabel_names and len(sublabel_names) == KEYPOINT_COUNT else [schema.id_to_coco_name[kp.id] for kp in schema.keypoints]
+    if sublabel_names and len(sublabel_names) == KEYPOINT_COUNT:
+        labels = list(sublabel_names)
+    elif numeric_sublabels:
+        labels = [kp.numeric_name for kp in schema.keypoints]
+    else:
+        labels = [schema.id_to_coco_name[kp.id] for kp in schema.keypoints]
 
     nodes_info = [
         (1, 48.87604904174805, 9.485294342041016),    # 1: nose
@@ -1140,6 +1148,7 @@ def build_cvat_pose17_spec(
     label_id: int = 1,
     sublabel_names: Optional[Sequence[str]] = None,
     include_svg: bool = True,
+    numeric_sublabels: bool = True,
 ) -> Dict[str, Any]:
     """Build CVAT function.yaml annotations spec item for Pose 17 skeleton.
 
@@ -1150,12 +1159,15 @@ def build_cvat_pose17_spec(
         label_id: Unique integer ID for the parent skeleton spec entry.
         sublabel_names: Optional custom sublabel names (defaults to canonical VinFast sequence from schema).
         include_svg: If True, populates mandatory 'svg' attribute for CVAT Lambda Manager.
+        numeric_sublabels: If True, defaults sublabel names to canonical numeric strings '1'..'17'.
     """
     from core.week2_schema import load_pose17
     schema = load_pose17()
     effective_parent = parent_label if parent_label != DEFAULT_PARENT_LABEL else schema.parent_label
     if sublabel_names and len(sublabel_names) == len(schema.keypoints):
         names = list(sublabel_names)
+    elif numeric_sublabels:
+        names = [kp.numeric_name for kp in schema.keypoints]
     else:
         names = [schema.id_to_coco_name[kp.id] for kp in schema.keypoints]
 
@@ -1171,7 +1183,7 @@ def build_cvat_pose17_spec(
         "sublabels": sublabels,
     }
     if include_svg:
-        spec_dict["svg"] = generate_cvat_pose17_svg(sublabel_names=names)
+        spec_dict["svg"] = generate_cvat_pose17_svg(sublabel_names=names, numeric_sublabels=numeric_sublabels)
     return spec_dict
 
 

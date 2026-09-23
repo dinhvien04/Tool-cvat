@@ -425,12 +425,13 @@ def analyze_function_runtime(key: str, cfg: Dict[str, Any], *, strict: bool = Fa
         if len(deployed_spec) == 1 and label_names == ["person"]:
             subs = deployed_spec[0].get("sublabels", [])
             sub_names = [s.get("name") for s in subs]
-            if len(subs) == 17 and set(sub_names) == set(POSE17_KEYPOINTS):
+            numeric_17 = {str(i) for i in range(1, 18)}
+            if len(subs) == 17 and (set(sub_names) == set(POSE17_KEYPOINTS) or set(sub_names) == numeric_17):
                 report["deployed_spec_type"] = "CANONICAL_POSE17_17KPS"
             else:
                 report["deployed_spec_type"] = "INVALID_POSE17_SUBLABELS"
                 report["spec_drift"] = True
-                report["drift_details"].append(f"Expected 17 COCO keypoints, got {len(subs)}")
+                report["drift_details"].append(f"Expected 17 COCO or numeric '1'..'17' keypoints, got {len(subs)}")
         else:
             report["deployed_spec_type"] = f"UNEXPECTED_POSE17_LABELS_{label_names}"
             report["spec_drift"] = True

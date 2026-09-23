@@ -232,13 +232,30 @@ def validate_cvat_mapping(
             db_sub_names = {s["name"] for s in db_label.get("sublabels", [])}
             md_sub_names = {s["name"] for s in md_label.get("sublabels", [])}
 
+            # Build alias lookup map for model sublabels (supports both numeric '1'..'17' and semantic COCO names)
+            md_name_lookup: Dict[str, str] = {name: name for name in md_sub_names}
+            if model_name == "person" and len(md_sub_names) == 17:
+                for idx, coco_name, _ in POSE17_KEYPOINT_SPECS:
+                    str_idx = str(idx)
+                    if str_idx in md_sub_names:
+                        md_name_lookup[coco_name] = str_idx
+                    if coco_name in md_sub_names:
+                        md_name_lookup[str_idx] = coco_name
+
             # Enforce 17/17 for Pose17 and exact component sublabels for VF50
-            if len(sub_mapping) < len(md_sub_names):
-                missing_subs = sorted(list(md_sub_names - set(sub_mapping.keys())))
+            mapped_model_subs = {md_name_lookup[k] for k in sub_mapping.keys() if k in md_name_lookup}
+            if len(mapped_model_subs) < len(md_sub_names):
+                missing_subs = sorted(list(md_sub_names - mapped_model_subs))
                 if model_name == "person":
+                    coco_map = {str(idx): coco_name for idx, coco_name, _ in POSE17_KEYPOINT_SPECS}
+                    expanded_missing = []
+                    for m in missing_subs:
+                        expanded_missing.append(m)
+                        if m in coco_map:
+                            expanded_missing.append(coco_map[m])
                     errors.append(
                         f"[INCOMPLETE_POSE_MAPPING] Skeleton '{model_name}' has only "
-                        f"{len(sub_mapping)}/{len(md_sub_names)} sublabels mapped. Missing: {missing_subs}"
+                        f"{len(mapped_model_subs)}/{len(md_sub_names)} sublabels mapped. Missing: {expanded_missing}"
                     )
                 else:
                     errors.append(
@@ -255,7 +272,7 @@ def validate_cvat_mapping(
                     )
                     continue
 
-                if md_sub_name not in md_sub_names:
+                if md_sub_name not in md_name_lookup:
                     errors.append(
                         f'Model sublabel "{md_sub_name}" does not exist in model skeleton "{model_name}"'
                     )

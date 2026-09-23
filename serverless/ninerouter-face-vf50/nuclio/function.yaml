@@ -43,6 +43,7 @@ spec:
       kind: http
       workerAvailabilityTimeoutMilliseconds: 10000
       attributes:
+        port: 5886
         maxRequestBodySize: 33554432
   build:
     image: cvat.custom.ninerouter.face.vf50

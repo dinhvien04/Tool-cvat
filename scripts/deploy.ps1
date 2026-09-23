@@ -93,7 +93,7 @@ $RepoRoot = Split-Path -Parent $ScriptDir
 $resolvedBuildSha = $ToolCvatBuildSha
 if (-not $resolvedBuildSha -or $resolvedBuildSha.Trim() -eq "" -or $resolvedBuildSha -eq "unknown") {
     try {
-        $gitOut = (git rev-parse HEAD 2>$null)
+        $gitOut = (git -C $RepoRoot rev-parse HEAD 2>$null)
         if ($LASTEXITCODE -eq 0 -and $gitOut -and $gitOut.Trim() -ne "") {
             $resolvedBuildSha = $gitOut.Trim()
         } else {
