@@ -454,6 +454,17 @@ class ModelHandler:
                 if isinstance(p0, dict) and "keypoints" in p0:
                     crop_kps = p0["keypoints"]
 
+            if isinstance(crop_kps, list):
+                dict_kps: Dict[str, Any] = {}
+                for item in crop_kps:
+                    if isinstance(item, dict):
+                        k_name = item.get("name") or item.get("label")
+                        pt = item.get("point") or item.get("points")
+                        vis = item.get("visibility", 2)
+                        if k_name and pt and isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                            dict_kps[str(k_name)] = [pt[0], pt[1], vis]
+                crop_kps = dict_kps
+
             if not crop_kps:
                 return person_dict, initial_report
 
@@ -468,9 +479,16 @@ class ModelHandler:
                         reprojected[name] = list(orig_pt)
                     continue
 
+                vis = int(pt_val[2]) if len(pt_val) > 2 else 2
+                if vis == 0:
+                    orig_pt = person_dict.get("keypoints", {}).get(name)
+                    if orig_pt and (len(orig_pt) <= 2 or orig_pt[2] > 0):
+                        # Preserve Pass 1 visible detection if point fell outside the crop window
+                        reprojected[name] = list(orig_pt)
+                        continue
+
                 x_crop = float(pt_val[0])
                 y_crop = float(pt_val[1])
-                vis = int(pt_val[2]) if len(pt_val) > 2 else 2
 
                 x_px = px1 + (x_crop / 1000.0) * crop_w
                 y_px = py1 + (y_crop / 1000.0) * crop_h
