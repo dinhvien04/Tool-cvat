@@ -275,6 +275,57 @@ def validate_function_yaml(yaml_path: Path) -> Tuple[bool, List[str]]:
         if extra_labels:
             errors.append(f"ninerouter-vision-31 has unexpected extra labels: {sorted(extra_labels)}")
 
+    elif "ninerouter-buddha-multilimbs" in str(yaml_path) or fn_name == "ninerouter-buddha-multilimbs":
+        expected_buddha_labels = [
+            "person",
+            "longmaytrai",
+            "longmayphai",
+            "songmui",
+            "mattrai",
+            "matphai",
+            "moingoai",
+            "moitrong",
+            "buddha_arm",
+            "buddha_hand",
+        ]
+        if len(label_names) != 10:
+            errors.append(
+                f"ninerouter-buddha-multilimbs must have exactly 10 labels, but found {len(label_names)} in {yaml_path}"
+            )
+        missing_labels = set(expected_buddha_labels) - set(label_names)
+        if missing_labels:
+            errors.append(f"ninerouter-buddha-multilimbs missing expected labels: {sorted(missing_labels)}")
+        extra_labels = set(label_names) - set(expected_buddha_labels)
+        if extra_labels:
+            errors.append(f"ninerouter-buddha-multilimbs unexpected extra labels: {sorted(extra_labels)}")
+
+        for item in spec_items:
+            if not isinstance(item, dict):
+                continue
+            lbl = item.get("name")
+            if item.get("type") != "skeleton":
+                errors.append(
+                    f"ninerouter-buddha-multilimbs label '{lbl}' must have type 'skeleton', got {item.get('type')!r}"
+                )
+            sublabels = item.get("sublabels", [])
+            if lbl == "person":
+                if len(sublabels) != 17:
+                    errors.append(f"buddha 'person' skeleton must have 17 sublabels, got {len(sublabels)}")
+            elif lbl in VF50_COMPONENT_CONFIG:
+                cfg = VF50_COMPONENT_CONFIG[lbl]
+                exp = cfg["end"] - cfg["start"] + 1
+                if len(sublabels) != exp:
+                    errors.append(f"buddha face component '{lbl}' must have {exp} sublabels, got {len(sublabels)}")
+            elif lbl == "buddha_arm":
+                if len(sublabels) != 3:
+                    errors.append(f"buddha_arm must have 3 sublabels, got {len(sublabels)}")
+            elif lbl == "buddha_hand":
+                if len(sublabels) != 21:
+                    errors.append(f"buddha_hand must have 21 sublabels, got {len(sublabels)}")
+            svg = item.get("svg", "")
+            if not svg:
+                errors.append(f"buddha label '{lbl}' missing SVG")
+
     return len(errors) == 0, errors
 
 
@@ -286,6 +337,7 @@ def validate_all_detectors() -> Dict[str, Tuple[bool, List[str]]]:
         REPO_ROOT / "serverless" / "ninerouter-polyline" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-human-pose-17" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-face-vf50" / "nuclio" / "function.yaml",
+        REPO_ROOT / "serverless" / "ninerouter-buddha-multilimbs" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-vision" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-vision-mask" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-vision-box-mask" / "nuclio" / "function.yaml",

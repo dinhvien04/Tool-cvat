@@ -1,0 +1,340 @@
+"""Configuration management for CVAT x 9Router AI Annotation.
+
+Loads settings from environment variables, optional .env files,
+and configuration YAML files (e.g. config/labels.yaml).
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import yaml
+
+# Try loading python-dotenv if installed
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Base directories
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CONFIG_DIR = PROJECT_ROOT / "config"
+DEFAULT_LABELS_PATH = DEFAULT_CONFIG_DIR / "labels.yaml"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output"
+
+DEFAULT_NINEROUTER_URL_HOST = "http://127.0.0.1:20128"
+DEFAULT_NINEROUTER_URL_CONTAINER = "http://host.docker.internal:20128"
+DEFAULT_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_POLYLINE_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_RECTANGLE_MASK_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_POLYGON_MASK_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_POSE17_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_POSE17_REFINE_VISION_MODEL = "ag/gemini-3.8-flash-medium"
+DEFAULT_VF50_VISION_MODEL = "ag/gemini-3.8-flash-low"
+DEFAULT_VF50_REFINE_VISION_MODEL = "ag/gemini-3.8-flash-medium"
+DEFAULT_MAX_IMAGE_SIZE = 1600
+DEFAULT_POLYLINE_MAX_IMAGE_SIZE = 1280
+DEFAULT_POLYLINE_MAX_TOKENS = 1200
+DEFAULT_RECTANGLE_MASK_MAX_IMAGE_SIZE = 1280
+DEFAULT_RECTANGLE_MASK_MAX_TOKENS = 2000
+DEFAULT_POLYGON_MASK_MAX_IMAGE_SIZE = 1280
+DEFAULT_POLYGON_MASK_MAX_TOKENS = 2500
+DEFAULT_NINEROUTER_TIMEOUT = 45.0
+DEFAULT_FALLBACK_CONFIDENCE: Optional[float] = None
+
+
+def is_running_in_container() -> bool:
+    """Detect if the current execution is inside a Docker/containerized environment."""
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        return True
+    if os.getenv("NUCLIO_FUNCTION_NAME") or os.getenv("DOCKER_CONTAINER"):
+        return True
+    try:
+        if os.path.exists("/proc/1/cgroup"):
+            with open("/proc/1/cgroup", "rt", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                if any(x in content for x in ("docker", "containerd", "kubepods")):
+                    return True
+    except (OSError, IOError):
+        pass
+    return False
+
+
+def get_default_ninerouter_url() -> str:
+    """Return default 9Router URL based on runtime environment (container vs host)."""
+    if is_running_in_container():
+        return DEFAULT_NINEROUTER_URL_CONTAINER
+    return DEFAULT_NINEROUTER_URL_HOST
+
+
+DEFAULT_NINEROUTER_URL = get_default_ninerouter_url()
+
+
+def mask_api_key(key: Optional[str]) -> str:
+    """Return masked representation of API key (e.g. 'sk-***...xyz' or '***').
+
+    Ensures secrets are never exposed in log messages, debug representations, or traces.
+    """
+    if not key:
+        return "<none>"
+    stripped = key.strip()
+    if len(stripped) <= 6:
+        return "***"
+    return f"{stripped[:3]}...{stripped[-3:]}"
+
+
+@dataclass
+class LabelConfig:
+    """Label definitions loaded from labels.yaml."""
+    all_labels: List[str] = field(default_factory=list)
+    bbox_labels: List[str] = field(default_factory=list)
+    non_bbox_labels: List[str] = field(default_factory=list)
+    cvat_schema: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_yaml(cls, yaml_path: Optional[Path | str] = None) -> LabelConfig:
+        """Load label configurations from a YAML file safely."""
+        target_path = Path(yaml_path) if yaml_path else DEFAULT_LABELS_PATH
+        if not target_path.exists() or not target_path.is_file():
+            return cls()
+
+        try:
+            with open(target_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except (yaml.YAMLError, OSError):
+            return cls()
+
+        return cls(
+            all_labels=list(data.get("all_labels", [])),
+            bbox_labels=list(data.get("bbox_labels", [])),
+            non_bbox_labels=list(data.get("non_bbox_labels", [])),
+            cvat_schema=dict(data.get("cvat_schema", {})),
+        )
+
+
+@dataclass
+class AppConfig:
+    """Central application settings."""
+    ninerouter_url: str = DEFAULT_NINEROUTER_URL
+    ninerouter_key: Optional[str] = None
+    vision_model: str = DEFAULT_VISION_MODEL
+    rectangle_mask_model: Optional[str] = None
+    polygon_mask_model: Optional[str] = None
+    polyline_model: Optional[str] = None
+    pose17_model: Optional[str] = None
+    pose17_refine_model: Optional[str] = None
+    vf50_model: Optional[str] = None
+    vf50_refine_model: Optional[str] = None
+    max_image_size: int = DEFAULT_MAX_IMAGE_SIZE
+    ninerouter_timeout: float = DEFAULT_NINEROUTER_TIMEOUT
+    fallback_confidence: Optional[float] = DEFAULT_FALLBACK_CONFIDENCE
+    output_dir: Path = DEFAULT_OUTPUT_DIR
+    labels_config_path: Path = DEFAULT_LABELS_PATH
+    labels: LabelConfig = field(default_factory=LabelConfig)
+
+    def get_model_for_mode(self, mode: Optional[str] = None) -> str:
+        """Return model configured for a specific mode/detector, falling back to vision_model."""
+        if not mode:
+            return self.vision_model
+        m = mode.strip().lower()
+        if m in ("rectangle_mask", "box_mask"):
+            return self.rectangle_mask_model or os.getenv("RECTANGLE_MASK_MODEL") or self.vision_model
+        elif m == "polygon_mask":
+            return self.polygon_mask_model or os.getenv("POLYGON_MASK_MODEL") or self.vision_model
+        elif m == "polyline":
+            return self.polyline_model or os.getenv("POLYLINE_MODEL") or self.vision_model
+        elif m in ("pose17", "human_pose_17", "pose"):
+            return self.pose17_model or os.getenv("POSE17_MODEL") or self.vision_model
+        elif m in ("pose17_refine", "human_pose_17_refine", "pose_refine"):
+            return (
+                self.pose17_refine_model
+                or os.getenv("POSE17_REFINE_MODEL")
+                or os.getenv("QUALITY_REFINE_MODEL")
+                or DEFAULT_POSE17_REFINE_VISION_MODEL
+            )
+        elif m in ("vf50", "face_vf50", "face"):
+            return self.vf50_model or os.getenv("VF50_MODEL") or self.vision_model
+        elif m in ("vf50_refine", "face_vf50_refine"):
+            return (
+                self.vf50_refine_model
+                or os.getenv("VF50_REFINE_MODEL")
+                or os.getenv("QUALITY_REFINE_MODEL")
+                or DEFAULT_VF50_REFINE_VISION_MODEL
+            )
+        return self.vision_model
+
+    def __repr__(self) -> str:
+        """Safe string representation masking API keys."""
+        masked_key = mask_api_key(self.ninerouter_key) if self.ninerouter_key else None
+        return (
+            f"AppConfig(ninerouter_url={self.ninerouter_url!r}, "
+            f"ninerouter_key={masked_key!r}, "
+            f"vision_model={self.vision_model!r}, "
+            f"rectangle_mask_model={self.rectangle_mask_model!r}, "
+            f"polygon_mask_model={self.polygon_mask_model!r}, "
+            f"polyline_model={self.polyline_model!r}, "
+            f"pose17_model={self.pose17_model!r}, "
+            f"pose17_refine_model={self.pose17_refine_model!r}, "
+            f"vf50_model={self.vf50_model!r}, "
+            f"vf50_refine_model={self.vf50_refine_model!r}, "
+            f"max_image_size={self.max_image_size}, "
+            f"ninerouter_timeout={self.ninerouter_timeout}, "
+            f"fallback_confidence={self.fallback_confidence}, "
+            f"output_dir={self.output_dir!r}, "
+            f"labels_config_path={self.labels_config_path!r})"
+        )
+
+    @classmethod
+    def load(
+        cls,
+        env_file: Optional[Path | str] = None,
+        labels_yaml: Optional[Path | str] = None,
+        url_override: Optional[str] = None,
+        key_override: Optional[str] = None,
+        model_override: Optional[str] = None,
+        output_dir_override: Optional[Path | str] = None,
+        max_image_size_override: Optional[int] = None,
+        timeout_override: Optional[float] = None,
+        fallback_confidence_override: Optional[float] = None,
+    ) -> AppConfig:
+        """Load complete configuration from environment, .env file, and config YAML."""
+        # Check custom env file
+        if env_file:
+            target_env = Path(env_file)
+            if target_env.exists():
+                try:
+                    from dotenv import load_dotenv
+                    load_dotenv(target_env, override=True)
+                except ImportError:
+                    _simple_load_env(target_env)
+
+        url = url_override or os.getenv("NINEROUTER_URL", get_default_ninerouter_url()).strip()
+        # Clean trailing slash from base url
+        if url.endswith("/"):
+            url = url.rstrip("/")
+
+        key = key_override or os.getenv("NINEROUTER_KEY")
+        if key is not None:
+            key = key.strip()
+            if not key:
+                key = None
+
+        model = model_override or os.getenv("VISION_MODEL", DEFAULT_VISION_MODEL).strip()
+
+        # Timeout
+        timeout_env = os.getenv("NINEROUTER_TIMEOUT")
+        if timeout_override is not None:
+            timeout_val = float(timeout_override)
+        elif timeout_env:
+            try:
+                timeout_val = float(timeout_env)
+            except ValueError:
+                timeout_val = DEFAULT_NINEROUTER_TIMEOUT
+        else:
+            timeout_val = DEFAULT_NINEROUTER_TIMEOUT
+
+        # Fallback confidence
+        conf_env = os.getenv("FALLBACK_CONFIDENCE")
+        if fallback_confidence_override is not None:
+            fallback_conf = float(fallback_confidence_override)
+        elif conf_env:
+            try:
+                fallback_conf = float(conf_env)
+            except ValueError:
+                fallback_conf = DEFAULT_FALLBACK_CONFIDENCE
+        else:
+            fallback_conf = DEFAULT_FALLBACK_CONFIDENCE
+
+        # Image size
+        max_size_env = os.getenv("MAX_IMAGE_SIZE")
+        if max_image_size_override is not None:
+            max_size = int(max_image_size_override)
+        elif max_size_env:
+            try:
+                max_size = int(max_size_env)
+            except ValueError:
+                max_size = DEFAULT_MAX_IMAGE_SIZE
+        else:
+            max_size = DEFAULT_MAX_IMAGE_SIZE
+
+        # Output directory
+        if output_dir_override is not None:
+            out_dir = Path(output_dir_override)
+        else:
+            out_dir_env = os.getenv("OUTPUT_DIR")
+            out_dir = Path(out_dir_env) if out_dir_env else DEFAULT_OUTPUT_DIR
+
+        # Labels configuration path
+        target_labels_path = Path(labels_yaml) if labels_yaml else Path(
+            os.getenv("LABELS_CONFIG", str(DEFAULT_LABELS_PATH))
+        )
+        label_cfg = LabelConfig.from_yaml(target_labels_path)
+
+        rect_model_env = os.getenv("RECTANGLE_MASK_MODEL")
+        rect_model = rect_model_env.strip() if rect_model_env else None
+
+        poly_model_env = os.getenv("POLYGON_MASK_MODEL")
+        poly_model = poly_model_env.strip() if poly_model_env else None
+
+        polyline_model_env = os.getenv("POLYLINE_MODEL")
+        polyline_model = polyline_model_env.strip() if polyline_model_env else None
+
+        pose17_model_env = os.getenv("POSE17_MODEL")
+        pose17_model = pose17_model_env.strip() if pose17_model_env else None
+
+        pose17_refine_env = os.getenv("POSE17_REFINE_MODEL")
+        pose17_refine = pose17_refine_env.strip() if pose17_refine_env else None
+
+        vf50_model_env = os.getenv("VF50_MODEL")
+        vf50_model = vf50_model_env.strip() if vf50_model_env else None
+
+        vf50_refine_env = os.getenv("VF50_REFINE_MODEL")
+        vf50_refine = vf50_refine_env.strip() if vf50_refine_env else None
+
+        return cls(
+            ninerouter_url=url,
+            ninerouter_key=key,
+            vision_model=model,
+            rectangle_mask_model=rect_model,
+            polygon_mask_model=poly_model,
+            polyline_model=polyline_model,
+            pose17_model=pose17_model,
+            pose17_refine_model=pose17_refine,
+            vf50_model=vf50_model,
+            vf50_refine_model=vf50_refine,
+            max_image_size=max_size,
+            ninerouter_timeout=timeout_val,
+            fallback_confidence=fallback_conf,
+            output_dir=out_dir,
+            labels_config_path=target_labels_path,
+            labels=label_cfg,
+        )
+
+
+def _simple_load_env(path: Path) -> None:
+    """Fallback manual .env parser if python-dotenv is not installed."""
+    if not path.is_file():
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip("'\"")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except OSError:
+        pass
+
+
+# Global config instance for quick access
+def get_config() -> AppConfig:
+    """Retrieve default global application configuration."""
+    return AppConfig.load()

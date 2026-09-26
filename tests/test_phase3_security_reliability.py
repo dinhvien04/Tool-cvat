@@ -140,8 +140,11 @@ class TestZeroLocalHeavyMLDirective:
         """Confirm no multi-MB or multi-GB local model weight files exist."""
         for ext in self.PROHIBITED_EXTENSIONS:
             matches = list(REPO_ROOT.glob(f"**/*{ext}"))
-            # Filter out virtual environments if present
-            non_venv_matches = [m for m in matches if ".venv" not in str(m) and "site-packages" not in str(m)]
+            # Filter out virtual environments and git metadata if present
+            non_venv_matches = [
+                m for m in matches
+                if ".venv" not in str(m) and "site-packages" not in str(m) and ".git" not in str(m)
+            ]
             assert len(non_venv_matches) == 0, f"Found prohibited model weight files: {non_venv_matches}"
 
 

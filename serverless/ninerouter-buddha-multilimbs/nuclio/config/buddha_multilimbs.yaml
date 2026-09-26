@@ -1,0 +1,133 @@
+# Canonical Configuration for Buddha Multi-Limb Pose & Hand Landmark Annotation
+# Authoritative schema for ninerouter-buddha-multilimbs detector
+
+schema:
+  name: buddha_multilimbs
+  version: "1.0"
+  description: "Hierarchical multi-limb Buddha body, 7-component face, dynamic extra arms, and 21-point hand detector"
+
+labels:
+  central_body:
+    name: person
+    type: skeleton
+    keypoint_count: 17
+    parent_label: person
+
+  central_face:
+    type: skeleton
+    components:
+      - longmaytrai
+      - longmayphai
+      - songmui
+      - mattrai
+      - matphai
+      - moingoai
+      - moitrong
+
+  arm:
+    name: buddha_arm
+    type: skeleton
+    keypoints:
+      - id: 1
+        name: root
+        semantic: "Arm Shoulder/Torso Root"
+      - id: 2
+        name: elbow
+        semantic: "Arm Elbow Joint"
+      - id: 3
+        name: wrist
+        semantic: "Arm Wrist Joint"
+    edges:
+      - [1, 2]  # root -> elbow
+      - [2, 3]  # elbow -> wrist
+
+  hand:
+    name: buddha_hand
+    type: skeleton
+    keypoints:
+      - { id: 0,  name: wrist,       finger: wrist,  semantic: "Wrist Root" }
+      # Thumb
+      - { id: 1,  name: thumb_cmc,   finger: thumb,  semantic: "Thumb CMC" }
+      - { id: 2,  name: thumb_mcp,   finger: thumb,  semantic: "Thumb MCP" }
+      - { id: 3,  name: thumb_ip,    finger: thumb,  semantic: "Thumb IP" }
+      - { id: 4,  name: thumb_tip,   finger: thumb,  semantic: "Thumb Tip" }
+      # Index
+      - { id: 5,  name: index_mcp,   finger: index,  semantic: "Index MCP" }
+      - { id: 6,  name: index_pip,   finger: index,  semantic: "Index PIP" }
+      - { id: 7,  name: index_dip,   finger: index,  semantic: "Index DIP" }
+      - { id: 8,  name: index_tip,   finger: index,  semantic: "Index Tip" }
+      # Middle
+      - { id: 9,  name: middle_mcp,  finger: middle, semantic: "Middle MCP" }
+      - { id: 10, name: middle_pip,  finger: middle, semantic: "Middle PIP" }
+      - { id: 11, name: middle_dip,  finger: middle, semantic: "Middle DIP" }
+      - { id: 12, name: middle_tip,  finger: middle, semantic: "Middle Tip" }
+      # Ring
+      - { id: 13, name: ring_mcp,    finger: ring,   semantic: "Ring MCP" }
+      - { id: 14, name: ring_pip,    finger: ring,   semantic: "Ring PIP" }
+      - { id: 15, name: ring_dip,    finger: ring,   semantic: "Ring DIP" }
+      - { id: 16, name: ring_tip,    finger: ring,   semantic: "Ring Tip" }
+      # Pinky
+      - { id: 17, name: pinky_mcp,   finger: pinky,  semantic: "Pinky MCP" }
+      - { id: 18, name: pinky_pip,   finger: pinky,  semantic: "Pinky PIP" }
+      - { id: 19, name: pinky_dip,   finger: pinky,  semantic: "Pinky DIP" }
+      - { id: 20, name: pinky_tip,   finger: pinky,  semantic: "Pinky Tip" }
+    edges:
+      # Thumb chain
+      - [0, 1]
+      - [1, 2]
+      - [2, 3]
+      - [3, 4]
+      # Index finger chain
+      - [0, 5]
+      - [5, 6]
+      - [6, 7]
+      - [7, 8]
+      # Middle finger chain
+      - [0, 9]
+      - [9, 10]
+      - [10, 11]
+      - [11, 12]
+      # Ring finger chain
+      - [0, 13]
+      - [13, 14]
+      - [14, 15]
+      - [15, 16]
+      # Pinky finger chain
+      - [0, 17]
+      - [17, 18]
+      - [18, 19]
+      - [19, 20]
+
+pipeline:
+  # Refinement crops padding ratio
+  arm_crop_padding: 0.25
+  hand_crop_padding: 0.35
+
+  # Bounded execution defaults
+  max_arms: 100
+  max_hand_refinements: 60
+  min_confidence: 0.30
+  two_pass: true
+  hand_refine: true
+  refine_workers: 2
+
+  # Token limits
+  global_max_tokens: 4000
+  arm_max_tokens: 1500
+  hand_max_tokens: 2000
+
+deduplication:
+  # Distance in normalized [0..1000] coordinates
+  wrist_distance_threshold: 35.0
+  elbow_distance_threshold: 45.0
+  root_distance_threshold: 60.0
+  # Cosine similarity between limb vectors (-1.0 to 1.0)
+  direction_similarity_threshold: 0.92
+  # IoU overlap of hand bounding boxes
+  hand_iou_threshold: 0.65
+
+quality_gate:
+  # Clamping & minimum keypoint constraints
+  min_arm_length_pixels: 5.0
+  max_hand_collapse_distance: 2.0
+  min_visible_hand_points: 5

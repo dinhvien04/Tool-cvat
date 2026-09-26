@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
-from core.pose_face_schema import POSE17_KEYPOINTS
+from core.pose_face_schema import POSE17_KEYPOINTS, POSE17_KEYPOINT_TO_ID
 from core.quality_gate import LATERALITY_VIEWER, assess_pose17_quality
 from core.week2_schema import load_pose17
 
@@ -366,7 +366,7 @@ class TestPose17ModelHandlerInference:
         assert mock_client.send_vision_request.call_count == 2
         assert len(shapes) == 1
         # Find right_wrist element in CVAT shape
-        rw_elem = next(el for el in shapes[0]["elements"] if el["label"] == "right_wrist")
+        rw_elem = next(el for el in shapes[0]["elements"] if el["label"] in ("right_wrist", str(POSE17_KEYPOINT_TO_ID["right_wrist"])))
         # Must NOT be restored to Pass 1 visible! Must be outside=True
         assert rw_elem["outside"] is True
         assert rw_elem["occluded"] is False
@@ -406,7 +406,7 @@ class TestPose17ModelHandlerInference:
 
         assert mock_client.send_vision_request.call_count == 2
         assert len(shapes) == 1
-        ra_elem = next(el for el in shapes[0]["elements"] if el["label"] == "right_ankle")
+        ra_elem = next(el for el in shapes[0]["elements"] if el["label"] in ("right_ankle", str(POSE17_KEYPOINT_TO_ID["right_ankle"])))
         # Pass 1 right_ankle was outside crop window, so Case A must retain it as visible!
         assert ra_elem["outside"] is False
 
@@ -439,7 +439,7 @@ class TestPose17ModelHandlerInference:
 
         assert mock_client.send_vision_request.call_count == 2
         assert len(shapes) == 1
-        lw_elem = next(el for el in shapes[0]["elements"] if el["label"] == "left_wrist")
+        lw_elem = next(el for el in shapes[0]["elements"] if el["label"] in ("left_wrist", str(POSE17_KEYPOINT_TO_ID["left_wrist"])))
         assert lw_elem["occluded"] is True
         assert lw_elem["outside"] is False
 
@@ -468,7 +468,7 @@ class TestPose17ModelHandlerInference:
         shapes = handler.infer(img_bytes, threshold=0.5, roi=roi, refine_crops=False)
 
         assert len(shapes) == 1
-        nose_elem = next(el for el in shapes[0]["elements"] if el["label"] == "nose")
+        nose_elem = next(el for el in shapes[0]["elements"] if el["label"] in ("nose", str(POSE17_KEYPOINT_TO_ID["nose"])))
         # Center of bottom-right quadrant (500..1000) is 750!
         assert nose_elem["points"][0] == pytest.approx(750.0, abs=1.0)
         assert nose_elem["points"][1] == pytest.approx(750.0, abs=1.0)

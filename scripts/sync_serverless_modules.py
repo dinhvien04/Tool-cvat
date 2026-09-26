@@ -48,6 +48,17 @@ WEEK2_CORE: Tuple[str, ...] = (
     "config/week2_vf50.yaml",
 )
 
+# Modules and config files needed ONLY by Buddha Multi-Limb detector
+BUDDHA_CORE: Tuple[str, ...] = (
+    "core/week2_schema.py",
+    "core/pose_face_schema.py",
+    "core/skeleton_contract.py",
+    "core/buddha_contract.py",
+    "config/week2_pose17.yaml",
+    "config/week2_vf50.yaml",
+    "config/buddha_multilimbs.yaml",
+)
+
 # Modules and config files needed ONLY by the active Three Detectors (Rectangle, Polygon, Polyline)
 THREE_DETECTOR_CORE: Tuple[str, ...] = (
     "app/models.py",
@@ -64,6 +75,7 @@ SERVERLESS_TARGETS: Tuple[str, ...] = (
     "serverless/ninerouter-polyline/nuclio",
     "serverless/ninerouter-human-pose-17/nuclio",
     "serverless/ninerouter-face-vf50/nuclio",
+    "serverless/ninerouter-buddha-multilimbs/nuclio",
 )
 
 TARGET_MANIFESTS: Dict[str, Tuple[str, ...]] = {
@@ -72,6 +84,7 @@ TARGET_MANIFESTS: Dict[str, Tuple[str, ...]] = {
     "serverless/ninerouter-polyline/nuclio": COMMON_CORE + THREE_DETECTOR_CORE,
     "serverless/ninerouter-human-pose-17/nuclio": COMMON_CORE + WEEK2_CORE,
     "serverless/ninerouter-face-vf50/nuclio": COMMON_CORE + WEEK2_CORE,
+    "serverless/ninerouter-buddha-multilimbs/nuclio": COMMON_CORE + BUDDHA_CORE,
 }
 
 TARGET_GROUPS: Dict[str, Tuple[str, ...]] = {
@@ -90,6 +103,8 @@ TARGET_GROUPS: Dict[str, Tuple[str, ...]] = {
     "polyline": ("serverless/ninerouter-polyline/nuclio",),
     "human-pose-17": ("serverless/ninerouter-human-pose-17/nuclio",),
     "face-vf50": ("serverless/ninerouter-face-vf50/nuclio",),
+    "buddha": ("serverless/ninerouter-buddha-multilimbs/nuclio",),
+    "buddha-multilimbs": ("serverless/ninerouter-buddha-multilimbs/nuclio",),
 }
 
 
@@ -98,6 +113,8 @@ def get_target_manifest(rel_target: str) -> Tuple[str, ...]:
     norm_target = rel_target.replace("\\", "/").rstrip("/")
     if norm_target in TARGET_MANIFESTS:
         return TARGET_MANIFESTS[norm_target]
+    if "buddha" in norm_target:
+        return COMMON_CORE + BUDDHA_CORE
     if "human-pose-17" in norm_target or "face-vf50" in norm_target:
         return COMMON_CORE + WEEK2_CORE
     return COMMON_CORE + THREE_DETECTOR_CORE

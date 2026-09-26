@@ -135,10 +135,10 @@ class NineRouterRequestError(NineRouterError):
 class VisionResponse:
     """Represents a response from 9Router vision chat completion."""
     content: str
-    raw_response: Dict[str, Any]
-    duration_seconds: float
-    model: str
-    status_code: int
+    raw_response: Dict[str, Any] = field(default_factory=dict)
+    duration_seconds: float = 0.0
+    model: str = ""
+    status_code: int = 200
     usage: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -470,6 +470,15 @@ class NineRouterClient:
                 return pref
 
         return available_ids[0]
+
+    def resolve_buddha_model(
+        self,
+        preferred_model: Optional[str] = None,
+        allow_fallback: Optional[bool] = None,
+    ) -> str:
+        """Resolve Claude Opus 5.5 vision model for Buddha Multi-Limb detector."""
+        from core.buddha_contract import resolve_buddha_model as _resolve_buddha
+        return _resolve_buddha(self, preferred_model=preferred_model, allow_fallback=allow_fallback)
 
     def probe_segmentation_capability(
         self,

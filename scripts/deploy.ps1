@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
-    [ValidateSet("three", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "three-with-tracker", "week2", "human-pose-17", "face-vf50", "active-all", "all")]
+    [ValidateSet("three", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "three-with-tracker", "week2", "human-pose-17", "face-vf50", "buddha", "buddha-multilimbs", "active-all", "all")]
     [string]$Target = "three",
 
     [Parameter(Mandatory = $false)]
@@ -52,6 +52,15 @@ param (
 
     [Parameter(Mandatory = $false)]
     [string]$Vf50RefineModel = $env:VF50_REFINE_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$BuddhaModel = $env:BUDDHA_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$BuddhaRefineModel = $env:BUDDHA_REFINE_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$BuddhaAllowModelFallback = $env:BUDDHA_ALLOW_MODEL_FALLBACK,
 
     [Parameter(Mandatory = $false)]
     [string]$ToolCvatBuildSha = $env:TOOL_CVAT_BUILD_SHA,
@@ -155,6 +164,16 @@ switch ($Target) {
     "face-vf50" {
         $functionsToDeploy = @(
             @{ Name = "ninerouter-face-vf50"; DisplayName = "9Router Face Landmark VF-50"; Mode = "face_vf50" }
+        )
+    }
+    "buddha" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-buddha-multilimbs"; DisplayName = "9Router Buddha Multi-Limb Pose"; Mode = "buddha_multilimbs" }
+        )
+    }
+    "buddha-multilimbs" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-buddha-multilimbs"; DisplayName = "9Router Buddha Multi-Limb Pose"; Mode = "buddha_multilimbs" }
         )
     }
     "week2" {
@@ -308,6 +327,8 @@ $syncTargetParam = switch ($Target) {
     "week2" { "week2" }
     "human-pose-17" { "human-pose-17" }
     "face-vf50" { "face-vf50" }
+    "buddha" { "buddha" }
+    "buddha-multilimbs" { "buddha-multilimbs" }
     "three" { "three" }
     "rectangle-mask" { "rectangle-mask" }
     "polygon-mask" { "polygon-mask" }
@@ -343,6 +364,8 @@ foreach ($fn in $functionsToDeploy) {
     $detectorEnvVar = ""
     $extraPoseRefine = $null
     $extraVf50Refine = $null
+    $extraBuddhaRefine = $null
+    $extraBuddhaFallback = $null
     if ($fnName -eq "ninerouter-rectangle-mask") {
         if ($RectangleMaskModel -and $RectangleMaskModel.Trim() -ne "") {
             $fnModel = $RectangleMaskModel.Trim()
@@ -380,6 +403,18 @@ foreach ($fn in $functionsToDeploy) {
         if ($Vf50RefineModel -and $Vf50RefineModel.Trim() -ne "") {
             $extraVf50Refine = $Vf50RefineModel.Trim()
         }
+    } elseif ($fnName -eq "ninerouter-buddha-multilimbs") {
+        if ($BuddhaModel -and $BuddhaModel.Trim() -ne "") {
+            $fnModel = $BuddhaModel.Trim()
+        }
+        $detectorEnvVar = "BUDDHA_MODEL=$fnModel"
+        if ($BuddhaRefineModel -and $BuddhaRefineModel.Trim() -ne "") {
+            $extraBuddhaRefine = $BuddhaRefineModel.Trim()
+        }
+        if ($BuddhaAllowModelFallback -and $BuddhaAllowModelFallback.Trim() -ne "") {
+            $extraBuddhaFallback = $BuddhaAllowModelFallback.Trim()
+        }
+        $fnTimeout = "180.0"
     }
     Write-Host "Active model for $($fnName): $fnModel" -ForegroundColor Green
     Write-Host "Request timeout for $($fnName): $fnTimeout s" -ForegroundColor Gray
@@ -430,6 +465,12 @@ foreach ($fn in $functionsToDeploy) {
         }
         if ($extraVf50Refine) {
             $extraEnvBash += "--env `"VF50_REFINE_MODEL=$extraVf50Refine`" "
+        }
+        if ($extraBuddhaRefine) {
+            $extraEnvBash += "--env `"BUDDHA_REFINE_MODEL=$extraBuddhaRefine`" "
+        }
+        if ($extraBuddhaFallback) {
+            $extraEnvBash += "--env `"BUDDHA_ALLOW_MODEL_FALLBACK=$extraBuddhaFallback`" "
         }
         if ($resolvedBuildSha -and $resolvedBuildSha -ne "unknown") {
             $extraEnvBash += "--env `"TOOL_CVAT_BUILD_SHA=$resolvedBuildSha`" "
@@ -496,6 +537,8 @@ nuctl deploy $fnName \
         if ($detectorEnvVar) { $deployArgs += @("--env", $detectorEnvVar) }
         if ($extraPoseRefine) { $deployArgs += @("--env", "POSE17_REFINE_MODEL=$extraPoseRefine") }
         if ($extraVf50Refine) { $deployArgs += @("--env", "VF50_REFINE_MODEL=$extraVf50Refine") }
+        if ($extraBuddhaRefine) { $deployArgs += @("--env", "BUDDHA_REFINE_MODEL=$extraBuddhaRefine") }
+        if ($extraBuddhaFallback) { $deployArgs += @("--env", "BUDDHA_ALLOW_MODEL_FALLBACK=$extraBuddhaFallback") }
         if ($resolvedBuildSha -and $resolvedBuildSha -ne "unknown") { $deployArgs += @("--env", "TOOL_CVAT_BUILD_SHA=$resolvedBuildSha") }
         if ($NineRouterKey) { $deployArgs += @("--env", "NINEROUTER_KEY=$NineRouterKey") }
         if ($CvatWebhookSecret) { $deployArgs += @("--env", "CVAT_WEBHOOK_SECRET=$CvatWebhookSecret") }
