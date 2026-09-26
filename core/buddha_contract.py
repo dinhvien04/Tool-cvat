@@ -16,6 +16,7 @@ Supports:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import math
@@ -835,6 +836,7 @@ def build_buddha_global_prompt() -> str:
     """Build Pass 1 Global Scene Discovery prompt.
 
     Enforces:
+    - Depicted anatomy detection across statues, sculptures, paintings, and living humans.
     - Single main/central body (Pose17).
     - Single main central face ROI.
     - Exhaustive recall of ALL visible extra arms.
@@ -845,6 +847,14 @@ def build_buddha_global_prompt() -> str:
     return (
         "You are an expert AI vision perception system specializing in Buddhist iconography, "
         "specifically multi-armed and thousand-armed Buddha/Bodhisattva deities (e.g. Avalokiteshvara/Guanyin).\n\n"
+        "DOMAIN MANDATE - STATUES, SCULPTURES, AND RELIGIOUS ARTWORK:\n"
+        "- This detector is NOT a real-human-only detector. It MUST robustly detect depicted anatomy on:\n"
+        "  1. Buddhist statues and Bodhisattva statues (bronze, stone, wood, gold, ceramic, lacquer, marble, gilded, clay, jade).\n"
+        "  2. Multi-armed deity statues, sculptures, and high/low reliefs.\n"
+        "  3. Paintings, illustrations, thangka, frescoes, murals, drawings, and rendered religious artwork.\n"
+        "  4. Photographs of statues as well as living humans where applicable.\n"
+        "- NEVER reject an image or skip detections because the subject is a statue, sculpture, or non-photographic artwork.\n"
+        "- Treat sculpted, carved, or painted limbs, torso, and facial features as real anatomical structures for keypoint estimation.\n\n"
         "TASK:\n"
         "Detect the CENTRAL BODY, CENTRAL FACE, and EVERY VISIBLE EXTRA ARM independently.\n\n"
         "CRITICAL RULES & PROHIBITIONS:\n"
@@ -917,6 +927,10 @@ def build_buddha_arm_refine_prompt() -> str:
     """Build Pass 2 Arm Crop Refinement prompt."""
     return (
         "High-resolution close-up refinement of a single Buddhist deity arm.\n\n"
+        "DOMAIN & MEDIUM SPECIFICATION:\n"
+        "- The arm may belong to a Buddhist statue (bronze, stone, wood, gold, ceramic), sculpture, "
+        "thangka painting, mural, illustration, religious artwork, or living person.\n"
+        "- Treat sculpted, carved, or painted limbs as anatomical structures. Never reject due to medium.\n\n"
         "TASK:\n"
         "Precisely locate the 3 kinematic arm joints in this cropped patch: ROOT, ELBOW, and WRIST.\n\n"
         "RULES:\n"
@@ -942,6 +956,10 @@ def build_buddha_hand21_prompt() -> str:
     """Build Pass 3 Hand21 Landmark prompt."""
     return (
         "High-resolution hand landmark estimation for a Buddhist deity hand (Mudra / Ritual Gesture).\n\n"
+        "DOMAIN & MEDIUM SPECIFICATION:\n"
+        "- The hand may belong to a Buddhist statue, Bodhisattva sculpture, carving, relief, "
+        "thangka painting, mural, religious illustration, or living person.\n"
+        "- Treat sculpted, carved, or painted hands as anatomical structures. Never reject due to medium.\n\n"
         "TASK:\n"
         "Estimate exactly 21 canonical hand keypoints (21 2D hand landmark coordinates, 0..20) for the primary hand in this cropped patch.\n\n"
         "TOPOLOGY & JOINT INDEXING:\n"
@@ -952,7 +970,7 @@ def build_buddha_hand21_prompt() -> str:
         "  Ring:   13 (ring_mcp) -> 14 (ring_pip) -> 15 (ring_dip) -> 16 (ring_tip)\n"
         "  Pinky:  17 (pinky_mcp) -> 18 (pinky_pip) -> 19 (pinky_dip) -> 20 (pinky_tip)\n\n"
         "MUDRA & RITUAL GESTURE RULES:\n"
-        "- Buddha hands often hold ritual items (lotus, wheel, vase, sword, rosary bead) or form mudras.\n"
+        "- Buddha hands frequently form sacred mudras (Abhaya, Varada, Dhyana, Vitarka, Karana, Anjali, etc.) or hold ritual items (lotus, wheel, vase, sword, rosary bead, vajra).\n"
         "- Scepters, lotus stems, or beads are NOT fingers. Only mark the actual anatomical digits.\n"
         "- If fingers curl inward or overlap behind another finger, mark visibility = 1 (occluded).\n"
         "- Coordinates: Normalized integers [x, y] in [0, 1000] relative to THIS CROPPED PATCH.\n"
@@ -1089,3 +1107,106 @@ def build_cvat_buddha_multilimbs_full_spec() -> List[Dict[str, Any]]:
     specs.append(build_cvat_buddha_hand_spec(label_id=10))
 
     return specs
+
+
+# ─── Specification Fingerprint & Output Validation ─────────────────────────────
+
+def compute_buddha_spec_fingerprint(specs: Optional[Sequence[Mapping[str, Any]]] = None) -> str:
+    """Compute a deterministic SHA-256 fingerprint for canonical Buddha Multi-Limb spec."""
+    if specs is None:
+        specs = build_cvat_buddha_multilimbs_full_spec()
+    canonical_json = json.dumps(specs, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def validate_shapes_against_cvat_spec(
+    shapes: Sequence[Mapping[str, Any]],
+    spec: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Tuple[bool, List[str]]:
+    """Validate model output shapes against canonical CVAT skeleton specification.
+
+    Enforces:
+    1. Every item in shapes must be a dict with "type": "skeleton".
+    2. Every item's "label" must be one of the 10 declared parent skeletons.
+    3. Every item must have "elements" list of points sublabels.
+    4. Each element in "elements" must have:
+       - "type": "points"
+       - "label": valid sublabel name defined in the parent's spec
+       - "points": list/tuple of 2 floats/ints [x, y]
+    5. For parent 'person', element labels must be numeric ("1".."17") when numeric_sublabels=True.
+    6. Returns (is_valid, errors).
+    """
+    if spec is None:
+        spec = build_cvat_buddha_multilimbs_full_spec()
+
+    spec_by_parent: Dict[str, Set[str]] = {}
+    for s in spec:
+        p_name = str(s.get("name"))
+        sublabels = s.get("sublabels", [])
+        sub_names = {str(sub.get("name")) for sub in sublabels if isinstance(sub, dict)}
+        spec_by_parent[p_name] = sub_names
+
+    errors: List[str] = []
+
+    if not isinstance(shapes, (list, tuple)):
+        return False, [f"Expected shapes sequence, got {type(shapes).__name__}"]
+
+    for idx, shape in enumerate(shapes):
+        if not isinstance(shape, dict):
+            errors.append(f"Shape #{idx} is not a dict: {type(shape).__name__}")
+            continue
+
+        shape_type = shape.get("type")
+        if shape_type != "skeleton":
+            errors.append(f"Shape #{idx} must have type 'skeleton', got {shape_type!r}")
+
+        label = shape.get("label")
+        if not label or label not in spec_by_parent:
+            errors.append(
+                f"Shape #{idx} has invalid parent label {label!r}. "
+                f"Allowed: {sorted(spec_by_parent.keys())}"
+            )
+            continue
+
+        allowed_sublabels = spec_by_parent[label]
+        elements = shape.get("elements")
+        if not isinstance(elements, list):
+            errors.append(f"Shape #{idx} ('{label}') missing 'elements' list")
+            continue
+
+        for e_idx, elem in enumerate(elements):
+            if not isinstance(elem, dict):
+                errors.append(f"Shape #{idx} ('{label}') element #{e_idx} is not a dict")
+                continue
+
+            elem_type = elem.get("type")
+            if elem_type != "points":
+                errors.append(
+                    f"Shape #{idx} ('{label}') element #{e_idx} must have type 'points', got {elem_type!r}"
+                )
+
+            elem_label = elem.get("label")
+            if not elem_label or str(elem_label) not in allowed_sublabels:
+                errors.append(
+                    f"Shape #{idx} ('{label}') element #{e_idx} has unknown sublabel {elem_label!r}. "
+                    f"Expected one of {sorted(allowed_sublabels)}"
+                )
+
+            pts = elem.get("points")
+            if not isinstance(pts, (list, tuple)) or len(pts) != 2:
+                errors.append(
+                    f"Shape #{idx} ('{label}') element #{e_idx} ('{elem_label}') points must be [x, y], got {pts!r}"
+                )
+            else:
+                x, y = pts[0], pts[1]
+                if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+                    errors.append(
+                        f"Shape #{idx} ('{label}') element #{e_idx} ('{elem_label}') coordinates must be numeric, got {pts!r}"
+                    )
+                elif math.isnan(x) or math.isnan(y) or math.isinf(x) or math.isinf(y):
+                    errors.append(
+                        f"Shape #{idx} ('{label}') element #{e_idx} ('{elem_label}') coordinates contain NaN or Inf: {pts!r}"
+                    )
+
+    return len(errors) == 0, errors
+

@@ -189,6 +189,7 @@ switch ($Target) {
             @{ Name = "ninerouter-polyline"; DisplayName = "9Router Polyline"; Mode = "polyline" },
             @{ Name = "ninerouter-human-pose-17"; DisplayName = "9Router Human Pose 17"; Mode = "human_pose_17" },
             @{ Name = "ninerouter-face-vf50"; DisplayName = "9Router Face Landmark VF-50"; Mode = "face_vf50" },
+            @{ Name = "ninerouter-buddha-multilimbs"; DisplayName = "9Router Buddha Multi-Limb Pose"; Mode = "buddha_multilimbs" },
             @{ Name = "ninerouter-rectangle-tracker"; DisplayName = "9Router Rectangle Tracker"; Mode = "rectangle_tracker" }
         )
     }
@@ -199,6 +200,7 @@ switch ($Target) {
             @{ Name = "ninerouter-polyline"; DisplayName = "9Router Polyline"; Mode = "polyline" },
             @{ Name = "ninerouter-human-pose-17"; DisplayName = "9Router Human Pose 17"; Mode = "human_pose_17" },
             @{ Name = "ninerouter-face-vf50"; DisplayName = "9Router Face Landmark VF-50"; Mode = "face_vf50" },
+            @{ Name = "ninerouter-buddha-multilimbs"; DisplayName = "9Router Buddha Multi-Limb Pose"; Mode = "buddha_multilimbs" },
             @{ Name = "ninerouter-rectangle-tracker"; DisplayName = "9Router Rectangle Tracker"; Mode = "rectangle_tracker" }
         )
     }
@@ -293,13 +295,25 @@ Write-Host "`n[Step 4/4] Deploying $($functionsToDeploy.Count) detector function
 $nuctlCmd = $null
 $useWsl = $false
 
+$winNuctlWorks = $false
 if (Get-Command nuctl -ErrorAction SilentlyContinue) {
+    try {
+        & nuctl get function 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $winNuctlWorks = $true
+        }
+    } catch {}
+}
+
+if ($winNuctlWorks) {
     $nuctlCmd = "nuctl"
 } else {
     $wslCheck = wsl -d Ubuntu which nuctl 2>$null
     if ($wslCheck) {
         $nuctlCmd = "wsl -d Ubuntu nuctl"
         $useWsl = $true
+    } elseif (Get-Command nuctl -ErrorAction SilentlyContinue) {
+        $nuctlCmd = "nuctl"
     }
 }
 

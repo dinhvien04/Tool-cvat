@@ -88,3 +88,44 @@ class TestBuddhaSchema:
         assert schema.max_arms == 100
         assert schema.max_hand_refinements == 60
         assert schema.refine_workers == 2
+
+
+class TestBuddhaSchemaCLI:
+    """Validate CLI flags of scripts/buddha_schema.py."""
+
+    def test_cli_fingerprint(self):
+        import subprocess
+        res = subprocess.run(
+            ["python", "scripts/buddha_schema.py", "--fingerprint"],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        assert "BUDDHA_SPEC_FINGERPRINT=" in res.stdout
+
+    def test_cli_json_output(self):
+        import json
+        import subprocess
+        res = subprocess.run(
+            ["python", "scripts/buddha_schema.py", "--json"],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        specs = json.loads(res.stdout)
+        assert isinstance(specs, list)
+        assert len(specs) == 10
+
+    def test_cli_write_json(self, tmp_path):
+        import json
+        import subprocess
+        out_file = tmp_path / "test_labels.raw.json"
+        res = subprocess.run(
+            ["python", "scripts/buddha_schema.py", "--write-json", str(out_file)],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        assert out_file.exists()
+        specs = json.loads(out_file.read_text(encoding="utf-8"))
+        assert len(specs) == 10

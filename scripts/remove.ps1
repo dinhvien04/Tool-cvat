@@ -23,7 +23,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
-    [ValidateSet("legacy", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "week2", "human-pose-17", "face-vf50", "all-9router")]
+    [ValidateSet("legacy", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "week2", "human-pose-17", "face-vf50", "buddha", "buddha-multilimbs", "all-9router")]
     [string]$Target = "legacy",
 
     [Parameter(Mandatory = $false)]
@@ -49,13 +49,25 @@ $PROTECTED_MODELS = @(
 $nuctlCmd = $null
 $useWsl = $false
 
+$winNuctlWorks = $false
 if (Get-Command nuctl -ErrorAction SilentlyContinue) {
+    try {
+        & nuctl get function 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $winNuctlWorks = $true
+        }
+    } catch {}
+}
+
+if ($winNuctlWorks) {
     $nuctlCmd = "nuctl"
 } else {
     $wslCheck = wsl -d Ubuntu which nuctl 2>$null
     if ($wslCheck) {
         $nuctlCmd = "wsl -d Ubuntu nuctl"
         $useWsl = $true
+    } elseif (Get-Command nuctl -ErrorAction SilentlyContinue) {
+        $nuctlCmd = "nuctl"
     }
 }
 
@@ -92,6 +104,12 @@ switch ($Target) {
     "face-vf50" {
         $targetsToRemove = @("ninerouter-face-vf50")
     }
+    "buddha" {
+        $targetsToRemove = @("ninerouter-buddha-multilimbs")
+    }
+    "buddha-multilimbs" {
+        $targetsToRemove = @("ninerouter-buddha-multilimbs")
+    }
     "week2" {
         $targetsToRemove = @(
             "ninerouter-human-pose-17",
@@ -109,7 +127,8 @@ switch ($Target) {
             "ninerouter-polyline",
             "ninerouter-rectangle-tracker",
             "ninerouter-human-pose-17",
-            "ninerouter-face-vf50"
+            "ninerouter-face-vf50",
+            "ninerouter-buddha-multilimbs"
         )
     }
 }

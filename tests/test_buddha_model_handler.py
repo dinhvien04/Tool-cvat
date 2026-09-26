@@ -195,3 +195,65 @@ class TestBuddhaModelHandler:
         assert labels.count("buddha_arm") == 2
         # One hand was successfully refined, one failed gracefully
         assert labels.count("buddha_hand") == 1
+
+    def test_failure_isolation_on_face_and_body(self, mock_responses):
+        """Verify that failure in central face or central body does not drop arms or hands."""
+        with mock.patch("app.client.NineRouterClient.get_vision_model_ids", return_value=["claude-opus-5-5"]):
+            handler = ModelHandler(
+                base_url="http://mocked.router",
+                model="claude-opus-5-5",
+                refine_workers=1,
+            )
+
+        def mock_vision(model, image_bytes_or_b64, prompt, max_tokens, timeout):
+            if "central_body" in prompt:
+                return VisionResponse(content=mock_responses["global"])
+            elif "root" in prompt and "elbow" in prompt and "wrist" in prompt and "21" not in prompt:
+                return VisionResponse(content=mock_responses["arm"])
+            elif "21 2D hand landmark" in prompt:
+                return VisionResponse(content=mock_responses["hand"])
+            return VisionResponse(content="{}")
+
+        # Mock _process_central_face to throw an exception
+        with mock.patch.object(handler, "_process_central_face", side_effect=RuntimeError("Face component model failed")):
+            with mock.patch.object(handler.client, "send_vision_request", side_effect=mock_vision):
+                img_bytes = create_synthetic_image(1000, 1000)
+                shapes = handler.infer(image_bytes=img_bytes)
+
+        labels = [s["label"] for s in shapes]
+        # Body and arms/hands still returned
+        assert "person" in labels
+        assert "buddha_arm" in labels
+        assert "buddha_hand" in labels
+        # Face component labels are absent due to isolated failure
+        assert "longmaytrai" not in labels
+
+    def test_output_shapes_comply_with_cvat_spec(self, mock_responses):
+        """Verify that output shapes strictly satisfy validate_shapes_against_cvat_spec."""
+        from core.buddha_contract import validate_shapes_against_cvat_spec
+
+        with mock.patch("app.client.NineRouterClient.get_vision_model_ids", return_value=["claude-opus-5-5"]):
+            handler = ModelHandler(
+                base_url="http://mocked.router",
+                model="claude-opus-5-5",
+                refine_workers=1,
+            )
+
+        def mock_vision(model, image_bytes_or_b64, prompt, max_tokens, timeout):
+            if "central_body" in prompt:
+                return VisionResponse(content=mock_responses["global"])
+            elif "root" in prompt and "elbow" in prompt and "wrist" in prompt and "21" not in prompt:
+                return VisionResponse(content=mock_responses["arm"])
+            elif "21 2D hand landmark" in prompt:
+                return VisionResponse(content=mock_responses["hand"])
+            elif "facial landmark" in prompt or "VF-50" in prompt:
+                return VisionResponse(content=mock_responses["face"])
+            return VisionResponse(content="{}")
+
+        with mock.patch.object(handler.client, "send_vision_request", side_effect=mock_vision):
+            img_bytes = create_synthetic_image(1000, 1000)
+            shapes = handler.infer(image_bytes=img_bytes)
+
+        is_valid, errors = validate_shapes_against_cvat_spec(shapes)
+        assert is_valid, f"Output shapes failed CVAT spec validation: {errors}"
+        assert len(errors) == 0

@@ -12,8 +12,7 @@ from core.buddha_contract import build_cvat_buddha_multilimbs_full_spec
 FEEDBACK_HOST_PATH = (ROOT / ".tool-cvat").as_posix()
 
 specs = build_cvat_buddha_multilimbs_full_spec()
-spec_json = json.dumps(specs, indent=2)
-indented_spec_json = "\n".join(("      " + line) if line else "" for line in spec_json.splitlines())
+spec_json = json.dumps(specs, separators=(",", ":"))
 
 buddha_yaml = f"""metadata:
   name: ninerouter-buddha-multilimbs
@@ -21,8 +20,7 @@ buddha_yaml = f"""metadata:
   annotations:
     name: 9Router Buddha Multi-Limb Pose
     type: detector
-    spec: |
-{indented_spec_json}
+    spec: '{spec_json}'
 
 spec:
   description: 9Router Buddha Multi-Limb Pose & Hand Landmark Detector (Multi-armed deity body, face, arms, and 21-point hands)
@@ -77,7 +75,8 @@ spec:
 
   triggers:
     myHttpTrigger:
-      numWorkers: 2
+      maxWorkers: 1
+      numWorkers: 1
       kind: http
       workerAvailabilityTimeoutMilliseconds: 10000
       attributes:

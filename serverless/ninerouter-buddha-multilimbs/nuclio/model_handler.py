@@ -59,6 +59,7 @@ from core.buddha_contract import (
     load_buddha_schema,
     resolve_buddha_model,
     sort_arms_deterministically,
+    validate_shapes_against_cvat_spec,
 )
 from core.pose_face_schema import (
     POSE17_KEYPOINTS,
@@ -477,6 +478,14 @@ class ModelHandler:
         # 4. Buddha Hands
         for hand in linked_hands:
             all_shapes.append(hand.to_cvat_skeleton(orig_w, orig_h))
+
+        # CVAT Spec Compliance Validation Gate
+        is_valid_spec, spec_errors = validate_shapes_against_cvat_spec(all_shapes)
+        if not is_valid_spec:
+            logger.warning(
+                f"CVAT spec validation detected {len(spec_errors)} issues in returned shapes: "
+                f"{'; '.join(spec_errors[:3])}"
+            )
 
         elapsed = time.perf_counter() - t0
         logger.info(
