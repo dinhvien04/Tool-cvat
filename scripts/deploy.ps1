@@ -427,7 +427,9 @@ foreach ($fn in $functionsToDeploy) {
     $extraBuddhaFallback = $null
     $extraBuddhaAutoQuality = $null
     if ($fnName -eq "ninerouter-box") {
+        $fnModel = "ag/gemini-3.8-flash-medium"
         $detectorEnvVar = "BOX_MODEL=$fnModel"
+        $fnTimeout = "90.0"
     } elseif ($fnName -eq "ninerouter-box-3d") {
         $detectorEnvVar = "BOX3D_MODEL=$fnModel"
     } elseif ($fnName -eq "ninerouter-polygon") {

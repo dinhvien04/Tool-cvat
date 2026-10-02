@@ -1,0 +1,170 @@
+[
+  {
+    "id": 1,
+    "name": "pedestrian",
+    "type": "any",
+    "color": "#00FF00",
+    "attributes": []
+  },
+  {
+    "id": 2,
+    "name": "rider",
+    "type": "any",
+    "color": "#FF0000",
+    "attributes": []
+  },
+  {
+    "id": 3,
+    "name": "car",
+    "type": "any",
+    "color": "#0000FF",
+    "attributes": []
+  },
+  {
+    "id": 4,
+    "name": "truck",
+    "type": "any",
+    "color": "#FFFF00",
+    "attributes": []
+  },
+  {
+    "id": 5,
+    "name": "bus",
+    "type": "any",
+    "color": "#FF00FF",
+    "attributes": []
+  },
+  {
+    "id": 6,
+    "name": "train",
+    "type": "any",
+    "color": "#00FFFF",
+    "attributes": []
+  },
+  {
+    "id": 7,
+    "name": "motorcycle",
+    "type": "any",
+    "color": "#FFA500",
+    "attributes": []
+  },
+  {
+    "id": 8,
+    "name": "bicycle",
+    "type": "any",
+    "color": "#800080",
+    "attributes": []
+  },
+  {
+    "id": 9,
+    "name": "traffic light",
+    "type": "any",
+    "color": "#FF1493",
+    "attributes": []
+  },
+  {
+    "id": 10,
+    "name": "traffic sign",
+    "type": "any",
+    "color": "#7FFF00",
+    "attributes": []
+  },
+  {
+    "id": 11,
+    "name": "pole",
+    "type": "any",
+    "color": "#4B0082",
+    "attributes": []
+  },
+  {
+    "id": 12,
+    "name": "person",
+    "type": "any",
+    "color": "#32CD32",
+    "attributes": []
+  },
+  {
+    "id": 13,
+    "name": "traffic_light",
+    "type": "any",
+    "color": "#C71585",
+    "attributes": []
+  },
+  {
+    "id": 14,
+    "name": "traffic_sign",
+    "type": "any",
+    "color": "#ADFF2F",
+    "attributes": []
+  },
+  {
+    "id": 15,
+    "name": "area/alternative",
+    "type": "polygon",
+    "color": "#4682B4",
+    "attributes": []
+  },
+  {
+    "id": 16,
+    "name": "area/drivable",
+    "type": "polygon",
+    "color": "#708090",
+    "attributes": []
+  },
+  {
+    "id": 17,
+    "name": "road",
+    "type": "polygon",
+    "color": "#808080",
+    "attributes": []
+  },
+  {
+    "id": 18,
+    "name": "sidewalk",
+    "type": "polygon",
+    "color": "#A0522D",
+    "attributes": []
+  },
+  {
+    "id": 19,
+    "name": "building",
+    "type": "polygon",
+    "color": "#CD853F",
+    "attributes": []
+  },
+  {
+    "id": 20,
+    "name": "wall",
+    "type": "polygon",
+    "color": "#B8860B",
+    "attributes": []
+  },
+  {
+    "id": 21,
+    "name": "fence",
+    "type": "polygon",
+    "color": "#BC8F8F",
+    "attributes": []
+  },
+  {
+    "id": 22,
+    "name": "vegetation",
+    "type": "polygon",
+    "color": "#228B22",
+    "attributes": []
+  },
+  {
+    "id": 23,
+    "name": "terrain",
+    "type": "polygon",
+    "color": "#8B4513",
+    "attributes": []
+  },
+  {
+    "id": 24,
+    "name": "sky",
+    "type": "polygon",
+    "color": "#87CEEB",
+    "attributes": []
+  }
+]

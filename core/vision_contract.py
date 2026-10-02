@@ -1055,7 +1055,7 @@ Rules:
    - Provide at least 4 perimeter vertices per object. Do NOT omit mask.
 3. Strictly output raw JSON only (no markdown fences, no explanatory text)."""
 
-    return f"""Detect all visible instances of the allowed object classes in this image.
+    return f"""Detect every visible instance of the allowed classes. This is a crowded road scene: include large foreground vehicles and small, distant, or partly occluded ones. Do not stop after the nearest objects.
 
 Allowed labels (choose ONLY from this list):
 {labels_formatted}
@@ -1070,10 +1070,13 @@ Output schema:
   ]
 }}
 
-Remember:
-- Normalized integer coordinates in [0, 1000].
-- Format is [ymin, xmin, ymax, xmax].
-- Strictly output raw JSON only (no markdown fences, no explanatory text)."""
+Rules:
+- One tight box per physical object. The box must touch the visible outer pixels of that object and must not cover a neighboring vehicle.
+- Do not merge two adjacent cars, or a car and a bus, into one box.
+- A bus or truck is only a bus or truck when the body is clearly larger than a car. A small distant vehicle is a car.
+- Include vehicles cut off by the image border, using only the visible part.
+- Coordinates are normalized integers in [0, 1000], format [ymin, xmin, ymax, xmax].
+- Output raw JSON only, with no markdown and no explanation."""
 
 
 def build_openai_vision_payload(

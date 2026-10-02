@@ -26,23 +26,23 @@ spec:
   description: 9Router Box Detector (14 foreground instances, rectangle only)
   runtime: 'python:3.11'
   handler: main:handler
-  eventTimeout: 60s
+  eventTimeout: 120s
 
   env:
     - name: NINEROUTER_URL
       value: 'https://9router-production-e47a.up.railway.app'
     - name: VISION_MODEL
-      value: 'ag/gemini-3.8-flash-low'
+      value: 'ag/gemini-3.8-flash-medium'
     - name: BOX_MODEL
-      value: 'ag/gemini-3.8-flash-low'
+      value: 'ag/gemini-3.8-flash-medium'
     - name: DETECTION_MODE
       value: 'box'
     - name: NINEROUTER_TIMEOUT
-      value: '45.0'
+      value: '90.0'
     - name: MAX_IMAGE_SIZE
-      value: '1280'
+      value: '1600'
     - name: MAX_TOKENS
-      value: '1200'
+      value: '4096'
     - name: FEEDBACK_DATA_DIR
       value: '/opt/nuclio/feedback'
     - name: FEEDBACK_DB_PATH

@@ -37,8 +37,9 @@ from core.vision_contract import MODE_BOX
 logger = logging.getLogger("cvat.nuclio.ninerouter.box")
 
 BOX_LABELS: Sequence[str] = BOX_MASK_LABELS
-DEFAULT_BOX_MAX_IMAGE_SIZE = 1280
-DEFAULT_BOX_MAX_TOKENS = 1200
+DEFAULT_BOX_MAX_IMAGE_SIZE = 1600
+DEFAULT_BOX_MAX_TOKENS = 4096
+DEFAULT_BOX_MODEL = "ag/gemini-3.8-flash-medium"
 
 
 def load_spec_labels_from_function_yaml(yaml_path: Optional[Path | str] = None) -> List[str]:
@@ -80,6 +81,44 @@ def rectangle_shapes_only(
         if not isinstance(points, (list, tuple)) or len(points) != 4:
             continue
         kept.append(dict(shape))
+    return suppress_overlapping_rectangles(kept)
+
+
+def _box_iou(a: Sequence[float], b: Sequence[float]) -> float:
+    ax1, ay1, ax2, ay2 = [float(v) for v in a]
+    bx1, by1, bx2, by2 = [float(v) for v in b]
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def suppress_overlapping_rectangles(
+    shapes: Sequence[Dict[str, Any]],
+    iou_threshold: float = 0.75,
+) -> List[Dict[str, Any]]:
+    """Drop a box when a higher-confidence box of the same label already covers it."""
+    ranked = sorted(
+        shapes,
+        key=lambda shape: float(shape.get("confidence") or 0.0),
+        reverse=True,
+    )
+    kept: List[Dict[str, Any]] = []
+    for shape in ranked:
+        points = shape.get("points")
+        label = shape.get("label")
+        if any(
+            other.get("label") == label and _box_iou(points, other["points"]) >= iou_threshold
+            for other in kept
+        ):
+            continue
+        kept.append(dict(shape))
     return kept
 
 
@@ -98,7 +137,7 @@ class ModelHandler:
     ) -> None:
         self.base_url = base_url or os.getenv("NINEROUTER_URL", DEFAULT_NINEROUTER_URL_CONTAINER)
         self.api_key = api_key or os.getenv("NINEROUTER_KEY")
-        self.requested_model = model or os.getenv("BOX_MODEL") or os.getenv("VISION_MODEL") or DEFAULT_VISION_MODEL
+        self.requested_model = model or os.getenv("BOX_MODEL") or DEFAULT_BOX_MODEL or os.getenv("VISION_MODEL") or DEFAULT_VISION_MODEL
         self.default_mode = MODE_BOX
 
         timeout_env = os.getenv("NINEROUTER_TIMEOUT")

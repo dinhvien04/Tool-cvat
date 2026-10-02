@@ -53,3 +53,18 @@ def test_rectangle_shapes_only_drops_masks_and_unknown_labels():
     ]
     kept = rectangle_shapes_only(shapes, BOX_MASK_LABELS)
     assert kept == [{"type": "rectangle", "label": "car", "points": [1, 2, 3, 4]}]
+
+
+def test_overlapping_same_label_boxes_collapse_to_the_higher_confidence_one():
+    shapes = rectangle_shapes_only(
+        [
+            {"type": "rectangle", "label": "car", "points": [0, 0, 100, 100], "confidence": "0.40"},
+            {"type": "rectangle", "label": "car", "points": [5, 5, 98, 98], "confidence": "0.90"},
+            {"type": "rectangle", "label": "bus", "points": [0, 0, 100, 100], "confidence": "0.80"},
+        ],
+        ["car", "bus"],
+    )
+    labels = sorted(shape["label"] for shape in shapes)
+    assert labels == ["bus", "car"]
+    car = next(shape for shape in shapes if shape["label"] == "car")
+    assert car["confidence"] == "0.90"
