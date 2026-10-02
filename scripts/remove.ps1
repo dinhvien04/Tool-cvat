@@ -4,14 +4,12 @@
 
 .DESCRIPTION
     Safely deletes ONLY 9Router Nuclio functions using nuctl:
-    - Target 'legacy': deletes the 4 legacy 9Router functions:
-        * ninerouter-vision-31
-        * ninerouter-vision-box-mask
-        * ninerouter-vision-mask
-        * ninerouter-vision
+    - Target 'legacy': deletes the 4 legacy 9Router functions
     - Target 'rectangle-mask': deletes ninerouter-rectangle-mask
     - Target 'polygon-mask': deletes ninerouter-polygon-mask
     - Target 'polyline': deletes ninerouter-polyline
+    - Target 'buddha-multilimbs': deletes ninerouter-buddha-multilimbs
+    - Target 'buddha-auto': deletes ninerouter-buddha-auto
     - Target 'all-9router': deletes all 9Router functions
 
     STRICT SAFETY GUARANTEES:
@@ -23,7 +21,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
-    [ValidateSet("legacy", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "week2", "human-pose-17", "face-vf50", "buddha", "buddha-multilimbs", "all-9router")]
+    [ValidateSet("legacy", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "week2", "human-pose-17", "face-vf50", "buddha", "buddha-multilimbs", "buddha-auto", "all-9router")]
     [string]$Target = "legacy",
 
     [Parameter(Mandatory = $false)]
@@ -110,6 +108,9 @@ switch ($Target) {
     "buddha-multilimbs" {
         $targetsToRemove = @("ninerouter-buddha-multilimbs")
     }
+    "buddha-auto" {
+        $targetsToRemove = @("ninerouter-buddha-auto")
+    }
     "week2" {
         $targetsToRemove = @(
             "ninerouter-human-pose-17",
@@ -128,7 +129,8 @@ switch ($Target) {
             "ninerouter-rectangle-tracker",
             "ninerouter-human-pose-17",
             "ninerouter-face-vf50",
-            "ninerouter-buddha-multilimbs"
+            "ninerouter-buddha-multilimbs",
+            "ninerouter-buddha-auto"
         )
     }
 }

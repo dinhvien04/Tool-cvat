@@ -26,8 +26,10 @@ DEFAULT_CONFIG_DIR = PROJECT_ROOT / "config"
 DEFAULT_LABELS_PATH = DEFAULT_CONFIG_DIR / "labels.yaml"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output"
 
-DEFAULT_NINEROUTER_URL_HOST = "http://127.0.0.1:20128"
-DEFAULT_NINEROUTER_URL_CONTAINER = "http://host.docker.internal:20128"
+# Hosted 9Router. Dashboard: https://9router-production-e47a.up.railway.app/dashboard
+# The API base has no /dashboard suffix and is reachable from the host and from Nuclio.
+DEFAULT_NINEROUTER_URL_HOST = "https://9router-production-e47a.up.railway.app"
+DEFAULT_NINEROUTER_URL_CONTAINER = DEFAULT_NINEROUTER_URL_HOST
 DEFAULT_VISION_MODEL = "ag/gemini-3.8-flash-low"
 DEFAULT_POLYLINE_VISION_MODEL = "ag/gemini-3.8-flash-low"
 DEFAULT_RECTANGLE_MASK_VISION_MODEL = "ag/gemini-3.8-flash-low"

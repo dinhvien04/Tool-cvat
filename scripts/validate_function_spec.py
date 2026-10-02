@@ -29,7 +29,7 @@ from core.pose_face_schema import POSE17_KEYPOINTS, VF50_LANDMARKS, validate_svg
 from core.skeleton_contract import VF50_COMPONENT_NAMES, VF50_COMPONENT_CONFIG
 
 VALID_FUNCTION_KINDS = {"detector", "interactor", "tracker", "reid"}
-VALID_CVAT_LABEL_TYPES = {"rectangle", "polygon", "polyline", "points", "mask", "skeleton", "any"}
+VALID_CVAT_LABEL_TYPES = {"rectangle", "polygon", "polyline", "points", "ellipse", "cuboid", "mask", "skeleton", "any"}
 
 
 def validate_function_yaml(yaml_path: Path) -> Tuple[bool, List[str]]:
@@ -142,6 +142,20 @@ def validate_function_yaml(yaml_path: Path) -> Tuple[bool, List[str]]:
                 errors.append(
                     f"ninerouter-rectangle-mask label '{item.get('name')}' must have type 'any' for dual-shape compatibility, got '{item.get('type')}'"
                 )
+
+    elif fn_name == "ninerouter-polygon" or "/ninerouter-polygon/" in str(yaml_path).replace("\\", "/"):
+        if label_names != list(POLYGON_MASK_LABELS):
+            errors.append(f"ninerouter-polygon labels must be {list(POLYGON_MASK_LABELS)}, got {label_names}")
+        for item in spec_items:
+            if isinstance(item, dict) and item.get("type") != "polygon":
+                errors.append(f"ninerouter-polygon label '{item.get('name')}' must have type 'polygon', got '{item.get('type')}'")
+
+    elif fn_name == "ninerouter-mask" or "/ninerouter-mask/" in str(yaml_path).replace("\\", "/"):
+        if label_names != list(BOX_MASK_LABELS):
+            errors.append(f"ninerouter-mask labels must be {list(BOX_MASK_LABELS)}, got {label_names}")
+        for item in spec_items:
+            if isinstance(item, dict) and item.get("type") != "mask":
+                errors.append(f"ninerouter-mask label '{item.get('name')}' must have type 'mask', got '{item.get('type')}'")
 
     elif "ninerouter-polygon-mask" in str(yaml_path) or fn_name == "ninerouter-polygon-mask":
         if len(label_names) != 10:
@@ -326,22 +340,98 @@ def validate_function_yaml(yaml_path: Path) -> Tuple[bool, List[str]]:
             if not svg:
                 errors.append(f"buddha label '{lbl}' missing SVG")
 
+    elif fn_name == "ninerouter-box-3d" or "ninerouter-box-3d" in str(yaml_path).replace("\\", "/"):
+        expected_box3d = [
+            "car",
+            "truck",
+            "bus",
+            "trailer",
+            "construction_vehicle",
+            "pedestrian",
+            "motorcycle",
+            "bicycle",
+        ]
+        if label_names != expected_box3d:
+            errors.append(
+                f"ninerouter-box-3d labels must be {expected_box3d}, got {label_names}"
+            )
+        for item in spec_items:
+            if isinstance(item, dict) and item.get("type") != "cuboid":
+                errors.append(
+                    f"ninerouter-box-3d label '{item.get('name')}' must have type 'cuboid', got '{item.get('type')}'"
+                )
+
+    elif fn_name == "ninerouter-box" or "/ninerouter-box/" in str(yaml_path).replace("\\", "/"):
+        if len(label_names) != 14:
+            errors.append(
+                f"ninerouter-box must have exactly 14 labels, but found {len(label_names)} in {yaml_path}"
+            )
+        missing_labels = set(BOX_MASK_LABELS) - set(label_names)
+        if missing_labels:
+            errors.append(f"ninerouter-box is missing expected labels: {sorted(missing_labels)}")
+        extra_labels = set(label_names) - set(BOX_MASK_LABELS)
+        if extra_labels:
+            errors.append(f"ninerouter-box has unexpected extra labels: {sorted(extra_labels)}")
+        for item in spec_items:
+            if isinstance(item, dict) and item.get("type") != "rectangle":
+                errors.append(
+                    f"ninerouter-box label '{item.get('name')}' must have type 'rectangle', got '{item.get('type')}'"
+                )
+
+    elif "ninerouter-buddha-auto" in str(yaml_path) or fn_name == "ninerouter-buddha-auto":
+        expected_auto_labels = [
+            "buddha_body",
+            "buddha_face",
+            "buddha_arm",
+            "buddha_hand",
+        ]
+        if len(label_names) != 4:
+            errors.append(
+                f"ninerouter-buddha-auto must have exactly 4 labels, but found {len(label_names)} in {yaml_path}"
+            )
+        missing_labels = set(expected_auto_labels) - set(label_names)
+        if missing_labels:
+            errors.append(f"ninerouter-buddha-auto missing expected labels: {sorted(missing_labels)}")
+        extra_labels = set(label_names) - set(expected_auto_labels)
+        if extra_labels:
+            errors.append(f"ninerouter-buddha-auto unexpected extra labels: {sorted(extra_labels)}")
+
+        for item in spec_items:
+            if not isinstance(item, dict):
+                continue
+            lbl = item.get("name")
+            if item.get("type") != "skeleton":
+                errors.append(
+                    f"ninerouter-buddha-auto label '{lbl}' must have type 'skeleton', got {item.get('type')!r}"
+                )
+            sublabels = item.get("sublabels", [])
+            if lbl == "buddha_body":
+                if len(sublabels) != 17:
+                    errors.append(f"buddha_body skeleton must have 17 sublabels, got {len(sublabels)}")
+            elif lbl == "buddha_face":
+                if len(sublabels) != 50:
+                    errors.append(f"buddha_face skeleton must have 50 sublabels, got {len(sublabels)}")
+            elif lbl == "buddha_arm":
+                if len(sublabels) != 3:
+                    errors.append(f"buddha_arm must have 3 sublabels, got {len(sublabels)}")
+            elif lbl == "buddha_hand":
+                if len(sublabels) != 21:
+                    errors.append(f"buddha_hand must have 21 sublabels, got {len(sublabels)}")
+            svg = item.get("svg", "")
+            if not svg:
+                errors.append(f"buddha_auto label '{lbl}' missing SVG")
+
     return len(errors) == 0, errors
 
 
 def validate_all_detectors() -> Dict[str, Tuple[bool, List[str]]]:
     """Validate all detector function.yaml files in serverless/."""
     targets = [
-        REPO_ROOT / "serverless" / "ninerouter-rectangle-mask" / "nuclio" / "function.yaml",
-        REPO_ROOT / "serverless" / "ninerouter-polygon-mask" / "nuclio" / "function.yaml",
-        REPO_ROOT / "serverless" / "ninerouter-polyline" / "nuclio" / "function.yaml",
+        REPO_ROOT / "serverless" / "ninerouter-box" / "nuclio" / "function.yaml",
+        REPO_ROOT / "serverless" / "ninerouter-polygon" / "nuclio" / "function.yaml",
+        REPO_ROOT / "serverless" / "ninerouter-mask" / "nuclio" / "function.yaml",
+        REPO_ROOT / "serverless" / "ninerouter-box-3d" / "nuclio" / "function.yaml",
         REPO_ROOT / "serverless" / "ninerouter-human-pose-17" / "nuclio" / "function.yaml",
-        REPO_ROOT / "serverless" / "ninerouter-face-vf50" / "nuclio" / "function.yaml",
-        REPO_ROOT / "serverless" / "ninerouter-buddha-multilimbs" / "nuclio" / "function.yaml",
-        REPO_ROOT / "serverless" / "ninerouter-vision" / "nuclio" / "function.yaml",
-        REPO_ROOT / "serverless" / "ninerouter-vision-mask" / "nuclio" / "function.yaml",
-        REPO_ROOT / "serverless" / "ninerouter-vision-box-mask" / "nuclio" / "function.yaml",
-        REPO_ROOT / "serverless" / "ninerouter-vision-31" / "nuclio" / "function.yaml",
     ]
     results: Dict[str, Tuple[bool, List[str]]] = {}
     for target in targets:

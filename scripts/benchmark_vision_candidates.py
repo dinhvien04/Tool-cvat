@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-BASE_URL = os.getenv("NINEROUTER_BASE_URL", "http://127.0.0.1:20128")
+BASE_URL = os.getenv("NINEROUTER_BASE_URL", "https://9router-production-e47a.up.railway.app")
 
 # Candidate models to evaluate
 CANDIDATE_MODELS = [

@@ -21,7 +21,7 @@ Supports:
 
 This project strictly adheres to a zero-heavy-ML architecture:
 - **NO local model weights**: No multi-GB PyTorch/Torchvision, CUDA, TensorFlow, Ultralytics, SAM, SAM2, or ONNX runtimes.
-- **Remote inference**: All perception runs through remote vision models orchestrated by local 9Router (`http://127.0.0.1:20128` or `http://host.docker.internal:20128`).
+- **Remote inference**: All perception runs through remote vision models orchestrated by hosted 9Router (`https://9router-production-e47a.up.railway.app`).
 - **Pure Pillow geometry**: Polygon contour parsing, denormalization, rasterization to binary masks, and CVAT 1D flat list encoding run entirely via Python standard library and `Pillow` (`PIL.Image`, `PIL.ImageDraw`).
 - **Featherweight containers**: Nuclio functions build in seconds from `python:3.11-slim` (< 200MB base), saving workstation RAM/VRAM.
 

@@ -210,7 +210,7 @@ def main() -> int:
     parser.add_argument("--cvat-url", default=os.getenv("CVAT_URL", "http://localhost:18080"))
     parser.add_argument("--job-id", type=int, default=int(os.getenv("CVAT_JOB_ID", "0") or 0))
     parser.add_argument("--frame-id", type=int, default=int(os.getenv("CVAT_FRAME_ID", "0") or 0))
-    parser.add_argument("--router-url", default=os.getenv("NINEROUTER_URL", "http://127.0.0.1:20128"))
+    parser.add_argument("--router-url", default=os.getenv("NINEROUTER_URL", "https://9router-production-e47a.up.railway.app"))
     parser.add_argument("--timeout", type=float, default=float(os.getenv("NINEROUTER_TIMEOUT", DEFAULT_NINEROUTER_TIMEOUT)))
     parser.add_argument("--output", default=str(ROOT / "output" / "e2e_performance_report.json"))
     args = parser.parse_args()

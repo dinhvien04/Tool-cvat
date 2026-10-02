@@ -21,10 +21,11 @@ def test_label_config_loading():
     assert "traffic_light" in cfg.bbox_labels
 
 
-def test_app_config_defaults():
+def test_app_config_defaults(monkeypatch):
     """Verify default values in AppConfig."""
+    monkeypatch.delenv("NINEROUTER_URL", raising=False)
     cfg = AppConfig.load()
-    assert cfg.ninerouter_url.startswith("http://")
+    assert cfg.ninerouter_url == "https://9router-production-e47a.up.railway.app"
     assert cfg.max_image_size == 1600
     assert cfg.vision_model == DEFAULT_VISION_MODEL
     assert len(cfg.labels.bbox_labels) == 13

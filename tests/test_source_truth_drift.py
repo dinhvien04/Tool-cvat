@@ -27,14 +27,13 @@ from scripts.sync_serverless_modules import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 THREE_TARGETS = (
-    "serverless/ninerouter-rectangle-mask/nuclio",
-    "serverless/ninerouter-polygon-mask/nuclio",
-    "serverless/ninerouter-polyline/nuclio",
+    "serverless/ninerouter-box/nuclio",
+    "serverless/ninerouter-polygon/nuclio",
+    "serverless/ninerouter-mask/nuclio",
 )
 
 WEEK2_TARGETS = (
     "serverless/ninerouter-human-pose-17/nuclio",
-    "serverless/ninerouter-face-vf50/nuclio",
 )
 
 
@@ -92,7 +91,7 @@ def test_target_manifest_scoping():
 
 def test_drift_detection_catches_unwanted_files():
     """Verify that check_drift detects orphan/unneeded files added to a target."""
-    rect_target = REPO_ROOT / "serverless/ninerouter-rectangle-mask/nuclio"
+    rect_target = REPO_ROOT / "serverless/ninerouter-box/nuclio"
     dummy_orphan = rect_target / "core" / "unwanted_dummy_file.py"
     try:
         dummy_orphan.write_text("# dummy orphan", encoding="utf-8")

@@ -53,7 +53,7 @@ SLA_THRESHOLDS: Dict[str, Dict[str, float]] = {
 }
 
 DEFAULT_VISION_MODEL = "ag/gemini-3.8-flash-low"
-DEFAULT_NINEROUTER_URL = os.getenv("NINEROUTER_BASE_URL", "http://127.0.0.1:20128")
+DEFAULT_NINEROUTER_URL = os.getenv("NINEROUTER_BASE_URL", "https://9router-production-e47a.up.railway.app")
 
 
 @dataclass

@@ -61,12 +61,6 @@ WEEK2_CONTAINERS = {
         "yaml_path": REPO_ROOT / "serverless" / "ninerouter-human-pose-17" / "nuclio" / "function.yaml",
         "expected_labels": 1,
     },
-    "vf50": {
-        "container_name": "nuclio-nuclio-ninerouter-face-vf50",
-        "function_name": "ninerouter-face-vf50",
-        "yaml_path": REPO_ROOT / "serverless" / "ninerouter-face-vf50" / "nuclio" / "function.yaml",
-        "expected_labels": 7,
-    },
 }
 
 # Strict security allowlist: ONLY non-sensitive environment variables may be recorded/displayed.

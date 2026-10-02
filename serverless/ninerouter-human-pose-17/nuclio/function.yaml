@@ -12,7 +12,7 @@ spec:
   eventTimeout: 60s
   env:
   - name: NINEROUTER_URL
-    value: http://host.docker.internal:20128
+    value: https://9router-production-e47a.up.railway.app
   - name: VISION_MODEL
     value: ag/gemini-3.8-flash-low
   - name: POSE17_MODEL

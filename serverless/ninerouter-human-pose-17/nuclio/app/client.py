@@ -152,7 +152,7 @@ class NineRouterClient:
 
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:20128",
+        base_url: str = "https://9router-production-e47a.up.railway.app",
         api_key: Optional[str] = None,
         timeout: float = 60.0,
     ) -> None:
@@ -470,15 +470,6 @@ class NineRouterClient:
                 return pref
 
         return available_ids[0]
-
-    def resolve_buddha_model(
-        self,
-        preferred_model: Optional[str] = None,
-        allow_fallback: Optional[bool] = None,
-    ) -> str:
-        """Resolve Claude Opus 5.5 vision model for Buddha Multi-Limb detector."""
-        from core.buddha_contract import resolve_buddha_model as _resolve_buddha
-        return _resolve_buddha(self, preferred_model=preferred_model, allow_fallback=allow_fallback)
 
     def probe_segmentation_capability(
         self,

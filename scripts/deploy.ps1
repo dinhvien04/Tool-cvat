@@ -1,12 +1,16 @@
 <#
 .SYNOPSIS
-    Deploy Exactly Three 9Router CVAT AI Detectors.
+    Deploy 9Router CVAT AI Detectors.
 
 .DESCRIPTION
-    Deploys the streamlined 3-function 9Router detector suite:
+    Deploys 9Router detector suites to CVAT Serverless:
     1. 9Router Rectangle + Mask (ninerouter-rectangle-mask) - 14 foreground instances
     2. 9Router Polygon + Mask (ninerouter-polygon-mask) - 10 semantic regions
     3. 9Router Polyline (ninerouter-polyline) - 7 lane demarcations
+    4. 9Router Human Pose 17 (ninerouter-human-pose-17) - 17-keypoint COCO topology
+    5. 9Router Face Landmark VF-50 (ninerouter-face-vf50) - 7 facial components
+    6. 9Router Buddha Multi-Limb Pose (ninerouter-buddha-multilimbs) - 10-label deity topology
+    7. 9Router Buddha Auto Pose (ninerouter-buddha-auto) - 4-skeleton zero-touch detector
 
     SAFETY GUARANTEES:
     - NEVER deletes volumes or databases.
@@ -17,14 +21,14 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
-    [ValidateSet("three", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "three-with-tracker", "week2", "human-pose-17", "face-vf50", "buddha", "buddha-multilimbs", "active-all", "all")]
+    [ValidateSet("three", "rectangle-mask", "polygon-mask", "polyline", "rectangle-tracker", "three-with-tracker", "week2", "human-pose-17", "face-vf50", "buddha", "buddha-multilimbs", "buddha-auto", "box", "box-3d", "polygon", "mask", "active-all", "all")]
     [string]$Target = "three",
 
     [Parameter(Mandatory = $false)]
     [string]$CvatRoot = $env:CVAT_ROOT,
 
     [Parameter(Mandatory = $false)]
-    [string]$NineRouterUrl = "http://host.docker.internal:20128",
+    [string]$NineRouterUrl = "https://9router-production-e47a.up.railway.app",
 
     [Parameter(Mandatory = $false)]
     [string]$VisionModel = $env:VISION_MODEL,
@@ -58,6 +62,15 @@ param (
 
     [Parameter(Mandatory = $false)]
     [string]$BuddhaRefineModel = $env:BUDDHA_REFINE_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$BuddhaAutoModel = $env:BUDDHA_AUTO_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$BuddhaAutoRefineModel = $env:BUDDHA_AUTO_REFINE_MODEL,
+
+    [Parameter(Mandatory = $false)]
+    [string]$BuddhaAutoQuality = $env:BUDDHA_AUTO_QUALITY,
 
     [Parameter(Mandatory = $false)]
     [string]$BuddhaAllowModelFallback = $env:BUDDHA_ALLOW_MODEL_FALLBACK,
@@ -176,6 +189,31 @@ switch ($Target) {
             @{ Name = "ninerouter-buddha-multilimbs"; DisplayName = "9Router Buddha Multi-Limb Pose"; Mode = "buddha_multilimbs" }
         )
     }
+    "buddha-auto" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-buddha-auto"; DisplayName = "9Router Buddha Auto Pose"; Mode = "buddha_auto" }
+        )
+    }
+    "box" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-box"; DisplayName = "9Router Box"; Mode = "box" }
+        )
+    }
+    "box-3d" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-box-3d"; DisplayName = "9Router Box 3D"; Mode = "box_3d" }
+        )
+    }
+    "polygon" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-polygon"; DisplayName = "9Router Polygon"; Mode = "polygon" }
+        )
+    }
+    "mask" {
+        $functionsToDeploy = @(
+            @{ Name = "ninerouter-mask"; DisplayName = "9Router Mask"; Mode = "mask" }
+        )
+    }
     "week2" {
         $functionsToDeploy = @(
             @{ Name = "ninerouter-human-pose-17"; DisplayName = "9Router Human Pose 17"; Mode = "human_pose_17" },
@@ -190,6 +228,7 @@ switch ($Target) {
             @{ Name = "ninerouter-human-pose-17"; DisplayName = "9Router Human Pose 17"; Mode = "human_pose_17" },
             @{ Name = "ninerouter-face-vf50"; DisplayName = "9Router Face Landmark VF-50"; Mode = "face_vf50" },
             @{ Name = "ninerouter-buddha-multilimbs"; DisplayName = "9Router Buddha Multi-Limb Pose"; Mode = "buddha_multilimbs" },
+            @{ Name = "ninerouter-buddha-auto"; DisplayName = "9Router Buddha Auto Pose"; Mode = "buddha_auto" },
             @{ Name = "ninerouter-rectangle-tracker"; DisplayName = "9Router Rectangle Tracker"; Mode = "rectangle_tracker" }
         )
     }
@@ -201,6 +240,7 @@ switch ($Target) {
             @{ Name = "ninerouter-human-pose-17"; DisplayName = "9Router Human Pose 17"; Mode = "human_pose_17" },
             @{ Name = "ninerouter-face-vf50"; DisplayName = "9Router Face Landmark VF-50"; Mode = "face_vf50" },
             @{ Name = "ninerouter-buddha-multilimbs"; DisplayName = "9Router Buddha Multi-Limb Pose"; Mode = "buddha_multilimbs" },
+            @{ Name = "ninerouter-buddha-auto"; DisplayName = "9Router Buddha Auto Pose"; Mode = "buddha_auto" },
             @{ Name = "ninerouter-rectangle-tracker"; DisplayName = "9Router Rectangle Tracker"; Mode = "rectangle_tracker" }
         )
     }
@@ -251,12 +291,12 @@ try {
 
 # Step 3: Resolve dynamic vision model
 Write-Host "`n[Step 3/4] Resolving active vision model from 9Router..." -ForegroundColor Yellow
-$hostUrl = "http://127.0.0.1:20128"
 if ($NineRouterUrl -match "host\.docker\.internal") {
-    $modelsCheckUrl = "$hostUrl/v1/models"
+    $hostUrl = "http://127.0.0.1:20128"
 } else {
-    $modelsCheckUrl = "$NineRouterUrl/v1/models"
+    $hostUrl = $NineRouterUrl.TrimEnd("/")
 }
+$modelsCheckUrl = "$hostUrl/v1/models"
 
 $resolvedVisionModel = $null
 try {
@@ -264,7 +304,7 @@ try {
     if ($NineRouterKey -and $NineRouterKey.Trim() -ne "") {
         $authHeaders["Authorization"] = "Bearer $NineRouterKey"
     }
-    $modelsResp = Invoke-RestMethod -Uri $modelsCheckUrl -Headers $authHeaders -Method Get -TimeoutSec 5
+    $modelsResp = Invoke-RestMethod -Uri $modelsCheckUrl -Headers $authHeaders -Method Get -TimeoutSec 30
     $models = $modelsResp.data
     $visionModels = @($models | Where-Object {
         $_.capabilities.vision -eq $true -or
@@ -343,6 +383,11 @@ $syncTargetParam = switch ($Target) {
     "face-vf50" { "face-vf50" }
     "buddha" { "buddha" }
     "buddha-multilimbs" { "buddha-multilimbs" }
+    "buddha-auto" { "buddha-auto" }
+    "box" { "box" }
+    "box-3d" { "box-3d" }
+    "polygon" { "polygon" }
+    "mask" { "mask" }
     "three" { "three" }
     "rectangle-mask" { "rectangle-mask" }
     "polygon-mask" { "polygon-mask" }
@@ -380,7 +425,16 @@ foreach ($fn in $functionsToDeploy) {
     $extraVf50Refine = $null
     $extraBuddhaRefine = $null
     $extraBuddhaFallback = $null
-    if ($fnName -eq "ninerouter-rectangle-mask") {
+    $extraBuddhaAutoQuality = $null
+    if ($fnName -eq "ninerouter-box") {
+        $detectorEnvVar = "BOX_MODEL=$fnModel"
+    } elseif ($fnName -eq "ninerouter-box-3d") {
+        $detectorEnvVar = "BOX3D_MODEL=$fnModel"
+    } elseif ($fnName -eq "ninerouter-polygon") {
+        $detectorEnvVar = "POLYGON_MODEL=$fnModel"
+    } elseif ($fnName -eq "ninerouter-mask") {
+        $detectorEnvVar = "MASK_MODEL=$fnModel"
+    } elseif ($fnName -eq "ninerouter-rectangle-mask") {
         if ($RectangleMaskModel -and $RectangleMaskModel.Trim() -ne "") {
             $fnModel = $RectangleMaskModel.Trim()
         }
@@ -424,6 +478,25 @@ foreach ($fn in $functionsToDeploy) {
         $detectorEnvVar = "BUDDHA_MODEL=$fnModel"
         if ($BuddhaRefineModel -and $BuddhaRefineModel.Trim() -ne "") {
             $extraBuddhaRefine = $BuddhaRefineModel.Trim()
+        }
+        if ($BuddhaAllowModelFallback -and $BuddhaAllowModelFallback.Trim() -ne "") {
+            $extraBuddhaFallback = $BuddhaAllowModelFallback.Trim()
+        }
+        $fnTimeout = "180.0"
+    } elseif ($fnName -eq "ninerouter-buddha-auto") {
+        if ($BuddhaAutoModel -and $BuddhaAutoModel.Trim() -ne "") {
+            $fnModel = $BuddhaAutoModel.Trim()
+        } elseif ($BuddhaModel -and $BuddhaModel.Trim() -ne "") {
+            $fnModel = $BuddhaModel.Trim()
+        }
+        $detectorEnvVar = "BUDDHA_AUTO_MODEL=$fnModel"
+        if ($BuddhaAutoRefineModel -and $BuddhaAutoRefineModel.Trim() -ne "") {
+            $extraBuddhaRefine = $BuddhaAutoRefineModel.Trim()
+        } elseif ($BuddhaRefineModel -and $BuddhaRefineModel.Trim() -ne "") {
+            $extraBuddhaRefine = $BuddhaRefineModel.Trim()
+        }
+        if ($BuddhaAutoQuality -and $BuddhaAutoQuality.Trim() -ne "") {
+            $extraBuddhaAutoQuality = $BuddhaAutoQuality.Trim()
         }
         if ($BuddhaAllowModelFallback -and $BuddhaAllowModelFallback.Trim() -ne "") {
             $extraBuddhaFallback = $BuddhaAllowModelFallback.Trim()
@@ -485,6 +558,9 @@ foreach ($fn in $functionsToDeploy) {
         }
         if ($extraBuddhaFallback) {
             $extraEnvBash += "--env `"BUDDHA_ALLOW_MODEL_FALLBACK=$extraBuddhaFallback`" "
+        }
+        if ($extraBuddhaAutoQuality) {
+            $extraEnvBash += "--env `"BUDDHA_AUTO_QUALITY=$extraBuddhaAutoQuality`" "
         }
         if ($resolvedBuildSha -and $resolvedBuildSha -ne "unknown") {
             $extraEnvBash += "--env `"TOOL_CVAT_BUILD_SHA=$resolvedBuildSha`" "
@@ -553,6 +629,7 @@ nuctl deploy $fnName \
         if ($extraVf50Refine) { $deployArgs += @("--env", "VF50_REFINE_MODEL=$extraVf50Refine") }
         if ($extraBuddhaRefine) { $deployArgs += @("--env", "BUDDHA_REFINE_MODEL=$extraBuddhaRefine") }
         if ($extraBuddhaFallback) { $deployArgs += @("--env", "BUDDHA_ALLOW_MODEL_FALLBACK=$extraBuddhaFallback") }
+        if ($extraBuddhaAutoQuality) { $deployArgs += @("--env", "BUDDHA_AUTO_QUALITY=$extraBuddhaAutoQuality") }
         if ($resolvedBuildSha -and $resolvedBuildSha -ne "unknown") { $deployArgs += @("--env", "TOOL_CVAT_BUILD_SHA=$resolvedBuildSha") }
         if ($NineRouterKey) { $deployArgs += @("--env", "NINEROUTER_KEY=$NineRouterKey") }
         if ($CvatWebhookSecret) { $deployArgs += @("--env", "CVAT_WEBHOOK_SECRET=$CvatWebhookSecret") }

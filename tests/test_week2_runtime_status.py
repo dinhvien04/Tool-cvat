@@ -323,39 +323,3 @@ class TestAnalyzeFunctionRuntime:
             assert strict_rep["ready"] is False
             assert any("BUILD SHA MISSING" in d for d in strict_rep["drift_details"])
 
-    def test_legacy_monolithic_face_detection(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        vf50_cfg = {
-            "container_name": "nuclio-nuclio-ninerouter-face-vf50",
-            "function_name": "ninerouter-face-vf50",
-            "yaml_path": repo_root / "serverless" / "ninerouter-face-vf50" / "nuclio" / "function.yaml",
-            "expected_labels": 7,
-        }
-
-        legacy_spec = [{"name": "face", "type": "skeleton", "sublabels": [{"id": i, "name": str(i)} for i in range(50)]}]
-        mock_inspect = {
-            "State": {
-                "Status": "running",
-                "Health": {"Status": "healthy"},
-            },
-            "NetworkSettings": {"Ports": {}},
-            "Config": {
-                "Env": [],
-                "Labels": {
-                    "nuclio.io/annotations": json.dumps({
-                        "spec": json.dumps(legacy_spec),
-                    }),
-                },
-            },
-        }
-
-        with mock.patch("scripts.week2_runtime_status.get_container_inspect", return_value=mock_inspect), \
-             mock.patch("scripts.week2_runtime_status.get_git_head_sha", return_value="abc"), \
-             mock.patch("scripts.week2_runtime_status.get_nuclio_dashboard_spec", return_value=legacy_spec), \
-             mock.patch("scripts.week2_runtime_status.get_cvat_lambda_spec", return_value=legacy_spec):
-
-            report = analyze_function_runtime("vf50", vf50_cfg)
-            assert report["deployed_spec_type"] == "LEGACY_MONOLITHIC_FACE"
-            assert report["spec_drift"] is True
-            assert report["ready"] is False
-            assert any("CRITICAL SPEC DRIFT" in d for d in report["drift_details"])

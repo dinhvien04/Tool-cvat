@@ -59,6 +59,18 @@ BUDDHA_CORE: Tuple[str, ...] = (
     "config/buddha_multilimbs.yaml",
 )
 
+# Modules and config files needed ONLY by Buddha Auto detector
+BUDDHA_AUTO_CORE: Tuple[str, ...] = (
+    "core/week2_schema.py",
+    "core/pose_face_schema.py",
+    "core/skeleton_contract.py",
+    "core/buddha_contract.py",
+    "core/buddha_auto_contract.py",
+    "config/week2_pose17.yaml",
+    "config/week2_vf50.yaml",
+    "config/buddha_multilimbs.yaml",
+)
+
 # Modules and config files needed ONLY by the active Three Detectors (Rectangle, Polygon, Polyline)
 THREE_DETECTOR_CORE: Tuple[str, ...] = (
     "app/models.py",
@@ -70,41 +82,28 @@ THREE_DETECTOR_CORE: Tuple[str, ...] = (
 
 # Active serverless functions
 SERVERLESS_TARGETS: Tuple[str, ...] = (
-    "serverless/ninerouter-rectangle-mask/nuclio",
-    "serverless/ninerouter-polygon-mask/nuclio",
-    "serverless/ninerouter-polyline/nuclio",
+    "serverless/ninerouter-box/nuclio",
+    "serverless/ninerouter-polygon/nuclio",
+    "serverless/ninerouter-mask/nuclio",
+    "serverless/ninerouter-box-3d/nuclio",
     "serverless/ninerouter-human-pose-17/nuclio",
-    "serverless/ninerouter-face-vf50/nuclio",
-    "serverless/ninerouter-buddha-multilimbs/nuclio",
 )
 
 TARGET_MANIFESTS: Dict[str, Tuple[str, ...]] = {
-    "serverless/ninerouter-rectangle-mask/nuclio": COMMON_CORE + THREE_DETECTOR_CORE,
-    "serverless/ninerouter-polygon-mask/nuclio": COMMON_CORE + THREE_DETECTOR_CORE,
-    "serverless/ninerouter-polyline/nuclio": COMMON_CORE + THREE_DETECTOR_CORE,
+    "serverless/ninerouter-box/nuclio": COMMON_CORE + THREE_DETECTOR_CORE,
+    "serverless/ninerouter-polygon/nuclio": COMMON_CORE + THREE_DETECTOR_CORE,
+    "serverless/ninerouter-mask/nuclio": COMMON_CORE + THREE_DETECTOR_CORE,
+    "serverless/ninerouter-box-3d/nuclio": COMMON_CORE + THREE_DETECTOR_CORE,
     "serverless/ninerouter-human-pose-17/nuclio": COMMON_CORE + WEEK2_CORE,
-    "serverless/ninerouter-face-vf50/nuclio": COMMON_CORE + WEEK2_CORE,
-    "serverless/ninerouter-buddha-multilimbs/nuclio": COMMON_CORE + BUDDHA_CORE,
 }
 
 TARGET_GROUPS: Dict[str, Tuple[str, ...]] = {
     "all": SERVERLESS_TARGETS,
-    "three": (
-        "serverless/ninerouter-rectangle-mask/nuclio",
-        "serverless/ninerouter-polygon-mask/nuclio",
-        "serverless/ninerouter-polyline/nuclio",
-    ),
-    "week2": (
-        "serverless/ninerouter-human-pose-17/nuclio",
-        "serverless/ninerouter-face-vf50/nuclio",
-    ),
-    "rectangle-mask": ("serverless/ninerouter-rectangle-mask/nuclio",),
-    "polygon-mask": ("serverless/ninerouter-polygon-mask/nuclio",),
-    "polyline": ("serverless/ninerouter-polyline/nuclio",),
     "human-pose-17": ("serverless/ninerouter-human-pose-17/nuclio",),
-    "face-vf50": ("serverless/ninerouter-face-vf50/nuclio",),
-    "buddha": ("serverless/ninerouter-buddha-multilimbs/nuclio",),
-    "buddha-multilimbs": ("serverless/ninerouter-buddha-multilimbs/nuclio",),
+    "box": ("serverless/ninerouter-box/nuclio",),
+    "box-3d": ("serverless/ninerouter-box-3d/nuclio",),
+    "polygon": ("serverless/ninerouter-polygon/nuclio",),
+    "mask": ("serverless/ninerouter-mask/nuclio",),
 }
 
 
@@ -113,9 +112,7 @@ def get_target_manifest(rel_target: str) -> Tuple[str, ...]:
     norm_target = rel_target.replace("\\", "/").rstrip("/")
     if norm_target in TARGET_MANIFESTS:
         return TARGET_MANIFESTS[norm_target]
-    if "buddha" in norm_target:
-        return COMMON_CORE + BUDDHA_CORE
-    if "human-pose-17" in norm_target or "face-vf50" in norm_target:
+    if "human-pose-17" in norm_target:
         return COMMON_CORE + WEEK2_CORE
     return COMMON_CORE + THREE_DETECTOR_CORE
 
